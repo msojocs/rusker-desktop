@@ -1,0 +1,1245 @@
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    process::{Output, Stdio},
+    sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
+};
+
+use directories::ProjectDirs;
+use sha2::{Digest, Sha256};
+use tokio::{
+    io::AsyncWriteExt,
+    process::{Child, Command},
+    time::timeout,
+};
+
+use super::RuntimeHostError;
+
+pub const MANAGED_DISTRO_NAME: &str = "rusker";
+/// Windows-side endpoint, served by the in-app proxy (like Docker Desktop's
+/// `\\.\pipe\docker_engine`).
+pub const MANAGED_PIPE: &str = r"\\.\pipe\rusker_engine";
+/// `DOCKER_HOST` value for Windows tools such as `docker.exe`.
+pub const MANAGED_DOCKER_HOST: &str = "npipe:////./pipe/rusker_engine";
+/// `DOCKER_HOST` value inside integrated WSL2 distributions. `/mnt/wsl` is a
+/// tmpfs shared by every WSL2 distribution in the same utility VM.
+pub const WSL_DOCKER_HOST: &str = "unix:///mnt/wsl/rusker/docker.sock";
+const MANAGED_MARKER: &str = "/etc/rusker-managed";
+const MANAGED_RECEIPT: &str = "rusker-wsl2-v1\n";
+const NVIDIA_TOOLKIT_VERSION: &str = "1.20.1-1";
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+const READY_TIMEOUT: Duration = Duration::from_secs(90);
+const DOCKERD_STOP_TIMEOUT: Duration = Duration::from_secs(45);
+
+const SETUP_SCRIPT: &str = r#"set -eu
+export DEBIAN_FRONTEND=noninteractive
+printf 'rusker-wsl2-v1\n' > /etc/rusker-managed
+printf 'rusker\n' > /etc/hostname
+printf '[boot]\nsystemd=false\n\n[network]\nhostname = rusker\n' > /etc/wsl.conf
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl gnupg docker.io docker-compose-v2 docker-buildx
+install -m 0755 -d /usr/share/keyrings
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list -o /tmp/rusker-nvidia-container-toolkit.list
+sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' /tmp/rusker-nvidia-container-toolkit.list > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+rm -f /tmp/rusker-nvidia-container-toolkit.list
+apt-get update
+apt-get install -y --no-install-recommends nvidia-container-toolkit=$NVIDIA_CONTAINER_TOOLKIT_VERSION nvidia-container-toolkit-base=$NVIDIA_CONTAINER_TOOLKIT_VERSION libnvidia-container-tools=$NVIDIA_CONTAINER_TOOLKIT_VERSION libnvidia-container1=$NVIDIA_CONTAINER_TOOLKIT_VERSION
+mkdir -p /etc/docker
+nvidia-ctk runtime configure --runtime=docker
+"#;
+
+/// Long-lived supervisor, run through a `wsl.exe` session that the backend
+/// keeps open (WSL2 terminates a distribution ~10 s after its last session
+/// closes, regardless of background processes). If a dockerd from an earlier
+/// session is still alive, the supervisor attaches to it instead of starting a
+/// second daemon. No TCP listener is opened.
+const SUPERVISOR_SCRIPT: &str = r#"set -u
+LOG=/var/log/rusker-dockerd.log
+SHARED=/mnt/wsl/rusker
+mkdir -p /var/log /var/run "$SHARED"
+if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG")" -gt 10485760 ]; then
+    mv -f "$LOG" "$LOG.1"
+fi
+exec >>"$LOG" 2>&1
+echo "[rusker] supervisor started $(date -Is)"
+pid=$(cat /var/run/docker.pid 2>/dev/null || true)
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && grep -qx dockerd "/proc/$pid/comm" 2>/dev/null; then
+    echo "[rusker] attaching to running dockerd $pid"
+    while kill -0 "$pid" 2>/dev/null; do sleep 2; done
+    echo "[rusker] dockerd $pid exited"
+    exit 0
+fi
+(
+    i=0
+    while [ "$i" -lt 240 ]; do
+        if [ -S "$SHARED/docker.sock" ]; then
+            chmod 0666 "$SHARED/docker.sock"
+            exit 0
+        fi
+        sleep 0.5
+        i=$((i + 1))
+    done
+) &
+exec /usr/bin/dockerd --host=unix:///var/run/docker.sock --host="unix://$SHARED/docker.sock"
+"#;
+
+const STOP_SCRIPT: &str = r#"set -u
+pid=$(cat /var/run/docker.pid 2>/dev/null || true)
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid"
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 40 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+fi
+"#;
+
+/// Runs inside the managed distribution. `$1` is `fingerprint` or `archive`.
+const MANAGED_CLI_SCRIPT: &str = r#"set -eu
+mode=$1
+cd /
+set -- usr/bin/docker
+for plugin in docker-compose docker-buildx; do
+    if [ -x "usr/libexec/docker/cli-plugins/$plugin" ]; then
+        set -- "$@" "usr/libexec/docker/cli-plugins/$plugin"
+    fi
+done
+case "$mode" in
+    fingerprint) sha256sum "$@" | sha256sum | cut -c1-64 ;;
+    archive) exec tar -cf - "$@" ;;
+    *) exit 64 ;;
+esac
+"#;
+
+/// Prints the installed fingerprint only when the integration is intact and
+/// already targets the shared socket.
+const INTEGRATION_STATE_SCRIPT: &str = r#"if [ -f /usr/local/lib/rusker/integrated ] \
+    && [ -f /usr/local/bin/docker ] \
+    && grep -q 'RUSKER_MANAGED_DOCKER_WRAPPER' /usr/local/bin/docker \
+    && grep -q 'unix:///mnt/wsl/rusker/docker.sock' /usr/local/bin/docker; then
+    cat /usr/local/lib/rusker/fingerprint 2>/dev/null || true
+fi
+"#;
+
+/// Runs inside the target distribution with a tar archive of the managed CLI
+/// on stdin. `$1` is the managed CLI fingerprint.
+const INSTALL_CLI_SCRIPT: &str = r#"set -eu
+fingerprint=$1
+if [ -e /usr/local/bin/docker ] || [ -L /usr/local/bin/docker ]; then
+    if [ ! -f /usr/local/lib/rusker/integrated ] || ! grep -q 'RUSKER_MANAGED_DOCKER_WRAPPER' /usr/local/bin/docker; then
+        echo '/usr/local/bin/docker 已存在或已被修改，拒绝覆盖' >&2
+        exit 73
+    fi
+fi
+staging=$(mktemp -d)
+trap 'rm -rf "$staging"' EXIT
+tar -xf - -C "$staging"
+mkdir -p /usr/local/lib/rusker/cli-plugins /usr/local/bin /usr/local/lib/docker/cli-plugins
+install -m 0755 "$staging/usr/bin/docker" /usr/local/lib/rusker/docker
+for plugin in docker-compose docker-buildx; do
+    source="$staging/usr/libexec/docker/cli-plugins/$plugin"
+    target="/usr/local/lib/rusker/cli-plugins/$plugin"
+    link="/usr/local/lib/docker/cli-plugins/$plugin"
+    [ -f "$source" ] || continue
+    install -m 0755 "$source" "$target"
+    if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
+        continue
+    fi
+    if [ -e "$link" ] || [ -L "$link" ]; then
+        echo "$link 已存在，保留发行版自带的 $plugin" >&2
+        continue
+    fi
+    ln -s "$target" "$link"
+done
+cat > /usr/local/bin/docker.rusker-new <<'RUSKER_WRAPPER'
+#!/bin/sh
+# RUSKER_MANAGED_DOCKER_WRAPPER
+if [ -z "${DOCKER_HOST:-}" ] && [ -z "${DOCKER_CONTEXT:-}" ]; then
+    DOCKER_HOST='unix:///mnt/wsl/rusker/docker.sock'
+    export DOCKER_HOST
+fi
+exec /usr/local/lib/rusker/docker "$@"
+RUSKER_WRAPPER
+chmod 0755 /usr/local/bin/docker.rusker-new
+mv -f /usr/local/bin/docker.rusker-new /usr/local/bin/docker
+printf '%s\n' "$fingerprint" > /usr/local/lib/rusker/fingerprint
+printf 'rusker-wsl2-integration-v2\n' > /usr/local/lib/rusker/integrated
+"#;
+
+const REMOVE_CLI_SCRIPT: &str = r#"set -eu
+if [ ! -f /usr/local/lib/rusker/integrated ]; then
+    exit 0
+fi
+if [ -e /usr/local/bin/docker ] || [ -L /usr/local/bin/docker ]; then
+    if ! grep -q 'RUSKER_MANAGED_DOCKER_WRAPPER' /usr/local/bin/docker; then
+        echo '/usr/local/bin/docker 已被其他程序修改，保留该文件' >&2
+        exit 74
+    fi
+    rm -f /usr/local/bin/docker
+fi
+for plugin in docker-compose docker-buildx; do
+    link="/usr/local/lib/docker/cli-plugins/$plugin"
+    if [ -L "$link" ] && [ "$(readlink "$link")" = "/usr/local/lib/rusker/cli-plugins/$plugin" ]; then
+        rm -f "$link"
+    fi
+    rm -f "/usr/local/lib/rusker/cli-plugins/$plugin"
+done
+rmdir /usr/local/lib/docker/cli-plugins /usr/local/lib/docker 2>/dev/null || true
+rm -f /usr/local/lib/rusker/docker /usr/local/lib/rusker/docker.new /usr/local/lib/rusker/fingerprint /usr/local/lib/rusker/integrated
+rmdir /usr/local/lib/rusker/cli-plugins /usr/local/lib/rusker 2>/dev/null || true
+"#;
+
+const GPU_PROBE_SCRIPT: &str = r#"set -eu
+if [ ! -e /dev/dxg ]; then
+    echo '未检测到 /dev/dxg；请确认 Windows NVIDIA 驱动支持 WSL2' >&2
+    exit 1
+fi
+if [ ! -x /usr/bin/nvidia-ctk ]; then
+    echo 'NVIDIA Container Toolkit 未安装，请修复运行环境' >&2
+    exit 1
+fi
+/usr/lib/wsl/lib/nvidia-smi --query-gpu=name --format=csv,noheader
+"#;
+
+#[derive(Clone, Debug, Default)]
+pub struct NvidiaGpuStatus {
+    pub available: bool,
+    pub name: Option<String>,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct WslDistribution {
+    pub name: String,
+    pub state: String,
+    pub is_default: bool,
+    pub integration_enabled: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeHostSnapshot {
+    pub supported: bool,
+    pub installed: bool,
+    pub running: bool,
+    pub engine_ready: bool,
+    pub gpu: NvidiaGpuStatus,
+    pub distributions: Vec<WslDistribution>,
+    pub warnings: Vec<String>,
+}
+
+impl Default for RuntimeHostSnapshot {
+    fn default() -> Self {
+        Self {
+            supported: cfg!(windows),
+            installed: false,
+            running: false,
+            engine_ready: false,
+            gpu: NvidiaGpuStatus::default(),
+            distributions: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+/// The backend-held `wsl.exe` session that runs dockerd and keeps the managed
+/// distribution alive. Dropping the child kills `wsl.exe` (`kill_on_drop`).
+#[derive(Default)]
+pub(crate) struct EngineSession {
+    child: Mutex<Option<Child>>,
+}
+
+impl EngineSession {
+    fn guard(&self) -> MutexGuard<'_, Option<Child>> {
+        self.child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        let mut guard = self.guard();
+        let alive = match guard.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        };
+        if !alive {
+            *guard = None;
+        }
+        alive
+    }
+
+    fn replace(&self, child: Child) {
+        *self.guard() = Some(child);
+    }
+
+    fn take(&self) -> Option<Child> {
+        self.guard().take()
+    }
+}
+
+/// Last error from the named pipe proxy, surfaced as a snapshot warning.
+#[derive(Default)]
+pub(crate) struct ProxyStatus {
+    error: Mutex<Option<String>>,
+}
+
+impl ProxyStatus {
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn set_error(&self, message: String) {
+        *self.error.lock().unwrap_or_else(|p| p.into_inner()) = Some(message);
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn clear(&self) {
+        *self.error.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    fn error(&self) -> Option<String> {
+        self.error.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+}
+
+#[derive(Clone)]
+pub struct WslHost {
+    root: PathBuf,
+    session: Arc<EngineSession>,
+    proxy: Arc<ProxyStatus>,
+}
+
+impl WslHost {
+    pub fn discover() -> Result<Self, RuntimeHostError> {
+        let root = if let Some(path) = std::env::var_os("RUSKER_DATA_DIR") {
+            PathBuf::from(path).join("runtime-host")
+        } else {
+            ProjectDirs::from("dev", "Rusker", "Rusker Desktop")
+                .ok_or_else(|| RuntimeHostError::State("无法确定应用数据目录".into()))?
+                .data_local_dir()
+                .join("runtime-host")
+        };
+        Ok(Self {
+            root,
+            session: Arc::default(),
+            proxy: Arc::default(),
+        })
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn session(&self) -> Arc<EngineSession> {
+        self.session.clone()
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn proxy_status(&self) -> Arc<ProxyStatus> {
+        self.proxy.clone()
+    }
+
+    pub async fn snapshot(
+        &self,
+        integrations: &BTreeMap<String, bool>,
+    ) -> Result<RuntimeHostSnapshot, RuntimeHostError> {
+        ensure_windows()?;
+        let distros = list_distributions().await?;
+        let managed = distros
+            .iter()
+            .find(|distribution| distribution.name == MANAGED_DISTRO_NAME);
+        if managed.is_some() && !self.receipt_valid() {
+            return Err(RuntimeHostError::Conflict(format!(
+                "检测到同名 WSL 发行版“{MANAGED_DISTRO_NAME}”，但没有 Rusker 所有权标记；为避免误操作用户环境，已停止管理操作"
+            )));
+        }
+        let installed = managed.is_some();
+        let running = managed
+            .map(|distribution| distribution.state.eq_ignore_ascii_case("running"))
+            .unwrap_or(false);
+        let session_alive = self.session.is_running();
+        let engine_ready = installed && running && session_alive && engine_ping().await.is_ok();
+        let gpu = if engine_ready {
+            probe_gpu().await
+        } else {
+            NvidiaGpuStatus {
+                detail: "受管 Engine 未运行".into(),
+                ..NvidiaGpuStatus::default()
+            }
+        };
+        let mut warnings = Vec::new();
+        if let Some(error) = self.proxy.error() {
+            warnings.push(error);
+        }
+        if installed && running && !engine_ready {
+            warnings.push(if session_alive {
+                "受管 Engine 尚未就绪；请稍候刷新，或查看 dockerd 日志".into()
+            } else {
+                "专用发行版正在运行，但没有由本应用持有的 Engine 会话；点击“启动”接管".into()
+            });
+        }
+        let distributions = distros
+            .into_iter()
+            .filter(|distribution| {
+                distribution.version == 2
+                    && distribution.name != MANAGED_DISTRO_NAME
+                    && !matches!(
+                        distribution.name.as_str(),
+                        "docker-desktop" | "docker-desktop-data"
+                    )
+            })
+            .map(|distribution| WslDistribution {
+                integration_enabled: integrations
+                    .get(&distribution.name)
+                    .copied()
+                    .unwrap_or(false),
+                name: distribution.name,
+                state: distribution.state,
+                is_default: distribution.is_default,
+            })
+            .collect();
+        Ok(RuntimeHostSnapshot {
+            supported: true,
+            installed,
+            running,
+            engine_ready,
+            gpu,
+            distributions,
+            warnings,
+        })
+    }
+
+    pub async fn install(&self) -> Result<(), RuntimeHostError> {
+        ensure_windows()?;
+        let exists = list_distributions()
+            .await?
+            .iter()
+            .any(|distribution| distribution.name == MANAGED_DISTRO_NAME);
+        if exists {
+            self.ensure_owned().await?;
+            // Repair upgrades packages; never do that under a live daemon.
+            self.stop_engine().await;
+        } else {
+            let rootfs = self.ensure_rootfs().await?;
+            let install_dir = self.root.join("distro");
+            prepare_empty_directory(&install_dir)?;
+            let mut command = wsl_command();
+            command
+                .arg("--import")
+                .arg(MANAGED_DISTRO_NAME)
+                .arg(&install_dir)
+                .arg(&rootfs)
+                .args(["--version", "2"]);
+            if let Err(error) = execute(command, "导入 Rusker WSL2 发行版", INSTALL_TIMEOUT).await
+            {
+                let _ = fs::remove_dir_all(&install_dir);
+                return Err(error);
+            }
+            if let Err(error) = self.write_receipt() {
+                let mut unregister = wsl_command();
+                unregister.args(["--unregister", MANAGED_DISTRO_NAME]);
+                let _ = execute(unregister, "回滚未登记的发行版", COMMAND_TIMEOUT).await;
+                return Err(error);
+            }
+        }
+
+        let setup_script = rendered_setup_script();
+        let mut setup = managed_command("root");
+        setup.arg("/bin/sh").arg("-c").arg(setup_script);
+        execute(
+            setup,
+            "安装 Docker 与 NVIDIA Container Toolkit",
+            INSTALL_TIMEOUT,
+        )
+        .await?;
+        self.ensure_owned().await?;
+        let mut terminate = wsl_command();
+        terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
+        execute(terminate, "应用专用发行版配置", COMMAND_TIMEOUT).await?;
+        self.start_engine().await
+    }
+
+    pub async fn start(&self) -> Result<(), RuntimeHostError> {
+        self.ensure_owned().await?;
+        self.start_engine().await
+    }
+
+    /// Docker Desktop-style launch: start the engine automatically when the
+    /// managed environment is installed but not running.
+    pub async fn startup(
+        &self,
+        integrations: &BTreeMap<String, bool>,
+    ) -> Result<RuntimeHostSnapshot, RuntimeHostError> {
+        let snapshot = self.snapshot(integrations).await?;
+        if !snapshot.installed || snapshot.engine_ready {
+            return Ok(snapshot);
+        }
+        self.start().await?;
+        self.snapshot_after_integration(integrations).await
+    }
+
+    pub async fn stop(&self) -> Result<(), RuntimeHostError> {
+        self.ensure_owned().await?;
+        self.stop_engine().await;
+        let mut command = wsl_command();
+        command.args(["--terminate", MANAGED_DISTRO_NAME]);
+        execute(command, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await?;
+        Ok(())
+    }
+
+    /// Graceful shutdown on application exit. Only stops an engine whose
+    /// session this process holds; the distribution then idles out by itself.
+    pub async fn shutdown(&self) {
+        if self.session.is_running() {
+            self.stop_engine().await;
+        }
+    }
+
+    pub async fn snapshot_after_integration(
+        &self,
+        integrations: &BTreeMap<String, bool>,
+    ) -> Result<RuntimeHostSnapshot, RuntimeHostError> {
+        let mut warnings = Vec::new();
+        for distribution in integrations
+            .iter()
+            .filter(|(_, enabled)| **enabled)
+            .map(|(name, _)| name)
+        {
+            if let Err(error) = self.set_integration(distribution, true).await {
+                warnings.push(format!("恢复 {distribution} 集成失败：{error}"));
+            }
+        }
+        let mut snapshot = self.snapshot(integrations).await?;
+        snapshot.warnings.extend(warnings);
+        Ok(snapshot)
+    }
+
+    pub async fn set_integration(
+        &self,
+        distribution: &str,
+        enabled: bool,
+    ) -> Result<(), RuntimeHostError> {
+        self.ensure_owned().await?;
+        let distros = list_distributions().await?;
+        let Some(target) = distros.iter().find(|candidate| {
+            candidate.name == distribution && candidate.name != MANAGED_DISTRO_NAME
+        }) else {
+            return Err(RuntimeHostError::Conflict(format!(
+                "WSL 发行版“{distribution}”不存在"
+            )));
+        };
+        if target.version != 2 {
+            return Err(RuntimeHostError::Conflict(format!(
+                "“{distribution}”不是 WSL2 发行版"
+            )));
+        }
+        if enabled {
+            engine_ping()
+                .await
+                .map_err(|message| RuntimeHostError::Command {
+                    action: "检查受管 Engine".into(),
+                    message,
+                })?;
+            self.copy_managed_cli(distribution).await
+        } else {
+            let mut command = wsl_command_for(distribution, "root");
+            command.arg("/bin/sh").arg("-c").arg(REMOVE_CLI_SCRIPT);
+            execute(
+                command,
+                &format!("停用 {distribution} 集成"),
+                COMMAND_TIMEOUT,
+            )
+            .await?;
+            Ok(())
+        }
+    }
+
+    async fn ensure_owned(&self) -> Result<(), RuntimeHostError> {
+        if !self.receipt_valid() {
+            return Err(RuntimeHostError::Conflict(
+                "专用发行版没有 Rusker 本地所有权记录，拒绝执行管理操作".into(),
+            ));
+        }
+        let mut command = managed_command("root");
+        command.args(["/usr/bin/test", "-f", MANAGED_MARKER]);
+        execute(command, "验证专用发行版标记", COMMAND_TIMEOUT).await?;
+        Ok(())
+    }
+
+    async fn start_engine(&self) -> Result<(), RuntimeHostError> {
+        if !self.session.is_running() {
+            let mut command = managed_command("root");
+            command
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(SUPERVISOR_SCRIPT)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let child = command
+                .spawn()
+                .map_err(|source| RuntimeHostError::Command {
+                    action: "启动受管 Docker Engine 会话".into(),
+                    message: source.to_string(),
+                })?;
+            self.session.replace(child);
+        }
+        self.wait_until_ready().await
+    }
+
+    /// SIGTERM dockerd (so containers stop cleanly), then release the session.
+    async fn stop_engine(&self) {
+        let mut command = managed_command("root");
+        command.arg("/bin/sh").arg("-c").arg(STOP_SCRIPT);
+        let _ = execute(command, "停止 dockerd", DOCKERD_STOP_TIMEOUT).await;
+        if let Some(mut child) = self.session.take() {
+            if timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+            }
+        }
+    }
+
+    async fn wait_until_ready(&self) -> Result<(), RuntimeHostError> {
+        let started = std::time::Instant::now();
+        let mut last_error = String::new();
+        while started.elapsed() < READY_TIMEOUT {
+            if !self.session.is_running() {
+                return Err(RuntimeHostError::Command {
+                    action: "启动受管 Docker Engine".into(),
+                    message: format!("Engine 会话已退出。最近日志：\n{}", engine_log_tail().await),
+                });
+            }
+            match engine_ping().await {
+                Ok(()) => return Ok(()),
+                Err(error) => last_error = error,
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Err(RuntimeHostError::Command {
+            action: "等待受管 Engine 就绪".into(),
+            message: format!("{last_error}。最近日志：\n{}", engine_log_tail().await),
+        })
+    }
+
+    /// Copies the managed Docker CLI (plus Compose/Buildx plugins) into the
+    /// target distribution, streaming a tar archive between the two
+    /// `wsl.exe` processes. Skipped when the installed fingerprint matches.
+    async fn copy_managed_cli(&self, distribution: &str) -> Result<(), RuntimeHostError> {
+        let mut fingerprint = managed_command("root");
+        fingerprint
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(MANAGED_CLI_SCRIPT)
+            .args(["rusker-cli", "fingerprint"]);
+        let fingerprint = decode(
+            &execute(fingerprint, "计算受管 Docker CLI 指纹", COMMAND_TIMEOUT)
+                .await?
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        if fingerprint.len() != 64 {
+            return Err(RuntimeHostError::State(format!(
+                "受管 Docker CLI 指纹无效：{fingerprint}"
+            )));
+        }
+
+        let mut state = wsl_command_for(distribution, "root");
+        state.arg("/bin/sh").arg("-c").arg(INTEGRATION_STATE_SCRIPT);
+        let installed = execute(
+            state,
+            &format!("检查 {distribution} 集成状态"),
+            COMMAND_TIMEOUT,
+        )
+        .await
+        .map(|output| decode(&output.stdout).trim().to_string())
+        .unwrap_or_default();
+        if installed == fingerprint {
+            return Ok(());
+        }
+
+        let mut source = managed_command("root");
+        source
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(MANAGED_CLI_SCRIPT)
+            .args(["rusker-cli", "archive"]);
+        let mut target = wsl_command_for(distribution, "root");
+        target
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(INSTALL_CLI_SCRIPT)
+            .arg("rusker-integration")
+            .arg(&fingerprint);
+        stream_between(
+            source,
+            target,
+            &format!("启用 {distribution} 集成"),
+            TRANSFER_TIMEOUT,
+        )
+        .await
+    }
+
+    fn receipt_path(&self) -> PathBuf {
+        self.root.join("managed-distro")
+    }
+
+    fn receipt_valid(&self) -> bool {
+        fs::read_to_string(self.receipt_path())
+            .map(|content| content == MANAGED_RECEIPT)
+            .unwrap_or(false)
+    }
+
+    fn write_receipt(&self) -> Result<(), RuntimeHostError> {
+        fs::create_dir_all(&self.root).map_err(|source| RuntimeHostError::Io {
+            action: "创建运行环境数据目录",
+            source,
+        })?;
+        fs::write(self.receipt_path(), MANAGED_RECEIPT).map_err(|source| RuntimeHostError::Io {
+            action: "写入专用发行版所有权记录",
+            source,
+        })
+    }
+
+    async fn ensure_rootfs(&self) -> Result<PathBuf, RuntimeHostError> {
+        let spec = rootfs_spec(std::env::consts::ARCH)?;
+        let directory = self.root.join("rootfs");
+        fs::create_dir_all(&directory).map_err(|source| RuntimeHostError::Io {
+            action: "创建 rootfs 下载目录",
+            source,
+        })?;
+        let destination = directory.join(spec.filename);
+        if destination.exists() {
+            if sha256_file(&destination)? == spec.sha256 {
+                return Ok(destination);
+            }
+            fs::remove_file(&destination).map_err(|source| RuntimeHostError::Io {
+                action: "移除校验失败的旧 rootfs",
+                source,
+            })?;
+        }
+
+        let temporary = directory.join(format!("{}.{}.partial", spec.filename, std::process::id()));
+        let mut curl = Command::new("curl.exe");
+        curl.kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            curl.creation_flags(CREATE_NO_WINDOW);
+        }
+        curl.args([
+            "--fail",
+            "--location",
+            "--retry",
+            "3",
+            "--proto",
+            "=https",
+            "--tlsv1.2",
+            "--output",
+        ])
+        .arg(&temporary)
+        .arg(spec.url);
+        if let Err(error) = execute(curl, "下载 Ubuntu WSL2 rootfs", DOWNLOAD_TIMEOUT).await {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        let checksum = sha256_file(&temporary)?;
+        if checksum != spec.sha256 {
+            let _ = fs::remove_file(&temporary);
+            return Err(RuntimeHostError::State(format!(
+                "Ubuntu rootfs SHA-256 校验失败：期望 {}，实际 {checksum}",
+                spec.sha256
+            )));
+        }
+        fs::rename(&temporary, &destination).map_err(|source| RuntimeHostError::Io {
+            action: "保存已校验的 rootfs",
+            source,
+        })?;
+        Ok(destination)
+    }
+}
+
+#[derive(Debug)]
+struct DistroInfo {
+    name: String,
+    state: String,
+    is_default: bool,
+    version: u8,
+}
+
+async fn list_distributions() -> Result<Vec<DistroInfo>, RuntimeHostError> {
+    let mut command = wsl_command();
+    command.args(["--list", "--verbose"]);
+    let output = execute(command, "枚举 WSL2 发行版", COMMAND_TIMEOUT).await?;
+    Ok(parse_distributions(&decode(&output.stdout)))
+}
+
+fn parse_distributions(output: &str) -> Vec<DistroInfo> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("NAME") {
+                return None;
+            }
+            let is_default = line.starts_with('*');
+            let columns: Vec<&str> = line
+                .split_whitespace()
+                .filter(|column| *column != "*")
+                .collect();
+            if columns.len() < 3 {
+                return None;
+            }
+            let version = columns.last()?.parse::<u8>().ok()?;
+            let name = columns[..columns.len() - 2].join(" ");
+            (!name.is_empty()).then(|| DistroInfo {
+                name,
+                state: columns[columns.len() - 2].to_string(),
+                is_default,
+                version,
+            })
+        })
+        .collect()
+}
+
+fn managed_command(user: &str) -> Command {
+    wsl_command_for(MANAGED_DISTRO_NAME, user)
+}
+
+fn wsl_command_for(distribution: &str, user: &str) -> Command {
+    let mut command = wsl_command();
+    command
+        .arg("--distribution")
+        .arg(distribution)
+        .arg("--user")
+        .arg(user)
+        .arg("--exec");
+    command
+}
+
+fn wsl_command() -> Command {
+    let mut command = Command::new("wsl.exe");
+    command.kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
+async fn execute(
+    mut command: Command,
+    action: &str,
+    duration: Duration,
+) -> Result<Output, RuntimeHostError> {
+    match timeout(duration, command.output()).await {
+        Ok(Ok(output)) => check_output(output, action),
+        Ok(Err(source)) => Err(RuntimeHostError::Command {
+            action: action.into(),
+            message: source.to_string(),
+        }),
+        Err(_) => Err(RuntimeHostError::Timeout {
+            action: action.into(),
+            seconds: duration.as_secs(),
+        }),
+    }
+}
+
+/// Pipes `source`'s stdout into `target`'s stdin without buffering the whole
+/// payload in memory.
+async fn stream_between(
+    mut source: Command,
+    mut target: Command,
+    action: &str,
+    duration: Duration,
+) -> Result<(), RuntimeHostError> {
+    source
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    target
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let spawn_error = |source: std::io::Error| RuntimeHostError::Command {
+        action: action.into(),
+        message: source.to_string(),
+    };
+    let operation = async {
+        let mut producer = source.spawn().map_err(spawn_error)?;
+        let mut consumer = target.spawn().map_err(spawn_error)?;
+        let (Some(mut output), Some(mut input)) = (producer.stdout.take(), consumer.stdin.take())
+        else {
+            return Err(RuntimeHostError::State(
+                "无法连接集成命令的标准输入输出".into(),
+            ));
+        };
+        let copy = async move {
+            let result = tokio::io::copy(&mut output, &mut input).await;
+            let _ = input.shutdown().await;
+            result
+        };
+        let (_, produced, consumed) = tokio::join!(
+            copy,
+            producer.wait_with_output(),
+            consumer.wait_with_output()
+        );
+        // The consumer's error is the meaningful one (e.g. "refusing to
+        // overwrite"); a producer failure is usually just a broken pipe.
+        check_output(consumed.map_err(spawn_error)?, action)?;
+        check_output(produced.map_err(spawn_error)?, action)?;
+        Ok(())
+    };
+    match timeout(duration, operation).await {
+        Ok(result) => result,
+        Err(_) => Err(RuntimeHostError::Timeout {
+            action: action.into(),
+            seconds: duration.as_secs(),
+        }),
+    }
+}
+
+fn check_output(output: Output, action: &str) -> Result<Output, RuntimeHostError> {
+    if output.status.success() {
+        return Ok(output);
+    }
+    let stderr = decode(&output.stderr);
+    let stdout = decode(&output.stdout);
+    let message = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    let message: String = message.chars().take(4096).collect();
+    Err(RuntimeHostError::Command {
+        action: action.into(),
+        message: format!(
+            "命令退出状态 {}{}",
+            output.status,
+            if message.is_empty() {
+                String::new()
+            } else {
+                format!("：{message}")
+            }
+        ),
+    })
+}
+
+/// One relay process per Windows pipe client: `docker system dial-stdio`
+/// proxies stdio to `/var/run/docker.sock` and turns stdin EOF into a socket
+/// half-close, which hijacked attach/exec streams need.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn dial_stdio_command() -> Command {
+    let mut command = managed_command("root");
+    command
+        .args(["/usr/bin/docker", "system", "dial-stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+/// Pings the engine end-to-end through the Windows named pipe proxy.
+#[cfg(windows)]
+async fn engine_ping() -> Result<(), String> {
+    const PING_TIMEOUT: Duration = Duration::from_secs(10);
+    let client = bollard::Docker::connect_with_named_pipe(
+        MANAGED_PIPE,
+        PING_TIMEOUT.as_secs(),
+        bollard::API_DEFAULT_VERSION,
+    )
+    .map_err(|error| error.to_string())?;
+    match timeout(PING_TIMEOUT, client.ping()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("连接受管 Engine 超时".into()),
+    }
+}
+
+#[cfg(not(windows))]
+async fn engine_ping() -> Result<(), String> {
+    Err("当前平台不支持受管 WSL2 Engine".into())
+}
+
+async fn engine_log_tail() -> String {
+    let mut command = managed_command("root");
+    command.args(["/usr/bin/tail", "-n", "20", "/var/log/rusker-dockerd.log"]);
+    match execute(command, "读取 dockerd 日志", COMMAND_TIMEOUT).await {
+        Ok(output) => decode(&output.stdout).trim().to_string(),
+        Err(error) => error.to_string(),
+    }
+}
+
+async fn probe_gpu() -> NvidiaGpuStatus {
+    let mut probe = managed_command("root");
+    probe.arg("/bin/sh").arg("-c").arg(GPU_PROBE_SCRIPT);
+    let output = match execute(probe, "检测 NVIDIA GPU", COMMAND_TIMEOUT).await {
+        Ok(output) => output,
+        Err(error) => {
+            return NvidiaGpuStatus {
+                detail: error.to_string(),
+                ..NvidiaGpuStatus::default()
+            }
+        }
+    };
+    let name = decode(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut runtimes = managed_command("root");
+    runtimes.args(["/usr/bin/docker", "info", "--format", "{{json .Runtimes}}"]);
+    let runtime_registered = execute(runtimes, "检查 NVIDIA Docker runtime", COMMAND_TIMEOUT)
+        .await
+        .ok()
+        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+        .and_then(|value| {
+            value
+                .as_object()
+                .map(|object| object.contains_key("nvidia"))
+        })
+        .unwrap_or(false);
+    if runtime_registered {
+        NvidiaGpuStatus {
+            available: true,
+            name: (!name.is_empty()).then(|| name.clone()),
+            detail: if name.is_empty() {
+                "NVIDIA runtime 已就绪".into()
+            } else {
+                format!("{name}；NVIDIA runtime 已就绪")
+            },
+        }
+    } else {
+        NvidiaGpuStatus {
+            detail: "已检测到 GPU，但 Docker 未注册 nvidia runtime；请修复运行环境".into(),
+            name: (!name.is_empty()).then_some(name),
+            available: false,
+        }
+    }
+}
+
+fn rendered_setup_script() -> String {
+    SETUP_SCRIPT.replace("$NVIDIA_CONTAINER_TOOLKIT_VERSION", NVIDIA_TOOLKIT_VERSION)
+}
+
+fn prepare_empty_directory(path: &Path) -> Result<(), RuntimeHostError> {
+    match fs::read_dir(path) {
+        Ok(mut entries) => {
+            if entries.next().is_some() {
+                return Err(RuntimeHostError::Conflict(format!(
+                    "专用发行版目录 {} 非空，拒绝覆盖",
+                    path.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(RuntimeHostError::Io {
+                action: "检查专用发行版目录",
+                source,
+            })
+        }
+    }
+    fs::create_dir_all(path).map_err(|source| RuntimeHostError::Io {
+        action: "创建专用发行版目录",
+        source,
+    })
+}
+
+fn sha256_file(path: &Path) -> Result<String, RuntimeHostError> {
+    let mut file = fs::File::open(path).map_err(|source| RuntimeHostError::Io {
+        action: "打开 rootfs 进行校验",
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| RuntimeHostError::Io {
+                action: "读取 rootfs 进行校验",
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+struct RootfsSpec {
+    filename: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+}
+
+fn rootfs_spec(architecture: &str) -> Result<RootfsSpec, RuntimeHostError> {
+    match architecture {
+        "x86_64" => Ok(RootfsSpec {
+            filename: "ubuntu-24.04-server-cloudimg-amd64-root.tar.xz",
+            url: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64-root.tar.xz",
+            sha256: "ec6972af8ea2bd05c55299d204e5ae3f91769b84cfaec7395639d236a39f9a03",
+        }),
+        "aarch64" => Ok(RootfsSpec {
+            filename: "ubuntu-24.04-server-cloudimg-arm64-root.tar.xz",
+            url: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64-root.tar.xz",
+            sha256: "b68ef0444ca56ce4f00ae7e8ccfb0c553ffbc92e4a1b14ed7dd8aa18c6d68652",
+        }),
+        other => Err(RuntimeHostError::State(format!(
+            "暂不支持 {other} 架构的 Rusker WSL2 rootfs"
+        ))),
+    }
+}
+
+fn ensure_windows() -> Result<(), RuntimeHostError> {
+    if cfg!(windows) {
+        Ok(())
+    } else {
+        Err(RuntimeHostError::Unsupported)
+    }
+}
+
+fn decode(bytes: &[u8]) -> String {
+    let looks_utf16 = bytes.starts_with(&[0xff, 0xfe])
+        || bytes.len() >= 4
+            && bytes.len().is_multiple_of(2)
+            && bytes
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .filter(|byte| **byte == 0)
+                .count()
+                >= bytes.len() / 4;
+    if looks_utf16 {
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect();
+        String::from_utf16_lossy(&units)
+            .trim_start_matches('\u{feff}')
+            .replace('\0', "")
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_utf16_distribution_list_with_spaces_in_names() {
+        let text = "  NAME            STATE      VERSION\r\n* Ubuntu 24.04    Stopped    2\r\n  legacy          Running    1\r\n";
+        let utf16: Vec<u8> = text
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        let distros = parse_distributions(&decode(&utf16));
+        assert_eq!(distros.len(), 2);
+        assert_eq!(distros[0].name, "Ubuntu 24.04");
+        assert_eq!(distros[0].state, "Stopped");
+        assert_eq!(distros[0].version, 2);
+        assert!(distros[0].is_default);
+        assert_eq!(distros[1].version, 1);
+    }
+
+    #[test]
+    fn pins_rootfs_urls_and_official_checksums() {
+        for architecture in ["x86_64", "aarch64"] {
+            let spec = rootfs_spec(architecture).expect("支持的架构");
+            assert!(spec.url.starts_with("https://cloud-images.ubuntu.com/"));
+            assert!(spec.url.ends_with(spec.filename));
+            assert_eq!(spec.sha256.len(), 64);
+            assert!(spec
+                .sha256
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()));
+        }
+        assert!(rootfs_spec("unsupported").is_err());
+    }
+
+    #[test]
+    fn renders_pinned_nvidia_toolkit_version_into_wsl_script() {
+        let script = rendered_setup_script();
+        assert!(!script.contains("$NVIDIA_CONTAINER_TOOLKIT_VERSION"));
+        assert!(script.contains(&format!(
+            "nvidia-container-toolkit={NVIDIA_TOOLKIT_VERSION}"
+        )));
+        assert!(
+            script.contains("signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg")
+        );
+    }
+
+    #[test]
+    fn verifies_file_sha256() {
+        let directory = tempfile::tempdir().expect("临时目录");
+        let path = directory.path().join("rootfs");
+        fs::write(&path, b"abc").expect("测试文件");
+        assert_eq!(
+            sha256_file(&path).expect("SHA-256"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn managed_scripts_do_not_install_a_linux_display_driver() {
+        assert!(SETUP_SCRIPT.contains("nvidia-container-toolkit"));
+        assert!(SETUP_SCRIPT.contains("nvidia-ctk runtime configure --runtime=docker"));
+        for forbidden in ["cuda-drivers", "nvidia-open", "nvidia-driver"] {
+            assert!(!SETUP_SCRIPT.contains(forbidden));
+        }
+        assert!(SETUP_SCRIPT.contains("docker-compose-v2"));
+    }
+
+    #[test]
+    fn engine_is_not_exposed_over_tcp() {
+        for script in [
+            SUPERVISOR_SCRIPT,
+            INSTALL_CLI_SCRIPT,
+            INTEGRATION_STATE_SCRIPT,
+        ] {
+            assert!(!script.contains("tcp://"));
+            assert!(!script.contains("23753"));
+        }
+        assert!(SUPERVISOR_SCRIPT.contains("--host=unix:///var/run/docker.sock"));
+        assert!(SUPERVISOR_SCRIPT.contains("SHARED=/mnt/wsl/rusker"));
+        assert!(
+            WSL_DOCKER_HOST.ends_with("/mnt/wsl/rusker/docker.sock")
+                && INSTALL_CLI_SCRIPT.contains(WSL_DOCKER_HOST)
+                && INTEGRATION_STATE_SCRIPT.contains(WSL_DOCKER_HOST)
+        );
+        assert_eq!(
+            MANAGED_DOCKER_HOST
+                .trim_start_matches("npipe://")
+                .replace('/', "\\"),
+            MANAGED_PIPE
+        );
+    }
+
+    #[test]
+    fn supervisor_runs_dockerd_in_foreground_and_reattaches() {
+        assert!(SUPERVISOR_SCRIPT.contains("exec /usr/bin/dockerd"));
+        assert!(!SUPERVISOR_SCRIPT.contains("nohup"));
+        assert!(SUPERVISOR_SCRIPT.contains("attaching to running dockerd"));
+        assert!(STOP_SCRIPT.contains("kill -TERM"));
+    }
+
+    #[test]
+    fn integration_disable_only_removes_marked_files() {
+        assert!(REMOVE_CLI_SCRIPT.contains("RUSKER_MANAGED_DOCKER_WRAPPER"));
+        assert!(REMOVE_CLI_SCRIPT.contains("/usr/local/lib/rusker/integrated"));
+        assert!(!REMOVE_CLI_SCRIPT.contains("/usr/bin/docker"));
+        assert!(!REMOVE_CLI_SCRIPT.contains("rm -rf"));
+        // Plugin links are removed only when they still point at Rusker files.
+        assert!(REMOVE_CLI_SCRIPT.contains("readlink"));
+        assert!(INSTALL_CLI_SCRIPT.contains("保留发行版自带的"));
+    }
+}

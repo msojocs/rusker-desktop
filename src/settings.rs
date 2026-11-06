@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -83,9 +84,31 @@ impl DockerProxySettings {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct WslSettings {
+    pub integrations: BTreeMap<String, bool>,
+}
+
+impl WslSettings {
+    fn normalized(&self) -> Self {
+        Self {
+            integrations: self
+                .integrations
+                .iter()
+                .filter(|(name, enabled)| {
+                    **enabled && !name.trim().is_empty() && name.trim() == name.as_str()
+                })
+                .map(|(name, enabled)| (name.clone(), *enabled))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub theme: ThemePreference,
     pub docker_proxy: DockerProxySettings,
+    pub wsl: WslSettings,
 }
 
 impl AppSettings {
@@ -97,6 +120,7 @@ impl AppSettings {
         Self {
             theme: self.theme,
             docker_proxy: self.docker_proxy.normalized(),
+            wsl: self.wsl.normalized(),
         }
     }
 }
@@ -329,6 +353,12 @@ mod tests {
         let settings = AppSettings {
             theme: ThemePreference::Dark,
             docker_proxy: proxy(),
+            wsl: WslSettings {
+                integrations: BTreeMap::from([
+                    ("Ubuntu-24.04".into(), true),
+                    ("Disabled".into(), false),
+                ]),
+            },
         };
         store.save(&settings).expect("保存设置");
         #[cfg(unix)]
@@ -347,6 +377,10 @@ mod tests {
         assert_eq!(loaded.theme, ThemePreference::Dark);
         assert_eq!(loaded.docker_proxy.http_proxy, "http://127.0.0.1:8080");
         assert_eq!(loaded.docker_proxy.no_proxy, "localhost,127.0.0.1,::1");
+        assert_eq!(
+            loaded.wsl.integrations,
+            BTreeMap::from([("Ubuntu-24.04".into(), true)])
+        );
 
         let export = store.export_proxy(&loaded.docker_proxy).expect("导出代理");
         assert_eq!(export, directory.path().join("docker-proxies.json"));

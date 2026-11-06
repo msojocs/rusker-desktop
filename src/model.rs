@@ -58,6 +58,7 @@ pub struct CreateContainerRequest {
     pub name: Option<String>,
     pub command: Vec<String>,
     pub ports: Vec<CreatePortBinding>,
+    pub nvidia_gpu: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

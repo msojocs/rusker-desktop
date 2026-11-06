@@ -1,7 +1,9 @@
 use std::{collections::HashMap, time::Duration};
 
 use bollard::{
-    models::{ContainerCreateBody, ContainerSummary, HostConfig, ImageSummary, PortBinding},
+    models::{
+        ContainerCreateBody, ContainerSummary, DeviceRequest, HostConfig, ImageSummary, PortBinding,
+    },
     query_parameters::{
         CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
         ListImagesOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
@@ -28,15 +30,44 @@ const PULL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub struct DockerEngine {
     client: Docker,
+    managed_wsl: bool,
 }
 
 impl DockerEngine {
     pub async fn connect() -> Result<Self, EngineError> {
+        #[cfg(windows)]
+        let managed_wsl = std::env::var_os("DOCKER_HOST").is_none();
+        #[cfg(not(windows))]
+        let managed_wsl = false;
+
+        #[cfg(windows)]
+        let client = if managed_wsl {
+            Docker::connect_with_named_pipe(
+                crate::runtime_host::MANAGED_PIPE,
+                CONNECT_TIMEOUT.as_secs(),
+                bollard::API_DEFAULT_VERSION,
+            )
+            .map_err(|error| EngineError::Connect(error.to_string()))?
+        } else {
+            Docker::connect_with_local_defaults()
+                .map_err(|error| EngineError::Connect(error.to_string()))?
+        };
+        #[cfg(not(windows))]
         let client = Docker::connect_with_local_defaults()
             .map_err(|error| EngineError::Connect(error.to_string()))?;
+
         let client = match timeout(CONNECT_TIMEOUT, client.negotiate_version()).await {
             Ok(Ok(client)) => client,
-            Ok(Err(error)) => return Err(EngineError::Connect(error.to_string())),
+            Ok(Err(error)) => {
+                let message = if managed_wsl {
+                    format!(
+                        "无法连接 Rusker WSL2 受管 Engine，请在设置中安装并启动运行环境：{error}"
+                    )
+                } else {
+                    error.to_string()
+                };
+                return Err(EngineError::Connect(message));
+            }
             Err(_) => {
                 return Err(EngineError::Timeout {
                     action: "连接容器引擎".into(),
@@ -44,7 +75,10 @@ impl DockerEngine {
                 });
             }
         };
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            managed_wsl,
+        })
     }
 
     pub async fn snapshot(&self) -> Result<EngineSnapshot, EngineError> {
@@ -72,7 +106,14 @@ impl DockerEngine {
 
         Ok(EngineSnapshot {
             engine: EngineInfo {
-                name: info.name.unwrap_or_else(|| "本地引擎".into()),
+                name: {
+                    let name = info.name.unwrap_or_else(|| "本地引擎".into());
+                    if self.managed_wsl {
+                        format!("Rusker WSL2 / {name}")
+                    } else {
+                        name
+                    }
+                },
                 version: version.version.unwrap_or_else(|| "未知".into()),
                 api_version: version.api_version.unwrap_or_else(|| "未知".into()),
                 operating_system: info
@@ -111,11 +152,13 @@ impl DockerEngine {
         }
         let mut exposed_ports: Vec<String> = port_bindings.keys().cloned().collect();
         exposed_ports.sort();
-        let host_config = if port_bindings.is_empty() {
+        let device_requests = nvidia_device_requests(request.nvidia_gpu);
+        let host_config = if port_bindings.is_empty() && device_requests.is_none() {
             None
         } else {
             Some(HostConfig {
-                port_bindings: Some(port_bindings),
+                port_bindings: (!port_bindings.is_empty()).then_some(port_bindings),
+                device_requests,
                 ..Default::default()
             })
         };
@@ -336,6 +379,17 @@ fn image_dto(image: ImageSummary) -> ImageDto {
     }
 }
 
+fn nvidia_device_requests(enabled: bool) -> Option<Vec<DeviceRequest>> {
+    enabled.then(|| {
+        vec![DeviceRequest {
+            driver: Some("nvidia".into()),
+            count: Some(-1),
+            capabilities: Some(vec![vec!["gpu".into()]]),
+            ..Default::default()
+        }]
+    })
+}
+
 fn needs_default_tag(reference: &str) -> bool {
     if reference.contains('@') {
         return false;
@@ -346,7 +400,21 @@ fn needs_default_tag(reference: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::needs_default_tag;
+    use super::{needs_default_tag, nvidia_device_requests};
+
+    #[test]
+    fn maps_nvidia_gpu_switch_to_all_device_requests() {
+        assert!(nvidia_device_requests(false).is_none());
+        let requests = nvidia_device_requests(true).expect("GPU 请求");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].driver.as_deref(), Some("nvidia"));
+        assert_eq!(requests[0].count, Some(-1));
+        assert_eq!(requests[0].device_ids, None);
+        assert_eq!(
+            requests[0].capabilities,
+            Some(vec![vec!["gpu".to_string()]])
+        );
+    }
 
     #[test]
     fn only_untagged_image_references_receive_latest() {

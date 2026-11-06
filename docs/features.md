@@ -13,6 +13,7 @@
 ### 引擎与概览
 
 - [x] 自动连接本机 Docker/Podman 兼容 API，并遵循 `DOCKER_HOST`
+- [x] Windows 受管 WSL2 Engine：专用发行版、named pipe 代理、`/mnt/wsl` 共享 socket，不开放 TCP
 - [x] 展示连接状态、Engine 版本、API 版本、操作系统和架构
 - [x] 展示容器总数、运行数、停止数和镜像数
 - [x] 手动刷新；连接失败时显示可读错误并允许重试
@@ -86,7 +87,9 @@
 
 ## 长期：完整桌面运行环境
 
-- [ ] Windows WSL2 发行版安装、启动、停止和资源限制
+- [x] Windows WSL2 发行版安装/修复、启动（应用启动时自动）、优雅停止，退出应用时停止 Engine
+- [x] 按发行版开启 Docker CLI、Compose、Buildx 集成
+- [ ] WSL2 资源限制、自动更新、界面卸载
 - [ ] macOS/Linux 轻量虚拟机后端
 - [ ] 无预装 Engine 时的引导安装与修复
 - [ ] 文件共享、端口转发和宿主机集成

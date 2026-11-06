@@ -8,6 +8,7 @@ pub struct ContainerDraft {
     pub name: String,
     pub command: String,
     pub ports: String,
+    pub nvidia_gpu: bool,
 }
 
 impl ContainerDraft {
@@ -19,6 +20,7 @@ impl ContainerDraft {
             name: optional_text(&self.name),
             command,
             ports: parse_ports(&self.ports)?,
+            nvidia_gpu: self.nvidia_gpu,
         };
         request.validate()?;
         Ok(request)
@@ -134,6 +136,18 @@ mod tests {
         assert_eq!(request.name, None);
         assert!(request.command.is_empty());
         assert!(request.ports.is_empty());
+        assert!(!request.nvidia_gpu);
+    }
+
+    #[test]
+    fn preserves_explicit_nvidia_gpu_request() {
+        let request = ContainerDraft {
+            nvidia_gpu: true,
+            ..draft()
+        }
+        .parse()
+        .expect("GPU 配置");
+        assert!(request.nvidia_gpu);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 Rusker Desktop 是一个使用 **Rust + [GPUI Kit](https://gpui-kit.com/)** 构建的开源容器桌面管理器。项目目标是提供类似 Docker Desktop 的常用管理体验，同时采用允许商业使用的 Apache-2.0 许可证。
 
-> 当前处于首个可运行版本阶段：连接已有的 Docker/Podman 兼容引擎，不负责安装引擎或创建 WSL2/虚拟机。
+> 当前处于首个可运行版本阶段：Windows 提供受管 WSL2 运行环境和 NVIDIA GPU 支持；Linux/macOS 连接已有 Docker/Podman 兼容引擎，不负责创建轻量虚拟机。
 
 ## 当前功能
 
@@ -10,7 +10,8 @@ Rusker Desktop 是一个使用 **Rust + [GPUI Kit](https://gpui-kit.com/)** 构�
 - 容器、运行中容器和镜像数量概览
 - 容器列表、关键字过滤、详情和最近 200 行日志
 - 容器启动、停止、重启及带确认的删除
-- 通过镜像创建并运行容器，支持名称、启动命令和 TCP 端口映射
+- 通过镜像创建并运行容器，支持名称、启动命令、TCP 端口映射和 NVIDIA GPU
+- Windows 专用 WSL2 环境安装/修复、启动/停止及各发行版集成开关
 - 镜像列表、关键字过滤、拉取及带确认的删除
 - 加载、空数据、操作中和错误状态
 - 设置界面：主题持久化、Docker Engine 拉取代理编辑与 JSON 导出
@@ -27,10 +28,10 @@ Rusker Desktop 是一个使用 **Rust + [GPUI Kit](https://gpui-kit.com/)** 构�
 | 平台 | 当前目标 | 本地连接 |
 | --- | --- | --- |
 | Linux | 主要开发与验证平台 | Docker/Podman 兼容 Unix socket |
-| Windows 10+ | 主要目标平台，使用 MSVC 工具链 | Docker 兼容 named pipe |
+| Windows 10+ | 主要目标平台，使用 MSVC 工具链 | Rusker 受管 WSL2 Engine（`npipe:////./pipe/rusker_engine`），或 `DOCKER_HOST` 指定的端点 |
 | macOS 15+ | 保留支持并纳入持续集成 | Docker 兼容 Unix socket |
 
-Windows 的 WSL2 引擎自动安装、macOS/Linux 轻量虚拟机管理尚未实现。没有现成引擎时，本应用可以展示连接错误，但不会自动修改宿主机配置。
+Windows 参照 Docker Desktop 架构：在设置页一键创建 Rusker 专用 WSL2 发行版并在其中运行 Docker Engine，由应用后台持有 Engine 会话，通过 Windows named pipe 和 `/mnt/wsl` 共享 socket 提供访问，可按发行版开启 CLI/Compose 集成并支持 NVIDIA GPU。详见 [WSL2 运行环境文档](docs/wsl2.md)。macOS/Linux 轻量虚拟机管理尚未实现。
 
 ## 快速开始
 
@@ -59,8 +60,8 @@ cargo test
 默认使用 Bollard 的本地连接发现：
 
 - Linux/macOS：通常为 `/var/run/docker.sock`
-- Windows：通常为 `//./pipe/docker_engine`
-- 设置 `DOCKER_HOST` 时遵循其配置
+- Windows：优先使用 `//./pipe/docker_engine`；未设置 `DOCKER_HOST` 且本地连接失败时，自动探测 WSL2 中的 Linux Docker Engine
+- 设置 `DOCKER_HOST` 时遵循其配置，不再回退到 WSL2
 
 Rootless Docker 或 Podman 示例：
 
@@ -76,7 +77,7 @@ cargo run
 ```text
 src/
 ├── app.rs          # GPUI 应用状态、异步任务与主界面
-├── engine/         # Tokio 执行边界与 Docker API 实现
+├── engine/         # Tokio 执行边界、Docker API 与 WSL2 后端
 ├── format.rs       # 显示格式化与过滤
 ├── model.rs        # UI 无关的数据模型
 ├── lib.rs
@@ -84,7 +85,8 @@ src/
 docs/
 ├── features.md
 ├── architecture.md
-└── development.md
+├── development.md
+└── wsl2.md
 ```
 
 设计说明见 [架构文档](docs/architecture.md)。

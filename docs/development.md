@@ -43,7 +43,18 @@ cmake --version
 cargo run
 ```
 
-默认 named pipe 为 `//./pipe/docker_engine`。WSL2 内安装 Engine 并不自动意味着 Windows 进程能访问它；首版需要已有可访问的 Docker 兼容 Windows 端点，自动配置属于后续功能。
+未设置 `DOCKER_HOST` 时，Windows 版连接 Rusker 受管 WSL2 Engine 的 named pipe `//./pipe/rusker_engine`（由应用进程内的代理提供），不会使用 Docker Desktop 的 `//./pipe/docker_engine`。设置 `DOCKER_HOST` 可改连其他引擎。受管环境的安装、生命周期与集成见 [WSL2 运行环境文档](wsl2.md)。
+
+WSL2 相关的实机测试默认跳过，需显式开启：
+
+```powershell
+# 安装/修复并启动专用发行版（会下载 rootfs 与软件包）
+$env:RUSKER_WSL_RUNTIME_INTEGRATION='1'; cargo test --test runtime_host_operations
+# 已安装时：自动启动、经 named pipe 访问、优雅关闭；可加 RUSKER_WSL_HOLD_SECS 保持运行
+$env:RUSKER_WSL_RUNTIME_LIFECYCLE='1'; cargo test --test runtime_host_operations
+# 在指定发行版启用并停用集成，并验证 docker run -i 的 stdin EOF
+$env:RUSKER_WSL_INTEGRATION_DISTRO='Ubuntu-24.04'; cargo test --test runtime_host_operations
+```
 
 ## macOS
 
@@ -93,6 +104,7 @@ cargo test
 8. 在 Windows 和 Linux 实机检查窗口缩放、输入、滚动、中文字体和长文本。
 9. 使用临时 `RUSKER_CONFIG_DIR` 验证设置保存/重载、主题切换、非法代理 URL 和 Engine JSON 导出；测试不得改写真实 `daemon.json`。
 10. 在支持托盘的桌面验证恢复、最小化、刷新、页面导航和退出。Linux 使用 `ksni` / StatusNotifierItem，不需要 GTK/AppIndicator；不支持托盘的桌面应降级为普通窗口模式。
+11. Windows 上分别验证 named pipe 优先、显式 `DOCKER_HOST` 禁止回退、WSL2 默认/指定发行版，以及无 Linux CLI 或无权限时的错误提示。不要为测试自动安装或修改用户的发行版。
 
 不要对用户已有容器或镜像执行破坏性测试。
 

@@ -49,6 +49,7 @@ fn main() {
                         settings_warning.clone(),
                     );
                     app.refresh(cx);
+                    app.startup_runtime_host(cx);
                     app.start_tray_polling(window, cx);
                     app
                 })

@@ -50,6 +50,7 @@ async fn operates_only_on_dedicated_test_resources() {
             name: name.clone(),
             command: "sh -c \"echo rusker-engine-ok; sleep 120\"".into(),
             ports: format!("{host_port}:80"),
+            nvidia_gpu: false,
         }
         .parse()
         .map_err(|error| error.to_string())?;

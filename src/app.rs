@@ -11,8 +11,8 @@ use gpui_kit::{
     div,
     prelude::FluentBuilder as _,
     px, App, AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    Window, WindowAppearance,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, Window, WindowAppearance,
 };
 use rusker_desktop::{
     container::ContainerDraft,
@@ -22,6 +22,10 @@ use rusker_desktop::{
         short_id,
     },
     model::{ContainerAction, ContainerSummary, EngineSnapshot, ImageSummary, Revision},
+    runtime_host::{
+        RuntimeHostError, RuntimeHostService, RuntimeHostSnapshot, MANAGED_DOCKER_HOST,
+        WSL_DOCKER_HOST,
+    },
     settings::{AppSettings, DockerProxySettings, SettingsStore, ThemePreference},
     tray::{TrayCommand, TrayMenu},
 };
@@ -50,6 +54,23 @@ impl Page {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RuntimeOperation {
+    Install,
+    Start,
+    Stop,
+}
+
+impl RuntimeOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Install => "安装/修复 WSL2 环境",
+            Self::Start => "启动 WSL2 环境",
+            Self::Stop => "停止 WSL2 环境",
+        }
+    }
+}
+
 pub struct RuskerApp {
     engine: Option<EngineService>,
     page: Page,
@@ -69,6 +90,7 @@ pub struct RuskerApp {
     create_name_input: Entity<InputState>,
     create_command_input: Entity<InputState>,
     create_ports_input: Entity<InputState>,
+    create_nvidia_gpu: bool,
     create_error: Option<String>,
     settings: AppSettings,
     settings_store: Option<SettingsStore>,
@@ -78,6 +100,11 @@ pub struct RuskerApp {
     http_proxy_input: Entity<InputState>,
     https_proxy_input: Entity<InputState>,
     no_proxy_input: Entity<InputState>,
+    runtime_host: Option<RuntimeHostService>,
+    runtime_snapshot: RuntimeHostSnapshot,
+    runtime_busy: Option<String>,
+    runtime_error: Option<String>,
+    runtime_notice: Option<String>,
     tray: Option<TrayMenu>,
     _tray_task: Option<Task<()>>,
     refresh_revision: Revision,
@@ -85,6 +112,7 @@ pub struct RuskerApp {
     _refresh_task: Option<Task<()>>,
     _action_task: Option<Task<()>>,
     _logs_task: Option<Task<()>>,
+    _runtime_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -147,6 +175,18 @@ impl RuskerApp {
             Ok(engine) => (Some(engine), None),
             Err(error) => (None, Some(error.to_string())),
         };
+        let (runtime_host, runtime_error) = match RuntimeHostService::new() {
+            Ok(host) => (Some(host), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        // Like Docker Desktop, quitting the app stops the engine it owns.
+        // Runs synchronously: GPUI only waits ~200 ms for quit futures.
+        let quit_subscription = cx.on_app_quit(|this: &mut Self, _| {
+            if let Some(host) = this.runtime_host.clone() {
+                host.shutdown_blocking(Duration::from_secs(50));
+            }
+            async {}
+        });
 
         let (tray, tray_error) = match TrayMenu::new() {
             Ok(tray) => (Some(tray), None),
@@ -185,6 +225,7 @@ impl RuskerApp {
             create_name_input,
             create_command_input,
             create_ports_input,
+            create_nvidia_gpu: false,
             create_error: None,
             settings,
             settings_store,
@@ -194,6 +235,11 @@ impl RuskerApp {
             http_proxy_input,
             https_proxy_input,
             no_proxy_input,
+            runtime_host,
+            runtime_snapshot: RuntimeHostSnapshot::default(),
+            runtime_busy: None,
+            runtime_error,
+            runtime_notice: None,
             tray,
             _tray_task: None,
             refresh_revision: Revision::default(),
@@ -201,7 +247,8 @@ impl RuskerApp {
             _refresh_task: None,
             _action_task: None,
             _logs_task: None,
-            _subscriptions: vec![subscription, appearance_subscription],
+            _runtime_task: None,
+            _subscriptions: vec![subscription, appearance_subscription, quit_subscription],
         }
     }
 
@@ -263,7 +310,181 @@ impl RuskerApp {
 
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
+        if page == Page::Settings {
+            self.refresh_runtime_host(cx);
+        }
         cx.notify();
+    }
+
+    /// Launch-time hook: refreshes state and starts an installed managed
+    /// engine, unless `DOCKER_HOST` points the app at another engine.
+    pub fn startup_runtime_host(&mut self, cx: &mut Context<Self>) {
+        if !cfg!(windows) || self.runtime_busy.is_some() {
+            return;
+        }
+        if std::env::var_os("DOCKER_HOST").is_some() {
+            self.refresh_runtime_host(cx);
+            return;
+        }
+        let Some(host) = self.runtime_host.clone() else {
+            return;
+        };
+        self.runtime_busy = Some("正在检查并启动 WSL2 环境…".into());
+        self.runtime_error = None;
+        cx.notify();
+        let handle = host.startup(self.settings.wsl.integrations.clone());
+        self._runtime_task = Some(cx.spawn(async move |this, cx| {
+            let result = await_runtime_host(handle).await;
+            _ = this.update(cx, |this, cx| {
+                this.runtime_busy = None;
+                match result {
+                    Ok(snapshot) => {
+                        let ready = snapshot.engine_ready;
+                        this.runtime_snapshot = snapshot;
+                        if ready {
+                            this.refresh(cx);
+                        }
+                    }
+                    Err(error) => this.runtime_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    pub fn refresh_runtime_host(&mut self, cx: &mut Context<Self>) {
+        if !cfg!(windows) || self.runtime_busy.is_some() {
+            return;
+        }
+        let Some(host) = self.runtime_host.clone() else {
+            return;
+        };
+        self.runtime_busy = Some("读取 WSL2 环境状态…".into());
+        self.runtime_error = None;
+        cx.notify();
+        let handle = host.snapshot(self.settings.wsl.integrations.clone());
+        self._runtime_task = Some(cx.spawn(async move |this, cx| {
+            let result = await_runtime_host(handle).await;
+            _ = this.update(cx, |this, cx| {
+                this.runtime_busy = None;
+                match result {
+                    Ok(snapshot) => this.runtime_snapshot = snapshot,
+                    Err(error) => this.runtime_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn run_runtime_operation(&mut self, operation: RuntimeOperation, cx: &mut Context<Self>) {
+        if self.runtime_busy.is_some() {
+            return;
+        }
+        let Some(host) = self.runtime_host.clone() else {
+            self.runtime_error = Some("WSL2 后台运行时不可用".into());
+            cx.notify();
+            return;
+        };
+        self.runtime_busy = Some(format!("{}…", operation.label()));
+        self.runtime_error = None;
+        self.runtime_notice = None;
+        cx.notify();
+        let integrations = self.settings.wsl.integrations.clone();
+        let handle = match operation {
+            RuntimeOperation::Install => host.install(integrations),
+            RuntimeOperation::Start => host.start(integrations),
+            RuntimeOperation::Stop => host.stop(integrations),
+        };
+        self._runtime_task = Some(cx.spawn(async move |this, cx| {
+            let result = await_runtime_host(handle).await;
+            _ = this.update(cx, |this, cx| {
+                this.runtime_busy = None;
+                match result {
+                    Ok(snapshot) => {
+                        let ready = snapshot.engine_ready;
+                        this.runtime_snapshot = snapshot;
+                        this.runtime_notice = Some(format!("{}完成", operation.label()));
+                        if matches!(
+                            operation,
+                            RuntimeOperation::Install | RuntimeOperation::Start
+                        ) && ready
+                        {
+                            this.refresh(cx);
+                        }
+                        if matches!(operation, RuntimeOperation::Stop) {
+                            this.connected = false;
+                        }
+                    }
+                    Err(error) => this.runtime_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn set_runtime_integration(
+        &mut self,
+        distribution: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.runtime_busy.is_some() {
+            return;
+        }
+        if self.settings_store.is_none() {
+            self.runtime_error = Some("无法确定配置目录，发行版集成未修改".into());
+            cx.notify();
+            return;
+        }
+        let Some(host) = self.runtime_host.clone() else {
+            self.runtime_error = Some("WSL2 后台运行时不可用".into());
+            cx.notify();
+            return;
+        };
+        let mut integrations = self.settings.wsl.integrations.clone();
+        if enabled {
+            integrations.insert(distribution.clone(), true);
+        } else {
+            integrations.remove(&distribution);
+        }
+        self.runtime_busy = Some(format!(
+            "{} {distribution} 集成…",
+            if enabled { "启用" } else { "停用" }
+        ));
+        self.runtime_error = None;
+        self.runtime_notice = None;
+        cx.notify();
+        let handle = host.set_integration(distribution.clone(), enabled, integrations.clone());
+        self._runtime_task = Some(cx.spawn(async move |this, cx| {
+            let result = await_runtime_host(handle).await;
+            _ = this.update(cx, |this, cx| {
+                this.runtime_busy = None;
+                match result {
+                    Ok(snapshot) => {
+                        this.runtime_snapshot = snapshot;
+                        this.settings.wsl.integrations = integrations;
+                        let action = if enabled { "启用" } else { "停用" };
+                        this.runtime_notice = Some(format!("已{action} {distribution} 集成"));
+                        if let Some(store) = &this.settings_store {
+                            if let Err(error) = store.save(&this.settings) {
+                                this.runtime_error =
+                                    Some(format!("集成已生效，但设置保存失败：{error}"));
+                            }
+                        }
+                    }
+                    Err(error) => this.runtime_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn nvidia_gpu_available(&self) -> bool {
+        #[cfg(windows)]
+        if std::env::var_os("DOCKER_HOST").is_none() {
+            return self.runtime_snapshot.gpu.available;
+        }
+        true
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -413,6 +634,7 @@ impl RuskerApp {
             return;
         }
         self.create_error = None;
+        self.create_nvidia_gpu = false;
         for input in [
             &self.create_image_input,
             &self.create_name_input,
@@ -431,6 +653,14 @@ impl RuskerApp {
             let error = weak
                 .upgrade()
                 .and_then(|this| this.read(cx).create_error.clone());
+            let (gpu_available, gpu_selected) = weak
+                .upgrade()
+                .map(|this| {
+                    let this = this.read(cx);
+                    (this.nvidia_gpu_available(), this.create_nvidia_gpu)
+                })
+                .unwrap_or((false, false));
+            let gpu_weak = weak.clone();
             let submit_weak = weak.clone();
             let mut form = div()
                 .flex()
@@ -459,7 +689,35 @@ impl RuskerApp {
                     &ports,
                     "多个映射用逗号分隔，仅绑定到 127.0.0.1。",
                     cx,
-                ));
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            Switch::new("create-nvidia-gpu")
+                                .label("使用全部 NVIDIA GPU")
+                                .checked(gpu_selected)
+                                .disabled(!gpu_available)
+                                .on_change(move |enabled, _, cx| {
+                                    _ = gpu_weak.update(cx, |this, cx| {
+                                        this.create_nvidia_gpu = *enabled;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if gpu_available {
+                                    "映射为 --gpus all；需要受管环境的 NVIDIA runtime。"
+                                } else {
+                                    "未检测到可用的 NVIDIA GPU/runtime，请先在设置中检查 WSL2 环境。"
+                                }),
+                        ),
+                );
             if let Some(error) = error {
                 form = form.child(
                     div()
@@ -512,6 +770,7 @@ impl RuskerApp {
             name: self.create_name_input.read(cx).value().to_string(),
             command: self.create_command_input.read(cx).value().to_string(),
             ports: self.create_ports_input.read(cx).value().to_string(),
+            nvidia_gpu: self.create_nvidia_gpu,
         };
         let request = match draft.parse() {
             Ok(request) => request,
@@ -545,6 +804,7 @@ impl RuskerApp {
         let candidate = AppSettings {
             theme: self.settings.theme,
             docker_proxy: self.proxy_draft(cx),
+            wsl: self.settings.wsl.clone(),
         }
         .normalized();
         if let Err(error) = candidate.validate() {
@@ -896,7 +1156,7 @@ impl RuskerApp {
                             .child(detail_row("架构", engine.architecture.clone(), cx)),
                     )
                     .child(muted(
-                        "首版连接已有引擎；WSL2/虚拟机安装、Compose、Volumes 和 Networks 管理见路线图。",
+                        "连接已有本地或 WSL2 引擎；发行版/虚拟机安装、Compose、Volumes 和 Networks 管理见路线图。",
                         cx,
                     )),
             ),
@@ -1287,6 +1547,172 @@ impl RuskerApp {
             .child(self.render_image_list(&images, cx))
     }
 
+    fn render_runtime_host(&self, cx: &mut Context<Self>) -> Div {
+        let snapshot = &self.runtime_snapshot;
+        let status = if !snapshot.installed {
+            "未安装"
+        } else if snapshot.engine_ready {
+            "Engine 运行中"
+        } else if snapshot.running {
+            "发行版运行中，Engine 未就绪"
+        } else {
+            "已停止"
+        };
+        let busy = self.runtime_busy.is_some();
+        let gpu_detail = if snapshot.gpu.detail.is_empty() {
+            "正在检测 NVIDIA GPU 与 runtime"
+        } else {
+            &snapshot.gpu.detail
+        };
+        let warning = snapshot.warnings.join("\n");
+        let runtime_busy_label = self.runtime_busy.clone();
+
+        section_panel(cx)
+            .p_5()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().text_lg().font_semibold().child("WSL2 运行环境"))
+                    .child(muted(
+                        "使用 Rusker 创建的专用 Ubuntu 发行版，不复用现有 Docker Engine。",
+                        cx,
+                    )),
+            )
+            .child(detail_row("专用发行版", "rusker (WSL2)", cx))
+            .child(detail_row("运行状态", status, cx))
+            .child(detail_row("Windows 端点", MANAGED_DOCKER_HOST, cx))
+            .child(detail_row("WSL2 端点", WSL_DOCKER_HOST, cx))
+            .child(detail_row("NVIDIA GPU", gpu_detail, cx))
+            .child(muted(
+                "Engine 不监听 TCP 端口。Windows 工具可执行：docker context create rusker --docker host=npipe:////./pipe/rusker_engine。退出 Rusker 时会停止 Engine，与 Docker Desktop 一致。",
+                cx,
+            ))
+            .child(muted(
+                "Windows 宿主机必须已安装支持 WSL2 GPU-PV 的 NVIDIA 驱动。这里只安装容器工具链，不在 WSL 内安装显卡驱动。",
+                cx,
+            ))
+            .when_some(runtime_busy_label, |this, label| {
+                this.child(div().text_sm().text_color(cx.theme().muted_foreground).child(label))
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(
+                        Button::new("install-runtime")
+                            .primary()
+                            .icon(IconName::HardDrive)
+                            .label(if snapshot.installed { "修复环境" } else { "安装环境" })
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_runtime_operation(RuntimeOperation::Install, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("start-runtime")
+                            .outline()
+                            .icon(IconName::Play)
+                            .label("启动")
+                            .disabled(busy || !snapshot.installed || snapshot.engine_ready)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_runtime_operation(RuntimeOperation::Start, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("stop-runtime")
+                            .outline()
+                            .icon(IconName::Square)
+                            .label("停止")
+                            .disabled(busy || !snapshot.running)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_runtime_operation(RuntimeOperation::Stop, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("refresh-runtime")
+                            .ghost()
+                            .icon(IconName::RefreshCw)
+                            .label("刷新状态")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.refresh_runtime_host(cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().font_semibold().child("发行版集成"))
+                    .child(muted(
+                        "开关安装或移除 Rusker 标记的 Docker CLI 包装器及 Compose/Buildx 插件，默认连接共享 socket；它不是防止手动访问的安全边界。",
+                        cx,
+                    )),
+            )
+            .when(snapshot.distributions.is_empty(), |this| {
+                this.child(muted("没有发现可集成的其他 WSL2 发行版。", cx))
+            })
+            .children(snapshot.distributions.iter().map(|distribution| {
+                let name = distribution.name.clone();
+                let title = if distribution.is_default {
+                    format!("{}（默认）", distribution.name)
+                } else {
+                    distribution.name.clone()
+                };
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().child(title))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(distribution.state.clone()),
+                    )
+                    .child(
+                        Switch::new(SharedString::from(format!(
+                            "wsl-integration-{}",
+                            distribution.name
+                        )))
+                        .checked(distribution.integration_enabled)
+                        .disabled(
+                            busy
+                                || self.settings_store.is_none()
+                                || (!distribution.integration_enabled && !snapshot.engine_ready),
+                        )
+                        .on_change(cx.listener(move |this, enabled, _, cx| {
+                            this.set_runtime_integration(name.clone(), *enabled, cx);
+                        })),
+                    )
+            }))
+            .when(!warning.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().warning)
+                        .child(warning),
+                )
+            })
+            .when_some(self.runtime_error.clone(), |this, error| {
+                this.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            })
+            .when_some(self.runtime_notice.clone(), |this, notice| {
+                this.child(div().text_sm().text_color(cx.theme().success).child(notice))
+            })
+            .child(muted(
+                "安装或修复可能需要数分钟。Engine 日志位于专用发行版的 /var/log/rusker-dockerd.log。",
+                cx,
+            ))
+    }
+
     fn render_settings(&self, cx: &mut Context<Self>) -> Div {
         let config_path = self
             .settings_store
@@ -1312,9 +1738,12 @@ impl RuskerApp {
                         .gap_5()
                         .child(page_header(
                             "设置",
-                            "外观与 Docker Engine 拉取代理配置。",
+                            "WSL2 运行环境、外观与 Docker Engine 拉取代理配置。",
                             cx,
                         ))
+                        .when(cfg!(windows), |this| {
+                            this.child(self.render_runtime_host(cx))
+                        })
                         .when_some(self.settings_warning.clone(), |this, warning| {
                             this.child(
                                 div()
@@ -1608,4 +2037,12 @@ async fn await_engine<T>(handle: JoinHandle<Result<T, EngineError>>) -> Result<T
     handle
         .await
         .map_err(|error| EngineError::Task(error.to_string()))?
+}
+
+async fn await_runtime_host<T>(
+    handle: JoinHandle<Result<T, RuntimeHostError>>,
+) -> Result<T, RuntimeHostError> {
+    handle
+        .await
+        .map_err(|error| RuntimeHostError::Task(error.to_string()))?
 }
