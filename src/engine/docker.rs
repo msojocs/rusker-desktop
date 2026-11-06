@@ -124,6 +124,14 @@ impl DockerEngine {
                     .architecture
                     .or(version.arch)
                     .unwrap_or_else(|| "未知".into()),
+                cpus: info
+                    .ncpu
+                    .and_then(|cpus| u32::try_from(cpus).ok())
+                    .unwrap_or(0),
+                memory_bytes: info
+                    .mem_total
+                    .and_then(|bytes| u64::try_from(bytes).ok())
+                    .unwrap_or(0),
             },
             containers,
             images,

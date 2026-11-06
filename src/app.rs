@@ -4,15 +4,18 @@ use gpui_kit::component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
     switch::Switch,
-    ActiveTheme as _, Icon, IconName, Sizable as _, Theme, ThemeMode, WindowExt as _,
+    window_border, ActiveTheme as _, Icon, IconName, Sizable as _, Theme, ThemeMode,
+    WindowExt as _,
 };
 use gpui_kit::{
+    assets::IconName as AssetIcon,
     base::{Disableable as _, StyledExt as _},
     div,
     prelude::FluentBuilder as _,
-    px, App, AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, WindowAppearance,
+    px, rgb, App, AppContext as _, Context, Div, Entity, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Render, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, WindowAppearance,
+    WindowControlArea,
 };
 use rusker_desktop::{
     container::ContainerDraft,
@@ -1037,85 +1040,60 @@ impl RuskerApp {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
         div()
-            .w(px(216.))
+            .w(px(SIDEBAR_WIDTH))
             .h_full()
             .flex_shrink_0()
             .border_r_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().sidebar)
-            .p_4()
+            .py_3()
             .flex()
             .flex_col()
-            .gap_6()
-            .child(
-                div()
-                    .px_2()
-                    .py_3()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().text_xl().font_bold().child("Rusker"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("CONTAINER DESKTOP"),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(self.nav_button(Page::Overview, IconName::LayoutDashboard, cx))
-                    .child(self.nav_button(Page::Containers, IconName::HardDrive, cx))
-                    .child(self.nav_button(Page::Images, IconName::FolderClosed, cx))
-                    .child(self.nav_button(Page::Settings, IconName::Settings, cx)),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .px_2()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("v0.1.0 · Apache-2.0"),
-            )
+            .gap_1()
+            .child(self.nav_item(Page::Overview, IconName::LayoutDashboard, cx))
+            .child(self.nav_item(Page::Containers, AssetIcon::Container, cx))
+            .child(self.nav_item(Page::Images, AssetIcon::Layers2, cx))
+            .child(div().mx_3().my_2().h(px(1.)).bg(cx.theme().border))
+            .child(self.nav_item(Page::Settings, IconName::Settings, cx))
     }
 
-    fn nav_button(&self, page: Page, icon: IconName, cx: &mut Context<Self>) -> Button {
+    /// Docker Desktop-style navigation row: full-width, icon + label, the
+    /// selected page highlighted with a tinted background.
+    fn nav_item(
+        &self,
+        page: Page,
+        icon: impl Into<Icon>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let selected = self.page == page;
-        let button = Button::new(page.title())
-            .icon(icon)
-            .label(page.title())
-            .w_full()
+        let accent = brand_color(cx);
+        div()
+            .id(SharedString::from(format!("nav-{}", page.title())))
+            .mx_2()
+            .px_3()
+            .h(px(36.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .gap_3()
+            .text_sm()
+            .cursor_pointer()
+            .when(selected, |this| {
+                this.bg(accent.opacity(0.16)).font_semibold()
+            })
+            .when(!selected, |this| {
+                this.hover(|style| style.bg(cx.theme().sidebar_accent))
+            })
+            .child(Icon::new(icon).small())
+            .child(page.title())
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate(page, cx);
-            }));
-        if selected {
-            button.primary()
-        } else {
-            button.ghost()
-        }
+            }))
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> Div {
-        let status = if self.connected {
-            "已连接"
-        } else {
-            "未连接"
-        };
-        let status_color = if self.connected {
-            cx.theme().success
-        } else {
-            cx.theme().danger
-        };
-        let engine_name = if self.snapshot.engine.name.is_empty() {
-            "等待引擎连接".to_string()
-        } else {
-            self.snapshot.engine.name.clone()
-        };
         div()
-            .h(px(68.))
+            .h(px(60.))
             .w_full()
             .flex_shrink_0()
             .px_6()
@@ -1124,41 +1102,15 @@ impl RuskerApp {
             .flex()
             .items_center()
             .justify_between()
+            .child(div().text_lg().font_semibold().child(self.page.title()))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().text_lg().font_semibold().child(self.page.title()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(engine_name),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(status_color))
-                            .child(div().text_sm().child(status)),
-                    )
-                    .child(
-                        Button::new("refresh")
-                            .outline()
-                            .small()
-                            .icon(IconName::RefreshCw)
-                            .label(if self.loading { "刷新中" } else { "刷新" })
-                            .disabled(self.loading || self.busy.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                    ),
+                Button::new("refresh")
+                    .outline()
+                    .small()
+                    .icon(IconName::RefreshCw)
+                    .label(if self.loading { "刷新中" } else { "刷新" })
+                    .disabled(self.loading || self.busy.is_some())
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
             )
     }
 
@@ -2046,7 +1998,7 @@ impl RuskerApp {
 }
 
 impl Render for RuskerApp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = match self.page {
             Page::Overview => self.render_overview(cx),
             Page::Containers => self.render_containers(cx),
@@ -2069,14 +2021,294 @@ impl Render for RuskerApp {
             content = content.child(message_banner(&notice, false, cx));
         }
 
-        div()
-            .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
+        let body = div()
+            .flex_1()
+            .min_h_0()
             .flex()
             .child(self.render_sidebar(cx))
-            .child(content.child(page))
+            .child(content.child(page));
+
+        window_border().child(
+            div()
+                .size_full()
+                .bg(cx.theme().background)
+                .text_color(cx.theme().foreground)
+                .flex()
+                .flex_col()
+                .child(self.render_app_bar(window, cx))
+                .child(body)
+                .child(self.render_status_bar(cx)),
+        )
     }
+}
+
+const SIDEBAR_WIDTH: f32 = 216.;
+const APP_BAR_HEIGHT: f32 = 48.;
+const WINDOW_BUTTON_WIDTH: f32 = 46.;
+
+/// Brand blue used for the app bar and selection accents (Docker
+/// Desktop-like). A deeper navy keeps contrast in dark mode.
+fn brand_color(cx: &App) -> Hsla {
+    if cx.theme().mode.is_dark() {
+        rgb(0x1E3A8A).into()
+    } else {
+        rgb(0x1D63ED).into()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WindowButton {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+impl RuskerApp {
+    /// Top app bar replacing the native caption: brand on the left, empty
+    /// space as the drag region, and fixed minimize / maximize / close
+    /// buttons in the top-right corner.
+    ///
+    /// Only the brand and spacer are drag regions, so buttons inside the bar
+    /// never get swallowed by the caption hit test. On Windows the buttons
+    /// map to native hit-test areas (Snap Layouts on hover, WM_CLOSE on
+    /// close, so "minimize to tray" still applies); on Linux they act on
+    /// click; on macOS the native traffic lights are kept.
+    fn render_app_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let maximized = window.is_maximized();
+        let leading_inset = if cfg!(target_os = "macos") { 80. } else { 16. };
+        div()
+            .id("app-bar")
+            .h(px(APP_BAR_HEIGHT))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .bg(brand_color(cx))
+            .text_color(gpui_kit::white())
+            .child(
+                drag_region(div().id("app-bar-brand"))
+                    .h_full()
+                    .pl(px(leading_inset))
+                    .pr_4()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::new(AssetIcon::Container).size(px(22.)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap_1()
+                            .child(div().text_lg().font_bold().child("rusker"))
+                            .child(div().text_lg().child("desktop")),
+                    ),
+            )
+            .child(drag_region(div().id("app-bar-drag")).flex_1().h_full())
+            .child(
+                div()
+                    .id("app-bar-settings")
+                    .size(px(32.))
+                    .mr_2()
+                    .rounded_md()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(gpui_kit::white().opacity(0.16)))
+                    .child(Icon::new(IconName::Settings).small())
+                    .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::Settings, cx))),
+            )
+            .when(!cfg!(target_os = "macos"), |this| {
+                this.child(self.window_button(WindowButton::Minimize, maximized))
+                    .child(self.window_button(WindowButton::Maximize, maximized))
+                    .child(self.window_button(WindowButton::Close, maximized))
+            })
+    }
+
+    fn window_button(&self, button: WindowButton, maximized: bool) -> impl IntoElement {
+        let (id, icon, area) = match button {
+            WindowButton::Minimize => (
+                "window-minimize",
+                IconName::WindowMinimize,
+                WindowControlArea::Min,
+            ),
+            WindowButton::Maximize if maximized => (
+                "window-restore",
+                IconName::WindowRestore,
+                WindowControlArea::Max,
+            ),
+            WindowButton::Maximize => (
+                "window-maximize",
+                IconName::WindowMaximize,
+                WindowControlArea::Max,
+            ),
+            WindowButton::Close => (
+                "window-close",
+                IconName::WindowClose,
+                WindowControlArea::Close,
+            ),
+        };
+        let has_tray = self.tray.is_some();
+        let is_close = button == WindowButton::Close;
+        div()
+            .id(id)
+            .w(px(WINDOW_BUTTON_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(is_close, |this| {
+                this.hover(|style| style.bg(rgb(0xE81123)))
+                    .active(|style| style.bg(rgb(0xC50F1F)))
+            })
+            .when(!is_close, |this| {
+                this.hover(|style| style.bg(gpui_kit::white().opacity(0.16)))
+                    .active(|style| style.bg(gpui_kit::white().opacity(0.24)))
+            })
+            .child(Icon::new(icon).small())
+            .when(cfg!(windows), |this| this.window_control_area(area))
+            .when(cfg!(target_os = "linux"), |this| {
+                this.on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                })
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    match button {
+                        WindowButton::Minimize => window.minimize_window(),
+                        WindowButton::Maximize => window.zoom_window(),
+                        // Same behaviour as `on_window_should_close`.
+                        WindowButton::Close if has_tray => window.minimize_window(),
+                        WindowButton::Close => window.remove_window(),
+                    }
+                })
+            })
+    }
+
+    /// Bottom status bar: engine state on the left (aligned with the
+    /// sidebar), engine resources and counts in the middle, versions right.
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (label, color) = self.engine_status(cx);
+        let engine = &self.snapshot.engine;
+        let mut facts: Vec<String> = Vec::new();
+        if self.connected {
+            if engine.cpus > 0 {
+                facts.push(format!("CPU {} 核", engine.cpus));
+            }
+            if engine.memory_bytes > 0 {
+                facts.push(format!("内存 {}", format_bytes(engine.memory_bytes)));
+            }
+            facts.push(format!(
+                "容器 {}/{} 运行中",
+                self.snapshot.running_containers(),
+                self.snapshot.containers.len()
+            ));
+            facts.push(format!("镜像 {}", self.snapshot.images.len()));
+            if let Some(gpu) = self
+                .runtime_snapshot
+                .gpu
+                .available
+                .then(|| self.runtime_snapshot.gpu.name.clone())
+                .flatten()
+            {
+                facts.push(format!("GPU {gpu}"));
+            }
+        }
+        let engine_version = (self.connected && !engine.version.is_empty())
+            .then(|| format!("Docker Engine {} · {}", engine.version, engine.architecture));
+
+        div()
+            .h(px(30.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().sidebar)
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(
+                div()
+                    .w(px(SIDEBAR_WIDTH))
+                    .h_full()
+                    .flex_shrink_0()
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_r_1()
+                    .border_color(cx.theme().border)
+                    .child(div().size(px(8.)).rounded_full().bg(color))
+                    .child(div().font_medium().text_color(color).child(label)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .overflow_hidden()
+                    .children(
+                        facts
+                            .into_iter()
+                            .map(|fact| div().flex_shrink_0().child(fact)),
+                    ),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .flex_shrink_0()
+                    .when_some(engine_version, |this, version| this.child(version))
+                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+            )
+    }
+
+    /// Engine state shown in the status bar, combining the Docker API
+    /// connection with the managed runtime's lifecycle.
+    fn engine_status(&self, cx: &App) -> (String, Hsla) {
+        if self.connected {
+            return ("Engine 运行中".into(), cx.theme().success);
+        }
+        if let Some(busy) = &self.runtime_busy {
+            return (
+                busy.trim_end_matches('…').to_string() + "…",
+                cx.theme().warning,
+            );
+        }
+        if self.loading {
+            return ("正在连接 Engine…".into(), cx.theme().warning);
+        }
+        let label = if cfg!(windows) && !self.runtime_snapshot.installed && self.manages_engine() {
+            "Engine 未安装"
+        } else {
+            "Engine 已停止"
+        };
+        (label.into(), cx.theme().danger)
+    }
+}
+
+/// Marks an element as a window drag region: native caption hit-testing on
+/// Windows, `start_window_move` elsewhere. Double-click maximizes.
+fn drag_region(element: Stateful<Div>) -> Stateful<Div> {
+    if cfg!(windows) {
+        return element.window_control_area(WindowControlArea::Drag);
+    }
+    element.on_mouse_down(MouseButton::Left, |event, window, _| {
+        if event.click_count >= 2 {
+            if cfg!(target_os = "macos") {
+                window.titlebar_double_click();
+            } else {
+                window.zoom_window();
+            }
+        } else {
+            window.start_window_move();
+        }
+    })
 }
 
 pub fn apply_theme(preference: ThemePreference, cx: &mut App) {

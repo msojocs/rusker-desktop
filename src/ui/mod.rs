@@ -59,7 +59,7 @@ pub fn detail_row(label: impl Into<SharedString>, value: impl Into<SharedString>
         .text_sm()
         .child(
             div()
-                .w(px(88.))
+                .w(px(104.))
                 .flex_shrink_0()
                 .text_color(cx.theme().muted_foreground)
                 .child(label.into()),

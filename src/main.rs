@@ -6,12 +6,35 @@
 mod app;
 mod ui;
 
+use std::borrow::Cow;
+
 use app::{apply_theme, RuskerApp};
 use gpui_kit::{
-    assets, open_window, px, size, AppContext as _, Bounds, Point, TitlebarOptions, WindowBounds,
-    WindowOptions,
+    assets, component::TitleBar, open_window, px, size, AppContext as _, AssetSource, Bounds,
+    Point, SharedString, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
 };
 use rusker_desktop::settings::{AppSettings, SettingsStore};
+
+// The default `Assets` bundle only carries gpui-component's own icons; embed
+// the extra Lucide icons the app uses on top of it.
+gpui_kit::assets::icon_assets!(ExtraIcons, [Container, Layers2]);
+
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(data) = ExtraIcons.load(path)? {
+            return Ok(Some(data));
+        }
+        assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
+        let mut names = assets::Assets.list(path)?;
+        names.extend(ExtraIcons.list(path)?);
+        Ok(names)
+    }
+}
 
 fn main() {
     let (settings_store, settings, settings_warning) = match SettingsStore::discover() {
@@ -27,10 +50,14 @@ fn main() {
     };
 
     gpui_kit::application()
-        .with_assets(assets::Assets)
+        .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             apply_theme(settings.theme, cx);
+            // In-app title bar (gpui-component `TitleBar`): the native caption
+            // is hidden, the app draws its own bar and window controls. On
+            // Windows the controls map to native hit-test areas, so Snap
+            // Layouts and the system menu keep working.
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Point::default(),
@@ -38,11 +65,15 @@ fn main() {
                 })),
                 window_min_size: Some(size(px(1040.), px(680.))),
                 titlebar: Some(TitlebarOptions {
+                    // Still used for the taskbar / Alt+Tab entry.
                     title: Some("Rusker Desktop".into()),
-                    ..Default::default()
+                    ..TitleBar::title_bar_options()
                 }),
+                // Ask Linux compositors for client-side decorations so they
+                // do not draw a second, native title bar.
+                window_decorations: cfg!(target_os = "linux").then_some(WindowDecorations::Client),
                 app_id: Some("dev.rusker.desktop".into()),
-                ..Default::default()
+                ..TitleBar::window_options()
             };
             open_window(options, cx, move |window, cx| {
                 cx.new(|cx| {

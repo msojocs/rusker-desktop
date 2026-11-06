@@ -5,6 +5,10 @@ pub struct EngineInfo {
     pub api_version: String,
     pub operating_system: String,
     pub architecture: String,
+    /// CPUs available to the engine (`docker info` NCPU); 0 when unknown.
+    pub cpus: u32,
+    /// Memory available to the engine in bytes (`docker info` MemTotal).
+    pub memory_bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
