@@ -34,6 +34,7 @@ Windows                                   WSL2 utility VM
 3. 在专用发行版内通过 Ubuntu 官方仓库安装 Docker Engine、Compose v2 与 Buildx，通过 NVIDIA 官方签名 APT 仓库安装固定版本的 NVIDIA Container Toolkit。
 4. 应用通过一个长期运行的 `wsl.exe` 会话在前台运行 `dockerd`，不依赖发行版内的 systemd。WSL2 会在最后一个会话结束约 10 秒后终止发行版，后台 `nohup` 进程无法保活，因此会话必须由应用持有。如果发行版中已有上一次留下的 `dockerd`，supervisor 会接管它，而不会再启动第二个。
 5. Engine **不监听 TCP 端口**。Windows 侧由应用内代理提供 `\\.\pipe\rusker_engine`，每个连接转发到发行版内的 `docker system dial-stdio`；该路径与 WSL 网络模式（NAT/mirrored）无关，并正确传递 `docker run -i`/`exec -i` 的 stdin EOF。只有 Engine 会话存活时代理才转发，不会因零散连接而唤醒发行版。
+6. **绑定挂载与 Docker Desktop 的 WSL2 后端一致，不需要配置文件共享**：WSL 自动把所有盘符挂到 `rusker` 发行版的 `/mnt/<盘符>`，因此任意 Windows 目录都能挂载。管道代理会改写 `containers/create` 请求中 `-v`（`HostConfig.Binds`）与 `--mount type=bind`（`HostConfig.Mounts`）的 Windows 源路径，例如 `docker run -v C:\Users\me\src:/src` 中的 `C:\Users\me\src`（或 `C:/Users/me/src`）会变为 `/mnt/c/Users/me/src`；命名卷、Linux 路径和 UNC 路径保持不变。attach/exec 等升级后的连接及其他请求原样转发。已集成的 WSL 发行版直连 socket，应直接使用 `/mnt/c/...` 形式。
 
 生命周期与 Docker Desktop 一致：
 

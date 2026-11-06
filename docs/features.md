@@ -14,6 +14,7 @@
 
 - [x] 自动连接本机 Docker/Podman 兼容 API，并遵循 `DOCKER_HOST`
 - [x] Windows 受管 WSL2 Engine：专用发行版、named pipe 代理、`/mnt/wsl` 共享 socket，不开放 TCP
+- [x] `docker.exe` 绑定挂载可直接使用 Windows 路径（`C:\src` 自动转换为 `/mnt/c/src`）
 - [x] 展示连接状态、Engine 版本、API 版本、操作系统和架构
 - [x] 展示容器总数、运行数、停止数和镜像数
 - [x] 手动刷新；连接失败时显示可读错误并允许重试

@@ -1,4 +1,5 @@
 mod data_disk;
+mod path_translation;
 #[cfg(windows)]
 mod proxy;
 mod wsl;

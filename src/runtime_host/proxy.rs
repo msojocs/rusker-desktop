@@ -14,7 +14,10 @@ use tokio::{
     sync::Mutex,
 };
 
-use super::wsl::{dial_stdio_command, WslHost, MANAGED_PIPE};
+use super::{
+    path_translation::forward_requests,
+    wsl::{dial_stdio_command, WslHost, MANAGED_PIPE},
+};
 
 /// Accepts pipe clients until the runtime shuts down. Failure to create the
 /// first instance (for example another Rusker instance already owns the pipe)
@@ -123,11 +126,12 @@ async fn wake(host: &WslHost, lock: &Mutex<()>) {
     }
 }
 
-async fn forward_until_eof(mut pipe_read: ReadHalf<NamedPipeServer>, mut stdin: ChildStdin) {
+async fn forward_until_eof(pipe_read: ReadHalf<NamedPipeServer>, mut stdin: ChildStdin) {
     // Ok(0) is either a CloseWrite (zero-length message) or a disconnected
     // client; both mean "no more request bytes". dial-stdio turns stdin EOF
-    // into a socket half-close.
-    let _ = tokio::io::copy(&mut pipe_read, &mut stdin).await;
+    // into a socket half-close. Windows bind mount paths are translated on
+    // the way (`C:\src` -> `/mnt/c/src`).
+    let _ = forward_requests(pipe_read, &mut stdin).await;
     let _ = stdin.shutdown().await;
     drop(stdin);
     std::future::pending::<()>().await
