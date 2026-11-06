@@ -23,8 +23,8 @@ use rusker_desktop::{
     },
     model::{ContainerAction, ContainerSummary, EngineSnapshot, ImageSummary, Revision},
     runtime_host::{
-        RuntimeHostError, RuntimeHostService, RuntimeHostSnapshot, MANAGED_DOCKER_HOST,
-        WSL_DOCKER_HOST,
+        ProxyApplyOutcome, RuntimeHostError, RuntimeHostService, RuntimeHostSnapshot,
+        MANAGED_DOCKER_HOST, WSL_DOCKER_HOST,
     },
     settings::{AppSettings, DockerProxySettings, SettingsStore, ThemePreference},
     tray::{TrayCommand, TrayMenu},
@@ -176,7 +176,10 @@ impl RuskerApp {
             Err(error) => (None, Some(error.to_string())),
         };
         let (runtime_host, runtime_error) = match RuntimeHostService::new() {
-            Ok(host) => (Some(host), None),
+            Ok(host) => {
+                host.set_engine_proxy(&settings.docker_proxy);
+                (Some(host), None)
+            }
             Err(error) => (None, Some(error.to_string())),
         };
         // Like Docker Desktop, quitting the app stops the engine it owns.
@@ -824,8 +827,11 @@ impl RuskerApp {
                 self.settings = candidate;
                 self.settings_warning = None;
                 self.settings_error = None;
-                self.settings_notice =
-                    Some(format!("设置已保存到 {}", store.config_path().display()));
+                self.settings_notice = Some("设置已保存".into());
+                // Idempotent: dockerd is only restarted if daemon.json changes.
+                // (The enable switch edits `self.settings` before saving, so a
+                // before/after comparison here would miss toggles.)
+                self.apply_engine_proxy(cx);
             }
             Err(error) => {
                 self.settings_error = Some(error.to_string());
@@ -833,6 +839,62 @@ impl RuskerApp {
             }
         }
         cx.notify();
+    }
+
+    /// True when the app manages the engine itself (Windows, no
+    /// `DOCKER_HOST`), so settings can be applied directly.
+    fn manages_engine(&self) -> bool {
+        cfg!(windows) && self.runtime_host.is_some() && std::env::var_os("DOCKER_HOST").is_none()
+    }
+
+    fn apply_engine_proxy(&mut self, cx: &mut Context<Self>) {
+        if !self.manages_engine() {
+            self.settings_notice = Some(
+                "设置已保存。当前 Engine 不由 Rusker 管理（非 Windows 或设置了 DOCKER_HOST），请导出 Engine JSON 并在该 Engine 上应用"
+                    .into(),
+            );
+            return;
+        }
+        let Some(host) = self.runtime_host.clone() else {
+            return;
+        };
+        self.runtime_busy = Some("正在应用 Engine 代理…".into());
+        self.runtime_error = None;
+        self.settings_notice = Some("设置已保存，正在应用 Engine 代理…".into());
+        let handle = host.apply_proxy(
+            self.settings.docker_proxy.clone(),
+            self.settings.wsl.integrations.clone(),
+        );
+        self._runtime_task = Some(cx.spawn(async move |this, cx| {
+            let result = await_runtime_host(handle).await;
+            _ = this.update(cx, |this, cx| {
+                this.runtime_busy = None;
+                match result {
+                    Ok((outcome, snapshot)) => {
+                        let ready = snapshot.engine_ready;
+                        this.runtime_snapshot = snapshot;
+                        this.settings_notice = Some(
+                            match outcome {
+                                ProxyApplyOutcome::Restarted => "代理已生效：Engine 已按新配置重启",
+                                ProxyApplyOutcome::Unchanged => "代理已生效（Engine 配置无变化）",
+                                ProxyApplyOutcome::Deferred => {
+                                    "设置已保存，代理将在 Engine 启动时自动生效"
+                                }
+                            }
+                            .into(),
+                        );
+                        if outcome == ProxyApplyOutcome::Restarted && ready {
+                            this.refresh(cx);
+                        }
+                    }
+                    Err(error) => {
+                        this.settings_notice = None;
+                        this.settings_error = Some(format!("设置已保存，但应用代理失败：{error}"));
+                    }
+                }
+                cx.notify();
+            });
+        }));
     }
 
     fn export_proxy_settings(&mut self, cx: &mut Context<Self>) {
@@ -1724,6 +1786,7 @@ impl RuskerApp {
             .as_ref()
             .map(|store| store.proxy_export_path().display().to_string())
             .unwrap_or_else(|| "不可用".into());
+        let manages_engine = self.manages_engine();
 
         div().flex_1().min_h_0().child(
             div()
@@ -1791,7 +1854,7 @@ impl RuskerApp {
                                                 .child("Docker Engine 拉取代理"),
                                         )
                                         .child(muted(
-                                            "用于生成 daemon.json 的 proxies 配置，影响 Engine 的镜像拉取等出站请求。",
+                                            "Engine 拉取镜像等出站请求使用的代理。保存后直接写入受管 Engine 的 daemon.json 并生效。",
                                             cx,
                                         )),
                                 )
@@ -1831,7 +1894,11 @@ impl RuskerApp {
                                         .border_color(cx.theme().warning)
                                         .text_sm()
                                         .text_color(cx.theme().warning)
-                                        .child("保存设置不会自动修改系统配置或重启 Docker。导出后请手动合并 proxies 到 daemon.json，并重启 Engine；不要覆盖 daemon.json 中的其他配置。"),
+                                        .child(if manages_engine {
+                                            "代理配置变化时会重启 Engine，运行中的容器会被停止（设置了重启策略的容器会自动恢复）。WSL2 使用 NAT 网络时，127.0.0.1 指向 WSL 自身而非 Windows，请填写 Windows 主机地址。"
+                                        } else {
+                                            "当前 Engine 不由 Rusker 管理，无法直接修改其配置。请导出后手动合并 proxies 到 daemon.json 并重启 Engine；不要覆盖 daemon.json 中的其他配置。"
+                                        }),
                                 )
                                 .child(
                                     div()
@@ -1842,25 +1909,37 @@ impl RuskerApp {
                                             Button::new("save-settings")
                                                 .primary()
                                                 .icon(IconName::Check)
-                                                .label("保存设置")
-                                                .disabled(self.settings_store.is_none())
+                                                .label(if manages_engine {
+                                                    "保存并应用"
+                                                } else {
+                                                    "保存设置"
+                                                })
+                                                .disabled(
+                                                    self.settings_store.is_none()
+                                                        || (manages_engine
+                                                            && self.runtime_busy.is_some()),
+                                                )
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.save_settings(cx);
                                                 })),
                                         )
-                                        .child(
-                                            Button::new("export-proxy-settings")
-                                                .outline()
-                                                .icon(IconName::FileText)
-                                                .label("导出 Engine JSON")
-                                                .disabled(self.settings_store.is_none())
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.export_proxy_settings(cx);
-                                                })),
-                                        ),
+                                        .when(!manages_engine, |this| {
+                                            this.child(
+                                                Button::new("export-proxy-settings")
+                                                    .outline()
+                                                    .icon(IconName::FileText)
+                                                    .label("导出 Engine JSON")
+                                                    .disabled(self.settings_store.is_none())
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.export_proxy_settings(cx);
+                                                    })),
+                                            )
+                                        }),
                                 )
                                 .child(muted(format!("Rusker 配置：{config_path}"), cx))
-                                .child(muted(format!("代理导出：{export_path}"), cx)),
+                                .when(!manages_engine, |this| {
+                                    this.child(muted(format!("代理导出：{export_path}"), cx))
+                                }),
                         )
                         .when_some(self.settings_error.clone(), |this, error| {
                             this.child(

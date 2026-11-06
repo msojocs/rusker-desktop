@@ -53,14 +53,19 @@ impl DockerProxySettings {
         Ok(())
     }
 
-    pub fn engine_config_fragment(&self) -> String {
+    /// The `proxies` object for Docker's `daemon.json` (empty when disabled).
+    pub fn engine_proxies(&self) -> Map<String, Value> {
         let mut proxies = Map::new();
         if self.enabled {
             insert_non_empty(&mut proxies, "http-proxy", &self.http_proxy);
             insert_non_empty(&mut proxies, "https-proxy", &self.https_proxy);
             insert_non_empty(&mut proxies, "no-proxy", &self.no_proxy);
         }
-        let document = json!({ "proxies": Value::Object(proxies) });
+        proxies
+    }
+
+    pub fn engine_config_fragment(&self) -> String {
+        let document = json!({ "proxies": Value::Object(self.engine_proxies()) });
         let formatted = serde_json::to_string_pretty(&document)
             .expect("proxy JSON serialization should be infallible");
         format!("{formatted}\n")

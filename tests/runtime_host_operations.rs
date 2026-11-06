@@ -243,3 +243,80 @@ fn integrates_distribution_and_relays_stdin_eof() {
     service.shutdown_blocking(Duration::from_secs(50));
     drop(service);
 }
+
+/// Opt-in: saving proxy settings takes effect in the managed dockerd directly
+/// (daemon.json merge + restart), keeps the NVIDIA runtime config, and an
+/// unchanged config does not restart the engine. Restores "no proxy" at the end.
+#[cfg(windows)]
+#[test]
+fn applies_engine_proxy_directly() {
+    if std::env::var("RUSKER_WSL_RUNTIME_LIFECYCLE").as_deref() != Ok("1") {
+        eprintln!("跳过：设置 RUSKER_WSL_RUNTIME_LIFECYCLE=1 后验证代理直接生效");
+        return;
+    }
+    use rusker_desktop::{
+        runtime_host::{ProxyApplyOutcome, MANAGED_PIPE},
+        settings::DockerProxySettings,
+    };
+
+    let proxy_url =
+        std::env::var("RUSKER_TEST_PROXY").unwrap_or_else(|_| "http://127.0.0.1:7890".into());
+    let client_runtime = tokio::runtime::Runtime::new().expect("测试运行时");
+    let service = RuntimeHostService::new().expect("创建 runtime-host");
+    let snapshot = client_runtime
+        .block_on(service.startup(BTreeMap::new()))
+        .expect("Tokio startup task")
+        .expect("启动专用 WSL2 环境");
+    assert!(snapshot.engine_ready, "warnings: {:?}", snapshot.warnings);
+
+    let engine_proxy = |runtime: &tokio::runtime::Runtime| {
+        runtime.block_on(async {
+            let docker = bollard::Docker::connect_with_named_pipe(
+                MANAGED_PIPE,
+                30,
+                bollard::API_DEFAULT_VERSION,
+            )
+            .expect("named pipe 客户端");
+            let info = docker.info().await.expect("docker info");
+            (
+                info.http_proxy.unwrap_or_default(),
+                info.runtimes.unwrap_or_default().contains_key("nvidia"),
+            )
+        })
+    };
+    let apply = |settings: DockerProxySettings| {
+        client_runtime
+            .block_on(service.apply_proxy(settings, BTreeMap::new()))
+            .expect("Tokio apply task")
+            .expect("应用代理")
+            .0
+    };
+
+    let enabled = DockerProxySettings {
+        enabled: true,
+        http_proxy: proxy_url.clone(),
+        https_proxy: proxy_url.clone(),
+        no_proxy: "localhost,127.0.0.1,::1".into(),
+    };
+    let first = apply(enabled.clone());
+    let (http_proxy, nvidia) = engine_proxy(&client_runtime);
+    eprintln!("首次应用：{first:?}；Engine HTTPProxy={http_proxy}；nvidia runtime={nvidia}");
+    assert!(http_proxy.starts_with(proxy_url.trim_end_matches('/')));
+    assert_eq!(apply(enabled), ProxyApplyOutcome::Unchanged);
+
+    if let Ok(image) = std::env::var("RUSKER_TEST_PULL") {
+        let (ok, text) = wsl_output("rusker", &format!("docker pull -q {image}"), None);
+        eprintln!("经代理拉取 {image}：{ok} {}", text.trim());
+    }
+
+    assert_eq!(
+        apply(DockerProxySettings::default()),
+        ProxyApplyOutcome::Restarted
+    );
+    let (http_proxy, nvidia_after) = engine_proxy(&client_runtime);
+    assert!(http_proxy.is_empty(), "关闭后仍有代理：{http_proxy}");
+    assert_eq!(nvidia, nvidia_after, "合并 daemon.json 不应影响 runtimes");
+
+    service.shutdown_blocking(Duration::from_secs(50));
+    drop(service);
+}

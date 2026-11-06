@@ -9,6 +9,7 @@ use std::{
 };
 
 use directories::ProjectDirs;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::AsyncWriteExt,
@@ -17,6 +18,7 @@ use tokio::{
 };
 
 use super::RuntimeHostError;
+use crate::settings::DockerProxySettings;
 
 pub const MANAGED_DISTRO_NAME: &str = "rusker";
 /// Windows-side endpoint, served by the in-app proxy (like Docker Desktop's
@@ -88,6 +90,14 @@ fi
     done
 ) &
 exec /usr/bin/dockerd --host=unix:///var/run/docker.sock --host="unix://$SHARED/docker.sock"
+"#;
+
+/// Atomically replaces the managed `daemon.json` with stdin.
+const WRITE_DAEMON_JSON_SCRIPT: &str = r#"set -eu
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json.rusker-new
+chmod 0644 /etc/docker/daemon.json.rusker-new
+mv -f /etc/docker/daemon.json.rusker-new /etc/docker/daemon.json
 "#;
 
 const STOP_SCRIPT: &str = r#"set -u
@@ -311,6 +321,19 @@ pub struct WslHost {
     root: PathBuf,
     session: Arc<EngineSession>,
     proxy: Arc<ProxyStatus>,
+    /// Desired `proxies` object for the managed dockerd's `daemon.json`.
+    engine_proxies: Arc<Mutex<Map<String, Value>>>,
+}
+
+/// What saving the Engine proxy settings did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProxyApplyOutcome {
+    /// Engine not running; the config is written before its next start.
+    Deferred,
+    /// `daemon.json` already matched.
+    Unchanged,
+    /// `daemon.json` updated and dockerd restarted.
+    Restarted,
 }
 
 impl WslHost {
@@ -327,7 +350,68 @@ impl WslHost {
             root,
             session: Arc::default(),
             proxy: Arc::default(),
+            engine_proxies: Arc::default(),
         })
+    }
+
+    pub fn set_engine_proxy(&self, settings: &DockerProxySettings) {
+        *self
+            .engine_proxies
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = settings.engine_proxies();
+    }
+
+    fn desired_proxies(&self) -> Map<String, Value> {
+        self.engine_proxies
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Applies new Engine proxy settings directly, like Docker Desktop's
+    /// "Apply & restart": merge into `daemon.json` and restart a running
+    /// dockerd if anything changed.
+    pub async fn apply_proxy(
+        &self,
+        settings: &DockerProxySettings,
+    ) -> Result<ProxyApplyOutcome, RuntimeHostError> {
+        settings.validate().map_err(RuntimeHostError::State)?;
+        self.set_engine_proxy(settings);
+        if !self.session.is_running() {
+            return Ok(ProxyApplyOutcome::Deferred);
+        }
+        self.ensure_owned().await?;
+        if !self.write_daemon_proxies().await? {
+            return Ok(ProxyApplyOutcome::Unchanged);
+        }
+        self.stop_engine().await;
+        self.start_engine().await?;
+        Ok(ProxyApplyOutcome::Restarted)
+    }
+
+    /// Merges the desired `proxies` into the managed `daemon.json`, keeping
+    /// every other key (e.g. the NVIDIA runtime). Returns whether it changed.
+    async fn write_daemon_proxies(&self) -> Result<bool, RuntimeHostError> {
+        let mut read = managed_command("root");
+        read.arg("/bin/sh")
+            .arg("-c")
+            .arg("cat /etc/docker/daemon.json 2>/dev/null || true");
+        let current = execute(read, "读取 daemon.json", COMMAND_TIMEOUT).await?;
+        let Some(updated) = merge_daemon_proxies(&decode(&current.stdout), &self.desired_proxies())
+            .map_err(RuntimeHostError::State)?
+        else {
+            return Ok(false);
+        };
+        let mut write = managed_command("root");
+        write.arg("/bin/sh").arg("-c").arg(WRITE_DAEMON_JSON_SCRIPT);
+        execute_with_input(
+            write,
+            updated.as_bytes(),
+            "写入 daemon.json 代理配置",
+            COMMAND_TIMEOUT,
+        )
+        .await?;
+        Ok(true)
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -569,6 +653,15 @@ impl WslHost {
 
     async fn start_engine(&self) -> Result<(), RuntimeHostError> {
         if !self.session.is_running() {
+            // Write the current proxy config before dockerd reads it. If it
+            // changed while a leftover dockerd is still running, stop that
+            // one so the supervisor starts a fresh daemon instead of
+            // attaching to a stale configuration.
+            if self.write_daemon_proxies().await? {
+                let mut stop = managed_command("root");
+                stop.arg("/bin/sh").arg("-c").arg(STOP_SCRIPT);
+                let _ = execute(stop, "停止旧 dockerd", DOCKERD_STOP_TIMEOUT).await;
+            }
             let mut command = managed_command("root");
             command
                 .arg("/bin/sh")
@@ -841,6 +934,80 @@ async fn execute(
             action: action.into(),
             message: source.to_string(),
         }),
+        Err(_) => Err(RuntimeHostError::Timeout {
+            action: action.into(),
+            seconds: duration.as_secs(),
+        }),
+    }
+}
+
+/// Returns the new `daemon.json` text when the `proxies` key must change.
+/// An empty desired object removes the key. Refuses to touch a file that is
+/// not a JSON object, rather than overwriting a user's broken config.
+fn merge_daemon_proxies(
+    current: &str,
+    desired: &Map<String, Value>,
+) -> Result<Option<String>, String> {
+    let mut document = if current.trim().is_empty() {
+        Map::new()
+    } else {
+        match serde_json::from_str::<Value>(current) {
+            Ok(Value::Object(object)) => object,
+            Ok(_) => return Err("/etc/docker/daemon.json 不是 JSON 对象，未修改".into()),
+            Err(error) => return Err(format!("/etc/docker/daemon.json 格式无效，未修改：{error}")),
+        }
+    };
+    let existing = document.get("proxies").cloned();
+    let wanted = (!desired.is_empty()).then(|| Value::Object(desired.clone()));
+    let unchanged = match (&existing, &wanted) {
+        (None, None) => true,
+        (Some(Value::Object(object)), None) => object.is_empty(),
+        (current, wanted) => current == wanted,
+    };
+    if unchanged {
+        return Ok(None);
+    }
+    match wanted {
+        Some(value) => {
+            document.insert("proxies".into(), value);
+        }
+        None => {
+            document.remove("proxies");
+        }
+    }
+    let text = serde_json::to_string_pretty(&Value::Object(document))
+        .map_err(|error| error.to_string())?;
+    Ok(Some(format!("{text}\n")))
+}
+
+async fn execute_with_input(
+    mut command: Command,
+    input: &[u8],
+    action: &str,
+    duration: Duration,
+) -> Result<Output, RuntimeHostError> {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let failed = |source: std::io::Error| RuntimeHostError::Command {
+        action: action.into(),
+        message: source.to_string(),
+    };
+    let operation = async {
+        let mut child = command.spawn().map_err(failed)?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| RuntimeHostError::State("无法打开命令的标准输入".into()))?;
+        stdin.write_all(input).await.map_err(failed)?;
+        stdin.shutdown().await.map_err(failed)?;
+        drop(stdin);
+        child.wait_with_output().await.map_err(failed)
+    };
+    match timeout(duration, operation).await {
+        Ok(Ok(output)) => check_output(output, action),
+        Ok(Err(error)) => Err(error),
         Err(_) => Err(RuntimeHostError::Timeout {
             action: action.into(),
             seconds: duration.as_secs(),
@@ -1230,6 +1397,46 @@ mod tests {
         assert!(!SUPERVISOR_SCRIPT.contains("nohup"));
         assert!(SUPERVISOR_SCRIPT.contains("attaching to running dockerd"));
         assert!(STOP_SCRIPT.contains("kill -TERM"));
+    }
+
+    #[test]
+    fn merges_proxies_without_touching_other_daemon_keys() {
+        let current = r#"{"runtimes":{"nvidia":{"path":"nvidia-container-runtime","args":[]}}}"#;
+        let desired = DockerProxySettings {
+            enabled: true,
+            http_proxy: "http://127.0.0.1:7890".into(),
+            https_proxy: "http://127.0.0.1:7890".into(),
+            no_proxy: "localhost,127.0.0.1".into(),
+        }
+        .engine_proxies();
+        let merged = merge_daemon_proxies(current, &desired)
+            .expect("合并")
+            .expect("应有变化");
+        let value: Value = serde_json::from_str(&merged).expect("JSON");
+        assert_eq!(
+            value["runtimes"]["nvidia"]["path"],
+            "nvidia-container-runtime"
+        );
+        assert_eq!(value["proxies"]["http-proxy"], "http://127.0.0.1:7890");
+
+        // Same config again: nothing to write, so no restart.
+        assert_eq!(merge_daemon_proxies(&merged, &desired).expect("合并"), None);
+
+        // Disabling removes only the proxies key.
+        let disabled = merge_daemon_proxies(&merged, &Map::new())
+            .expect("合并")
+            .expect("应有变化");
+        let value: Value = serde_json::from_str(&disabled).expect("JSON");
+        assert!(value.get("proxies").is_none());
+        assert!(value.get("runtimes").is_some());
+
+        assert_eq!(merge_daemon_proxies("", &Map::new()).expect("空文件"), None);
+        assert_eq!(
+            merge_daemon_proxies(r#"{"proxies":{}}"#, &Map::new()).expect("空对象"),
+            None
+        );
+        assert!(merge_daemon_proxies("{broken", &desired).is_err());
+        assert!(merge_daemon_proxies("[]", &desired).is_err());
     }
 
     #[test]

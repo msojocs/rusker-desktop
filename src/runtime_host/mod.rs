@@ -8,9 +8,11 @@ use thiserror::Error;
 use tokio::{runtime::Runtime, sync::Mutex, task::JoinHandle};
 
 pub use wsl::{
-    NvidiaGpuStatus, RuntimeHostSnapshot, WslDistribution, MANAGED_DISTRO_NAME,
+    NvidiaGpuStatus, ProxyApplyOutcome, RuntimeHostSnapshot, WslDistribution, MANAGED_DISTRO_NAME,
     MANAGED_DOCKER_HOST, MANAGED_PIPE, WSL_DOCKER_HOST,
 };
+
+use crate::settings::DockerProxySettings;
 
 #[derive(Debug, Error)]
 pub enum RuntimeHostError {
@@ -66,6 +68,28 @@ impl RuntimeHostService {
         F::Output: Send + 'static,
     {
         self.runtime.spawn(future)
+    }
+
+    /// Sets the Engine proxy written to `daemon.json` on the next engine
+    /// start, without touching a running engine. Call before `startup`.
+    pub fn set_engine_proxy(&self, settings: &DockerProxySettings) {
+        self.host.set_engine_proxy(settings);
+    }
+
+    /// Applies saved proxy settings immediately: rewrites `daemon.json` and
+    /// restarts a running engine when the config changed.
+    pub fn apply_proxy(
+        &self,
+        settings: DockerProxySettings,
+        integrations: BTreeMap<String, bool>,
+    ) -> JoinHandle<Result<(ProxyApplyOutcome, RuntimeHostSnapshot), RuntimeHostError>> {
+        let host = self.host.clone();
+        let lock = self.operation_lock.clone();
+        self.spawn(async move {
+            let _guard = lock.lock().await;
+            let outcome = host.apply_proxy(&settings).await?;
+            Ok((outcome, host.snapshot(&integrations).await?))
+        })
     }
 
     /// Launch-time entry point: reads state and, like Docker Desktop, starts
