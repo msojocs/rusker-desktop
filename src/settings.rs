@@ -146,8 +146,8 @@ impl ResourceSaverSettings {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VmSettings {
-    /// Directory holding the managed distribution's `ext4.vhdx`. Empty means
-    /// the default location under the app data directory.
+    /// Directory holding the Docker data disk (`docker-data.vhdx`). Empty
+    /// means the default location under the app data directory.
     pub disk_image_location: String,
 }
 

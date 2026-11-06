@@ -12,10 +12,13 @@
 
 ### 磁盘镜像位置
 
-受管发行版 `rusker` 的虚拟磁盘（`ext4.vhdx`）所在目录，实际位置从 `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` 中该发行版的 `BasePath` 读取。
+Docker 数据磁盘 `docker-data.vhdx` 所在目录，存放镜像、容器和卷，与 Docker Desktop 的 `docker_data.vhdx` 相同。`rusker` 发行版自身的系统盘（`ext4.vhdx`）只包含 Ubuntu 与 Docker 软件，固定位于应用数据目录。
 
-- 尚未安装时，选择的目录作为安装位置（必须为空目录）。
-- 已安装时，选择一个空目录并点击“应用”，Rusker 会停止 Engine、执行 `wsl --manage rusker --move <目录>`，成功后再保存设置并恢复 Engine。需要 WSL 2.3 或更新版本；移动失败时设置不会保存。
+- 数据磁盘在首次启动 Engine 时创建（动态扩展，上限 1 TiB），位置与磁盘 ID 记录在 `runtime-host/data-disk.json`。
+- 每次启动 Engine 时，Rusker 用 `wsl --mount --vhd <文件> --bare` 把数据磁盘挂到 WSL2 虚拟机，在 `rusker` 内按磁盘 WWID 找到设备，首次使用时格式化为 ext4，再绑定挂载到 `/var/lib/docker` 和 `/var/lib/containerd`。旧版本保存在系统盘上的数据会在首次挂载时自动迁移。
+- 选择新目录并点击“应用”后，Rusker 停止 Engine、终止 `rusker`、用 `wsl --unmount` 只卸载这块数据磁盘，然后移动文件（同一分区内为重命名，跨分区时复制后删除原文件），更新记录并恢复 Engine。其他 WSL 发行版不受影响，也不需要 `wsl --shutdown`。目标目录中不能已有 `docker-data.vhdx`；移动失败时设置不会保存，数据磁盘仍在原位置。
+- 不使用 `wsl --manage --move`：WSL 在虚拟机运行期间不会释放已停止发行版的系统盘，移动会报 `ERROR_SHARING_VIOLATION`。
+- 停止 Engine、进入资源节省模式或退出 Rusker 时会卸载数据磁盘，文件随即可被备份或移动。
 
 ### 资源节省
 

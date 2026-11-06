@@ -1,3 +1,4 @@
+mod data_disk;
 #[cfg(windows)]
 mod proxy;
 mod wsl;
@@ -87,16 +88,17 @@ impl RuntimeHostService {
         self.host.session_running()
     }
 
+    /// Default directory for the Docker data disk.
     pub fn default_disk_location(&self) -> PathBuf {
         self.host.default_disk_location()
     }
 
-    /// Install target for the virtual disk (None = default location).
-    pub fn set_install_location(&self, location: Option<PathBuf>) {
-        self.host.set_install_location(location);
+    /// Where a new Docker data disk is created (None = default location).
+    pub fn set_data_location(&self, location: Option<PathBuf>) {
+        self.host.set_data_location(location);
     }
 
-    /// Moves the installed distribution's virtual disk to `target`.
+    /// Moves the Docker data disk into the `target` directory.
     pub fn move_disk(
         &self,
         target: PathBuf,
@@ -106,8 +108,10 @@ impl RuntimeHostService {
         let lock = self.operation_lock.clone();
         self.spawn(async move {
             let _guard = lock.lock().await;
-            host.move_disk(Path::new(&target)).await?;
-            host.snapshot(&integrations).await
+            let warnings = host.move_disk(Path::new(&target)).await?;
+            let mut snapshot = host.snapshot(&integrations).await?;
+            snapshot.warnings.extend(warnings);
+            Ok(snapshot)
         })
     }
 

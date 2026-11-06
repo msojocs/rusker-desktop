@@ -20,7 +20,7 @@ use tokio::{
     time::timeout,
 };
 
-use super::RuntimeHostError;
+use super::{data_disk, RuntimeHostError};
 use crate::settings::{DockerProxySettings, ResourceSaverSettings};
 
 pub const MANAGED_DISTRO_NAME: &str = "rusker";
@@ -74,6 +74,11 @@ if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG")" -gt 10485760 ]; then
 fi
 exec >>"$LOG" 2>&1
 echo "[rusker] supervisor started $(date -Is)"
+# Re-mount the Docker data disk in case the distribution restarted since
+# the backend prepared it; a no-op when it is already mounted.
+(
+__MOUNT_DATA_DISK__
+) || { echo "[rusker] Docker 数据磁盘未就绪"; exit 1; }
 pid=$(cat /var/run/docker.pid 2>/dev/null || true)
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && grep -qx dockerd "/proc/$pid/comm" 2>/dev/null; then
     echo "[rusker] attaching to running dockerd $pid"
@@ -399,10 +404,8 @@ pub struct WslHost {
     /// Desired `proxies` object for the managed dockerd's `daemon.json`.
     engine_proxies: Arc<Mutex<Map<String, Value>>>,
     saver: Arc<ResourceSaver>,
-    /// Where a fresh install imports the distribution (None = default).
-    install_location: Arc<Mutex<Option<PathBuf>>>,
-    /// Cached `BasePath` of the installed distribution.
-    disk_location: Arc<Mutex<Option<PathBuf>>>,
+    /// Where a new Docker data disk is created (None = default).
+    data_location: Arc<Mutex<Option<PathBuf>>>,
 }
 
 /// What saving the Engine proxy settings did.
@@ -432,8 +435,7 @@ impl WslHost {
             proxy: Arc::default(),
             engine_proxies: Arc::default(),
             saver: Arc::default(),
-            install_location: Arc::default(),
-            disk_location: Arc::default(),
+            data_location: Arc::default(),
         })
     }
 
@@ -446,59 +448,137 @@ impl WslHost {
         self.session.is_running()
     }
 
-    /// Default directory for the distribution's virtual disk.
+    /// Default directory for the Docker data disk (`docker-data.vhdx`).
     pub fn default_disk_location(&self) -> PathBuf {
+        self.root.join("disk")
+    }
+
+    /// Directory of the distribution's own system disk (`ext4.vhdx`).
+    fn distro_location(&self) -> PathBuf {
         self.root.join("distro")
     }
 
-    /// Sets where a fresh install places the virtual disk (None = default).
-    pub fn set_install_location(&self, location: Option<PathBuf>) {
-        *lock(&self.install_location) = location;
+    /// Sets where a new Docker data disk is created (None = default).
+    pub fn set_data_location(&self, location: Option<PathBuf>) {
+        *lock(&self.data_location) = location;
     }
 
-    /// Looks up (and caches) the registered `BasePath` of the managed
-    /// distribution, i.e. the directory holding `ext4.vhdx`.
-    async fn disk_location(&self) -> Option<PathBuf> {
-        if let Some(cached) = lock(&self.disk_location).clone() {
-            return Some(cached);
-        }
-        let location = query_disk_location().await?;
-        *lock(&self.disk_location) = Some(location.clone());
-        Some(location)
+    /// Directory currently holding the Docker data disk, if one exists.
+    fn data_disk_location(&self) -> Option<PathBuf> {
+        data_disk::load(&self.root)
+            .ok()
+            .flatten()
+            .map(|disk| disk.directory())
     }
 
-    /// Moves the managed distribution's virtual disk with
-    /// `wsl --manage --move`, restarting the engine if it was running.
-    pub async fn move_disk(&self, target: &Path) -> Result<(), RuntimeHostError> {
+    /// Moves the Docker data disk like Docker Desktop: stop the engine,
+    /// detach only this disk from the WSL2 VM, move the file, reattach.
+    /// Other WSL distributions keep running.
+    pub async fn move_disk(&self, target: &Path) -> Result<Vec<String>, RuntimeHostError> {
         ensure_windows()?;
         self.ensure_owned().await?;
-        if let Some(current) = self.disk_location().await {
-            if same_path(&current, target) {
-                return Ok(());
-            }
+        let Some(disk) = data_disk::load(&self.root)? else {
+            // Not created yet: the next engine start creates it there.
+            self.set_data_location(Some(target.to_path_buf()));
+            return Ok(Vec::new());
+        };
+        if same_path(&disk.directory(), target) {
+            return Ok(Vec::new());
         }
-        prepare_empty_directory(target)?;
+        if target.join(data_disk::DATA_DISK_FILE).exists() {
+            return Err(RuntimeHostError::Conflict(format!(
+                "目标目录已有 {}，拒绝覆盖",
+                data_disk::DATA_DISK_FILE
+            )));
+        }
         let was_running = self.session.is_running();
         self.stop_engine().await;
         let mut terminate = wsl_command();
         terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
         execute(terminate, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await?;
-        let mut command = wsl_command();
-        command
-            .args(["--manage", MANAGED_DISTRO_NAME, "--move"])
-            .arg(target);
-        let moved = execute(
-            command,
-            "移动磁盘镜像（需要 WSL 2.3 或更新版本）",
-            INSTALL_TIMEOUT,
-        )
-        .await;
-        *lock(&self.disk_location) = None;
+        self.detach_data_disk().await;
+        let directory = target.to_path_buf();
+        let moving = disk.clone();
+        let moved = tokio::task::spawn_blocking(move || data_disk::move_file(&moving, &directory))
+            .await
+            .map_err(|error| RuntimeHostError::Task(error.to_string()))
+            .and_then(|result| result)
+            .and_then(|moved| {
+                data_disk::save(&self.root, &moved)?;
+                Ok(moved)
+            });
+        // Restore the engine either way: on failure the disk is still at
+        // its old location and gets reattached from there.
+        let restarted = if was_running {
+            self.start_engine().await
+        } else {
+            Ok(())
+        };
         moved?;
-        if was_running {
-            self.start_engine().await?;
+        self.set_data_location(Some(target.to_path_buf()));
+        // The move itself succeeded, so the new location must be saved even
+        // when the engine fails to come back.
+        Ok(restarted
+            .err()
+            .map(|error| format!("磁盘已移动，但 Engine 未能恢复：{error}"))
+            .into_iter()
+            .collect())
+    }
+
+    /// Attaches the Docker data disk to the WSL2 VM (creating it on first
+    /// use) and mounts it over `/var/lib/docker` and `/var/lib/containerd`.
+    async fn attach_data_disk(&self) -> Result<String, RuntimeHostError> {
+        let disk = match data_disk::load(&self.root)? {
+            Some(disk) => disk,
+            None => {
+                let directory = lock(&self.data_location)
+                    .clone()
+                    .unwrap_or_else(|| self.default_disk_location());
+                let disk = data_disk::create(&directory)?;
+                if let Err(error) = data_disk::save(&self.root, &disk) {
+                    let _ = fs::remove_file(&disk.path);
+                    return Err(error);
+                }
+                disk
+            }
+        };
+        if !disk.path.exists() {
+            return Err(RuntimeHostError::Conflict(format!(
+                "Docker 数据磁盘 {} 不存在；如果手动移动过该文件，请将其放回原位置",
+                disk.path.display()
+            )));
         }
-        Ok(())
+        let wwid = disk.wwid()?;
+        // Fails harmlessly when the disk is still attached from an earlier
+        // start; the mount script below is the real check.
+        let mut attach = wsl_command();
+        attach
+            .args(["--mount", "--vhd"])
+            .arg(&disk.path)
+            .arg("--bare");
+        let attached = execute(attach, "挂载 Docker 数据磁盘", COMMAND_TIMEOUT).await;
+        let mut mount = managed_command("root");
+        mount
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(data_disk::MOUNT_SCRIPT)
+            .arg("rusker-data")
+            .arg(&wwid);
+        match execute(mount, "准备 Docker 数据磁盘", INSTALL_TIMEOUT).await {
+            Ok(_) => Ok(wwid),
+            Err(error) => Err(attached.err().unwrap_or(error)),
+        }
+    }
+
+    /// Detaches the Docker data disk from the WSL2 VM so the file is free.
+    /// Only call after the managed distribution was terminated.
+    async fn detach_data_disk(&self) {
+        let Ok(Some(disk)) = data_disk::load(&self.root) else {
+            return;
+        };
+        let mut unmount = wsl_command();
+        unmount.arg("--unmount").arg(&disk.path);
+        let _ = execute(unmount, "卸载 Docker 数据磁盘", COMMAND_TIMEOUT).await;
     }
 
     /// Number of running containers, asked inside the distribution so the
@@ -520,6 +600,7 @@ impl WslHost {
         let mut terminate = wsl_command();
         terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
         let _ = execute(terminate, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await;
+        self.detach_data_disk().await;
         self.saver.set_active(true);
     }
 
@@ -648,7 +729,7 @@ impl WslHost {
             })
             .collect();
         let disk_location = if installed {
-            self.disk_location().await
+            self.data_disk_location()
         } else {
             None
         };
@@ -677,9 +758,7 @@ impl WslHost {
             self.stop_engine().await;
         } else {
             let rootfs = self.ensure_rootfs().await?;
-            let install_dir = lock(&self.install_location)
-                .clone()
-                .unwrap_or_else(|| self.default_disk_location());
+            let install_dir = self.distro_location();
             prepare_empty_directory(&install_dir)?;
             let mut command = wsl_command();
             command
@@ -699,7 +778,6 @@ impl WslHost {
                 let _ = execute(unregister, "回滚未登记的发行版", COMMAND_TIMEOUT).await;
                 return Err(error);
             }
-            *lock(&self.disk_location) = None;
         }
 
         let setup_script = rendered_setup_script();
@@ -745,6 +823,7 @@ impl WslHost {
         let mut command = wsl_command();
         command.args(["--terminate", MANAGED_DISTRO_NAME]);
         execute(command, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await?;
+        self.detach_data_disk().await;
         Ok(())
     }
 
@@ -762,6 +841,7 @@ impl WslHost {
             let mut terminate = wsl_command();
             terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
             let _ = execute(terminate, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await;
+            self.detach_data_disk().await;
         }
     }
 
@@ -839,6 +919,7 @@ impl WslHost {
     async fn start_engine(&self) -> Result<(), RuntimeHostError> {
         self.saver.set_active(false);
         if !self.session.is_running() {
+            let wwid = self.attach_data_disk().await?;
             // Write the current proxy config before dockerd reads it. If it
             // changed while a leftover dockerd is still running, stop that
             // one so the supervisor starts a fresh daemon instead of
@@ -852,7 +933,9 @@ impl WslHost {
             command
                 .arg("/bin/sh")
                 .arg("-c")
-                .arg(SUPERVISOR_SCRIPT)
+                .arg(rendered_supervisor_script())
+                .arg("rusker-supervisor")
+                .arg(&wwid)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -1131,36 +1214,6 @@ fn strip_verbatim(path: &str) -> &str {
     path.strip_prefix(r"\\?\").unwrap_or(path)
 }
 
-/// WSL keeps each distribution's location in `HKCU\...\Lxss\{guid}\BasePath`.
-/// PowerShell is used so non-ASCII paths come back as UTF-8.
-async fn query_disk_location() -> Option<PathBuf> {
-    const SCRIPT: &str = "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
-        Get-ChildItem 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss' -ErrorAction SilentlyContinue \
-        | ForEach-Object { Get-ItemProperty $_.PSPath } \
-        | Where-Object { $_.DistributionName -eq 'rusker' } \
-        | ForEach-Object { $_.BasePath }";
-    let mut command = Command::new("powershell.exe");
-    command.kill_on_drop(true);
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT]);
-    let output = execute(command, "读取磁盘镜像位置", COMMAND_TIMEOUT)
-        .await
-        .ok()?;
-    parse_base_path(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn parse_base_path(output: &str) -> Option<PathBuf> {
-    let line = output
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?;
-    Some(PathBuf::from(strip_verbatim(line)))
-}
-
 async fn execute(
     mut command: Command,
     action: &str,
@@ -1432,6 +1485,11 @@ fn rendered_setup_script() -> String {
     SETUP_SCRIPT.replace("$NVIDIA_CONTAINER_TOOLKIT_VERSION", NVIDIA_TOOLKIT_VERSION)
 }
 
+/// The supervisor with the data disk mount script inlined; `$1` is the WWID.
+fn rendered_supervisor_script() -> String {
+    SUPERVISOR_SCRIPT.replace("__MOUNT_DATA_DISK__", data_disk::MOUNT_SCRIPT)
+}
+
 fn prepare_empty_directory(path: &Path) -> Result<(), RuntimeHostError> {
     match fs::read_dir(path) {
         Ok(mut entries) => {
@@ -1541,12 +1599,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_registry_base_path_and_compares_windows_paths() {
-        assert_eq!(
-            parse_base_path("\r\n\\\\?\\D:\\WSL\\Rusker\r\n"),
-            Some(PathBuf::from(r"D:\WSL\Rusker"))
-        );
-        assert_eq!(parse_base_path("  \r\n"), None);
+    fn compares_windows_paths() {
         assert!(same_path(
             Path::new(r"\\?\D:\WSL\Rusker\"),
             Path::new("d:/wsl/rusker")
@@ -1670,6 +1723,11 @@ mod tests {
         assert!(!SUPERVISOR_SCRIPT.contains("nohup"));
         assert!(SUPERVISOR_SCRIPT.contains("attaching to running dockerd"));
         assert!(STOP_SCRIPT.contains("kill -TERM"));
+        // The data disk is mounted before dockerd can touch /var/lib/docker.
+        let rendered = rendered_supervisor_script();
+        assert!(!rendered.contains("__MOUNT_DATA_DISK__"));
+        let mount = rendered.find("mount --bind").expect("mount");
+        assert!(mount < rendered.find("exec /usr/bin/dockerd").expect("dockerd"));
     }
 
     #[test]

@@ -356,7 +356,7 @@ impl RuskerApp {
             Ok(host) => {
                 host.set_engine_proxy(&settings.docker_proxy);
                 host.set_resource_saver(&settings.resource_saver);
-                host.set_install_location(disk_location_setting(&settings));
+                host.set_data_location(disk_location_setting(&settings));
                 (Some(host), None)
             }
             Err(error) => (None, Some(error.to_string())),
@@ -1262,7 +1262,7 @@ impl RuskerApp {
             Ok(()) => {
                 if let Some(host) = &self.runtime_host {
                     host.set_resource_saver(&candidate.resource_saver);
-                    host.set_install_location(disk_location_setting(&candidate));
+                    host.set_data_location(disk_location_setting(&candidate));
                 }
                 self.settings = candidate.clone();
                 self.settings_draft = candidate;
@@ -2563,9 +2563,9 @@ impl RuskerApp {
                     )
                     .child(muted(
                         if self.runtime_snapshot.installed {
-                            "专用发行版的虚拟磁盘（ext4.vhdx）所在目录。选择一个空目录并应用即可移动，需要 WSL 2.3 或更新版本。"
+                            "Docker 数据磁盘（docker-data.vhdx，存放镜像、容器和卷）所在目录。选择新目录并应用即可移动，不影响其他 WSL 发行版。"
                         } else {
-                            "安装环境时虚拟磁盘（ext4.vhdx）的存放目录，必须为空目录。"
+                            "Docker 数据磁盘（docker-data.vhdx，存放镜像、容器和卷）的创建目录。"
                         },
                         cx,
                     ))
@@ -2574,7 +2574,7 @@ impl RuskerApp {
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().warning)
-                                .child("应用后会停止 Engine 并移动磁盘镜像，运行中的容器会被停止；磁盘较大时可能需要数分钟。"),
+                                .child("应用后会停止 Engine 并移动数据磁盘，运行中的容器会被停止；跨磁盘移动较大的数据时可能需要数分钟。"),
                         )
                     }),
             )

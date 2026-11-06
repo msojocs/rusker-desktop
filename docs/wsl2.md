@@ -9,7 +9,8 @@ Windows 默认使用 Rusker 自己创建和管理的 WSL2 环境，不自动复�
 | Docker Desktop | Rusker | 说明 |
 | --- | --- | --- |
 | `com.docker.backend` | 应用内 `RuntimeHostService` | 持有 Engine 会话、named pipe 代理和安装/集成逻辑 |
-| `docker-desktop` 发行版 | `rusker` 发行版 | 运行 `dockerd`，数据保存在其虚拟磁盘 |
+| `docker-desktop` 发行版 | `rusker` 发行版 | 运行 `dockerd`；系统盘只含 Ubuntu 与 Docker 软件 |
+| `docker_data.vhdx` | `docker-data.vhdx` | 独立数据磁盘，`wsl --mount --bare` 挂载到 `/var/lib/docker`、`/var/lib/containerd`，可单独移动 |
 | `\\.\pipe\docker_engine` | `\\.\pipe\rusker_engine` | Windows 侧 Docker API 端点 |
 | `/mnt/wsl/docker-desktop/...` | `/mnt/wsl/rusker/docker.sock` | WSL2 发行版之间共享的 tmpfs，供已集成发行版访问 |
 | `cli-tools` + `cli-plugins` 链接 | `/usr/local/lib/rusker` + `cli-plugins` 链接 | 集成发行版内的 CLI 与 Compose/Buildx |
@@ -37,7 +38,7 @@ Windows                                   WSL2 utility VM
 生命周期与 Docker Desktop 一致：
 
 - 应用启动时，若受管环境已安装，会自动启动 Engine 并恢复已保存的发行版集成；设置了 `DOCKER_HOST` 时不自动启动。
-- “停止”先向 `dockerd` 发送 SIGTERM（容器按 Docker 的关闭超时停止），再终止 `rusker` 发行版。容器和镜像保存在虚拟磁盘中，下次启动不会重建环境。
+- “停止”先向 `dockerd` 发送 SIGTERM（容器按 Docker 的关闭超时停止），再终止 `rusker` 发行版。随后卸载 Docker 数据磁盘。容器和镜像保存在数据磁盘中，下次启动不会重建环境。
 - 退出应用（托盘“退出 Rusker”，或无托盘时关闭窗口）会以同样方式优雅停止本应用持有的 Engine 并终止 `rusker` 发行版，期间界面显示停止动画；Windows 侧 named pipe 也随之消失。应用异常退出时 `wsl.exe` 会话可能残留；下次启动会接管仍在运行的 `dockerd`。
 - “修复环境”会先优雅停止 Engine，再重跑安装脚本。
 
@@ -57,7 +58,7 @@ docker context use rusker
 
 - 专用发行版必须同时具有 Rusker 本地所有权记录和发行版内 `/etc/rusker-managed` 标记。
 - 如果检测到同名 `rusker` 发行版但没有所有权记录，所有管理操作都会停止，避免误接管或覆盖用户环境。
-- rootfs、虚拟磁盘和所有权记录位于应用数据目录的 `runtime-host` 下；开发/测试可用 `RUSKER_DATA_DIR` 覆盖数据根目录。
+- rootfs、系统盘（`distro/ext4.vhdx`）、数据磁盘记录（`data-disk.json`）和所有权记录位于应用数据目录的 `runtime-host` 下，数据磁盘默认位于 `runtime-host/disk`，可在设置中移动（见[设置文档](settings.md#磁盘镜像位置)）；开发/测试可用 `RUSKER_DATA_DIR` 覆盖数据根目录。
 - 当前没有界面卸载功能。不要仅删除数据目录来卸载，否则会丢失所有权记录；也不要手动把其他发行版重命名为 `rusker`。
 
 ## 各发行版集成开关
