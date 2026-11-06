@@ -2,17 +2,23 @@
 mod proxy;
 mod wsl;
 
-use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use thiserror::Error;
 use tokio::{runtime::Runtime, sync::Mutex, task::JoinHandle};
 
 pub use wsl::{
-    NvidiaGpuStatus, ProxyApplyOutcome, RuntimeHostSnapshot, WslDistribution, MANAGED_DISTRO_NAME,
-    MANAGED_DOCKER_HOST, MANAGED_PIPE, WSL_DOCKER_HOST,
+    same_path, NvidiaGpuStatus, ProxyApplyOutcome, RuntimeHostSnapshot, WslDistribution,
+    MANAGED_DISTRO_NAME, MANAGED_DOCKER_HOST, MANAGED_PIPE, WSL_DOCKER_HOST,
 };
 
-use crate::settings::DockerProxySettings;
+use crate::settings::{DockerProxySettings, ResourceSaverSettings};
 
 #[derive(Debug, Error)]
 pub enum RuntimeHostError {
@@ -52,13 +58,56 @@ impl RuntimeHostService {
                 action: "创建 WSL2 后台运行时",
                 source,
             })?;
-        let host = wsl::WslHost::discover()?;
+        let host = Arc::new(wsl::WslHost::discover()?);
+        let operation_lock = Arc::new(Mutex::new(()));
         #[cfg(windows)]
-        runtime.spawn(proxy::serve(host.session(), host.proxy_status()));
+        {
+            runtime.spawn(proxy::serve(host.clone(), operation_lock.clone()));
+            runtime.spawn(resource_saver_monitor(host.clone(), operation_lock.clone()));
+        }
         Ok(Self {
             runtime: Arc::new(runtime),
-            host: Arc::new(host),
-            operation_lock: Arc::new(Mutex::new(())),
+            host,
+            operation_lock,
+        })
+    }
+
+    /// Updates the Resource Saver configuration; takes effect immediately.
+    pub fn set_resource_saver(&self, settings: &ResourceSaverSettings) {
+        self.host.resource_saver().configure(settings);
+    }
+
+    /// Whether the engine is currently stopped by Resource Saver.
+    pub fn resource_saver_active(&self) -> bool {
+        self.host.resource_saver().is_active() && !self.host.session_running()
+    }
+
+    /// Whether this process holds a live engine session.
+    pub fn engine_session_running(&self) -> bool {
+        self.host.session_running()
+    }
+
+    pub fn default_disk_location(&self) -> PathBuf {
+        self.host.default_disk_location()
+    }
+
+    /// Install target for the virtual disk (None = default location).
+    pub fn set_install_location(&self, location: Option<PathBuf>) {
+        self.host.set_install_location(location);
+    }
+
+    /// Moves the installed distribution's virtual disk to `target`.
+    pub fn move_disk(
+        &self,
+        target: PathBuf,
+        integrations: BTreeMap<String, bool>,
+    ) -> JoinHandle<Result<RuntimeHostSnapshot, RuntimeHostError>> {
+        let host = self.host.clone();
+        let lock = self.operation_lock.clone();
+        self.spawn(async move {
+            let _guard = lock.lock().await;
+            host.move_disk(Path::new(&target)).await?;
+            host.snapshot(&integrations).await
         })
     }
 
@@ -185,5 +234,43 @@ impl RuntimeHostService {
             host.set_integration(&distribution, enabled).await?;
             host.snapshot(&integrations).await
         })
+    }
+}
+
+/// How often the idle monitor samples the engine.
+#[cfg(windows)]
+const RESOURCE_SAVER_POLL: Duration = Duration::from_secs(10);
+
+/// Enters Resource Saver once the engine has had no running containers and
+/// no Windows pipe clients for the configured threshold. Skips a sample
+/// whenever another operation holds the lock, so it never interrupts an
+/// install, restart or user-initiated stop.
+#[cfg(windows)]
+async fn resource_saver_monitor(host: Arc<wsl::WslHost>, lock: Arc<Mutex<()>>) {
+    let saver = host.resource_saver();
+    let mut idle_since: Option<std::time::Instant> = None;
+    loop {
+        tokio::time::sleep(RESOURCE_SAVER_POLL).await;
+        if !saver.enabled()
+            || saver.is_active()
+            || !host.session_running()
+            || saver.connections() > 0
+        {
+            idle_since = None;
+            continue;
+        }
+        let Ok(_guard) = lock.try_lock() else {
+            idle_since = None;
+            continue;
+        };
+        if !matches!(host.running_containers().await, Ok(0)) {
+            idle_since = None;
+            continue;
+        }
+        let since = *idle_since.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() >= saver.threshold() && saver.connections() == 0 {
+            host.enter_resource_saver().await;
+            idle_since = None;
+        }
     }
 }

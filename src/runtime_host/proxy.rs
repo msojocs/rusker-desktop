@@ -11,14 +11,17 @@ use tokio::{
     io::{AsyncWriteExt, ReadHalf},
     net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions},
     process::ChildStdin,
+    sync::Mutex,
 };
 
-use super::wsl::{dial_stdio_command, EngineSession, ProxyStatus, MANAGED_PIPE};
+use super::wsl::{dial_stdio_command, WslHost, MANAGED_PIPE};
 
 /// Accepts pipe clients until the runtime shuts down. Failure to create the
 /// first instance (for example another Rusker instance already owns the pipe)
-/// is reported through `status` instead of silently retrying forever.
-pub(super) async fn serve(session: Arc<EngineSession>, status: Arc<ProxyStatus>) {
+/// is reported through the host's proxy status instead of silently retrying
+/// forever.
+pub(super) async fn serve(host: Arc<WslHost>, lock: Arc<Mutex<()>>) {
+    let status = host.proxy_status();
     let mut server = match create(true) {
         Ok(server) => server,
         Err(error) => {
@@ -53,9 +56,10 @@ pub(super) async fn serve(session: Arc<EngineSession>, status: Arc<ProxyStatus>)
             }
         };
         let client = std::mem::replace(&mut server, next);
-        let session = session.clone();
+        let host = host.clone();
+        let lock = lock.clone();
         tokio::spawn(async move {
-            let _ = relay(client, &session).await;
+            let _ = relay(client, &host, &lock).await;
         });
     }
 }
@@ -71,11 +75,22 @@ fn create(first: bool) -> io::Result<NamedPipeServer> {
         .create(MANAGED_PIPE)
 }
 
-async fn relay(pipe: NamedPipeServer, session: &EngineSession) -> io::Result<()> {
+async fn relay(pipe: NamedPipeServer, host: &WslHost, lock: &Mutex<()>) -> io::Result<()> {
+    let saver = host.resource_saver();
+    // Counted for the whole connection so Resource Saver never stops an
+    // engine that a client (pull, logs -f, attach…) is still talking to.
+    let _connection = saver.track_connection();
     // Never boot the distribution from a stray client: only relay while the
-    // supervisor session that owns dockerd is alive.
-    if !session.is_running() {
-        return Ok(());
+    // supervisor session that owns dockerd is alive, except to leave
+    // Resource Saver mode.
+    if !host.session_running() {
+        if !saver.is_active() {
+            return Ok(());
+        }
+        wake(host, lock).await;
+        if !host.session_running() {
+            return Ok(());
+        }
     }
     let mut child = dial_stdio_command().spawn()?;
     let (Some(stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -93,6 +108,19 @@ async fn relay(pipe: NamedPipeServer, session: &EngineSession) -> io::Result<()>
     }
     let _ = pipe_write.flush().await;
     Ok(())
+}
+
+/// Leaves Resource Saver mode. Concurrent clients queue on the operation
+/// lock; the first one starts the engine and the rest find it running.
+async fn wake(host: &WslHost, lock: &Mutex<()>) {
+    let _guard = lock.lock().await;
+    if host.session_running() || !host.resource_saver().is_active() {
+        return;
+    }
+    if let Err(error) = host.start().await {
+        host.proxy_status()
+            .set_error(format!("退出资源节省模式失败：{error}"));
+    }
 }
 
 async fn forward_until_eof(mut pipe_read: ReadHalf<NamedPipeServer>, mut stdin: ChildStdin) {

@@ -26,7 +26,11 @@ gpui_kit::assets::icon_assets!(
         Upload,
         Download,
         Eraser,
-        BrushCleaning
+        BrushCleaning,
+        Info,
+        Folder,
+        ExternalLink,
+        TriangleAlert
     ]
 );
 

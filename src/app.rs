@@ -1,8 +1,9 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use gpui_kit::component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
+    slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
     window_border, ActiveTheme as _, Icon, IconName, Sizable as _, Theme, ThemeMode,
     WindowExt as _,
@@ -12,10 +13,10 @@ use gpui_kit::{
     base::{Disableable as _, StyledExt as _},
     div,
     prelude::FluentBuilder as _,
-    px, rgb, App, AppContext as _, Context, Div, Entity, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Render, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, WindowAppearance,
-    WindowControlArea,
+    px, rgb, AnyElement, App, AppContext as _, Context, Div, Entity, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, PathPromptOptions, Render, ScrollHandle,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    Window, WindowAppearance, WindowControlArea,
 };
 use rusker_desktop::{
     container::ContainerDraft,
@@ -26,10 +27,13 @@ use rusker_desktop::{
     },
     model::{ContainerAction, ContainerSummary, EngineSnapshot, ImageSummary, Revision},
     runtime_host::{
-        ProxyApplyOutcome, RuntimeHostError, RuntimeHostService, RuntimeHostSnapshot,
+        same_path, ProxyApplyOutcome, RuntimeHostError, RuntimeHostService, RuntimeHostSnapshot,
         MANAGED_DOCKER_HOST, WSL_DOCKER_HOST,
     },
-    settings::{AppSettings, DockerProxySettings, SettingsStore, ThemePreference},
+    settings::{
+        AppSettings, DockerProxySettings, SettingsStore, ThemePreference, RESOURCE_SAVER_MAX_SECS,
+        RESOURCE_SAVER_MIN_SECS,
+    },
     tray::{TrayCommand, TrayMenu},
 };
 use tokio::task::JoinHandle;
@@ -62,6 +66,45 @@ impl Page {
         }
     }
 }
+
+/// Sections of the settings page, in scroll order (Docker Desktop-style
+/// right-hand navigation).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsSection {
+    General,
+    VmResources,
+    ResourceSaver,
+    Proxies,
+    WslIntegration,
+}
+
+impl SettingsSection {
+    fn visible() -> Vec<Self> {
+        let mut sections = vec![
+            Self::General,
+            Self::VmResources,
+            Self::ResourceSaver,
+            Self::Proxies,
+        ];
+        if cfg!(windows) {
+            sections.push(Self::WslIntegration);
+        }
+        sections
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::General => "常规",
+            Self::VmResources => "VM 资源",
+            Self::ResourceSaver => "资源节省",
+            Self::Proxies => "代理",
+            Self::WslIntegration => "WSL 集成",
+        }
+    }
+}
+
+const WSLCONFIG_DOCS_URL: &str =
+    "https://learn.microsoft.com/windows/wsl/wsl-config#configuration-settings-for-wslconfig";
 
 #[derive(Clone, Copy)]
 enum RuntimeOperation {
@@ -104,13 +147,23 @@ pub struct RuskerApp {
     volumes: VolumeState,
     volume_name_input: Entity<InputState>,
     settings: AppSettings,
+    /// Edits not yet applied. Proxy addresses and the Resource Saver
+    /// threshold live in their input states instead.
+    settings_draft: AppSettings,
     settings_store: Option<SettingsStore>,
     settings_warning: Option<String>,
     settings_notice: Option<String>,
     settings_error: Option<String>,
+    settings_scroll: ScrollHandle,
+    settings_nav_target: Option<usize>,
     http_proxy_input: Entity<InputState>,
     https_proxy_input: Entity<InputState>,
     no_proxy_input: Entity<InputState>,
+    saver_threshold_input: Entity<InputState>,
+    saver_slider: Entity<SliderState>,
+    /// Last Resource Saver state the UI reacted to.
+    saver_seen: bool,
+    _saver_watch_task: Task<()>,
     runtime_host: Option<RuntimeHostService>,
     runtime_snapshot: RuntimeHostSnapshot,
     runtime_busy: Option<String>,
@@ -167,6 +220,64 @@ impl RuskerApp {
                 .default_value(settings.docker_proxy.no_proxy.clone())
                 .placeholder("localhost,127.0.0.1,::1")
         });
+        let threshold = settings.resource_saver.threshold_secs;
+        let saver_threshold_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(threshold.to_string()));
+        let saver_slider = cx.new(|_| {
+            SliderState::new()
+                .min(RESOURCE_SAVER_MIN_SECS as f32)
+                .max(RESOURCE_SAVER_MAX_SECS as f32)
+                .step(30.)
+                .default_value(threshold as f32)
+        });
+        let mut subscriptions = Vec::new();
+        for input in [&http_proxy_input, &https_proxy_input, &no_proxy_input] {
+            subscriptions.push(cx.subscribe_in(input, window, |_, _, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }));
+        }
+        subscriptions.push(cx.subscribe_in(
+            &saver_threshold_input,
+            window,
+            |this, input, event, window, cx| {
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                if let Ok(seconds) = input.read(cx).value().trim().parse::<u64>() {
+                    if (RESOURCE_SAVER_MIN_SECS..=RESOURCE_SAVER_MAX_SECS).contains(&seconds) {
+                        this.saver_slider.update(cx, |slider, cx| {
+                            slider.set_value(seconds as f32, window, cx);
+                        });
+                    }
+                }
+                cx.notify();
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &saver_slider,
+            window,
+            |this, _, event: &SliderEvent, window, cx| {
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
+                let seconds = value.start().round() as u64;
+                this.saver_threshold_input.update(cx, |input, cx| {
+                    input.set_value(seconds.to_string(), window, cx);
+                });
+                cx.notify();
+            },
+        ));
+        let saver_watch_task = cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            if this
+                .update(cx, |this, cx| this.sync_resource_saver(cx))
+                .is_err()
+            {
+                break;
+            }
+        });
         let subscription = cx.subscribe_in(&search_input, window, |_, _, event, _, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -176,7 +287,7 @@ impl RuskerApp {
         let appearance_subscription = window.observe_window_appearance(move |_, app_cx| {
             let follow_system = weak
                 .update(app_cx, |this, _| {
-                    this.settings.theme == ThemePreference::System
+                    this.settings_draft.theme == ThemePreference::System
                 })
                 .unwrap_or(false);
             if follow_system {
@@ -191,6 +302,8 @@ impl RuskerApp {
         let (runtime_host, runtime_error) = match RuntimeHostService::new() {
             Ok(host) => {
                 host.set_engine_proxy(&settings.docker_proxy);
+                host.set_resource_saver(&settings.resource_saver);
+                host.set_install_location(disk_location_setting(&settings));
                 (Some(host), None)
             }
             Err(error) => (None, Some(error.to_string())),
@@ -245,14 +358,21 @@ impl RuskerApp {
             create_error: None,
             volumes: VolumeState::default(),
             volume_name_input,
+            settings_draft: settings.clone(),
             settings,
             settings_store,
             settings_warning,
             settings_notice: None,
             settings_error: None,
+            settings_scroll: ScrollHandle::new(),
+            settings_nav_target: None,
             http_proxy_input,
             https_proxy_input,
             no_proxy_input,
+            saver_threshold_input,
+            saver_slider,
+            saver_seen: false,
+            _saver_watch_task: saver_watch_task,
             runtime_host,
             runtime_snapshot: RuntimeHostSnapshot::default(),
             runtime_busy: None,
@@ -266,7 +386,10 @@ impl RuskerApp {
             _action_task: None,
             _logs_task: None,
             _runtime_task: None,
-            _subscriptions: vec![subscription, appearance_subscription, quit_subscription],
+            _subscriptions: {
+                subscriptions.extend([subscription, appearance_subscription, quit_subscription]);
+                subscriptions
+            },
         }
     }
 
@@ -390,12 +513,48 @@ impl RuskerApp {
             _ = this.update(cx, |this, cx| {
                 this.runtime_busy = None;
                 match result {
-                    Ok(snapshot) => this.runtime_snapshot = snapshot,
+                    Ok(snapshot) => {
+                        // E.g. the engine just left Resource Saver mode.
+                        let reconnect = snapshot.engine_ready && !this.connected;
+                        this.runtime_snapshot = snapshot;
+                        if reconnect {
+                            this.refresh(cx);
+                        }
+                    }
                     Err(error) => this.runtime_error = Some(error.to_string()),
                 }
                 cx.notify();
             });
         }));
+    }
+
+    fn resource_saver_active(&self) -> bool {
+        self.manages_engine()
+            && self
+                .runtime_host
+                .as_ref()
+                .is_some_and(RuntimeHostService::resource_saver_active)
+    }
+
+    /// Polled every few seconds: reacts when the backend enters Resource
+    /// Saver mode, or leaves it because a client connected.
+    fn sync_resource_saver(&mut self, cx: &mut Context<Self>) {
+        let active = self.resource_saver_active();
+        if active == self.saver_seen {
+            return;
+        }
+        self.saver_seen = active;
+        if active {
+            self.connected = false;
+            self.runtime_snapshot.engine_ready = false;
+            self.runtime_snapshot.running = false;
+            self.runtime_snapshot.resource_saver_active = true;
+            cx.notify();
+        } else {
+            // Waits on the wake-up (it holds the operation lock), then
+            // reconnects once the engine is ready.
+            self.refresh_runtime_host(cx);
+        }
     }
 
     fn run_runtime_operation(&mut self, operation: RuntimeOperation, cx: &mut Context<Self>) {
@@ -815,43 +974,199 @@ impl RuskerApp {
         self.run_snapshot_operation("创建并运行容器".into(), handle, cx);
     }
 
-    fn proxy_draft(&self, cx: &Context<Self>) -> DockerProxySettings {
+    fn proxy_draft(&self, cx: &App) -> DockerProxySettings {
         DockerProxySettings {
-            enabled: self.settings.docker_proxy.enabled,
+            enabled: self.settings_draft.docker_proxy.enabled,
             http_proxy: self.http_proxy_input.read(cx).value().to_string(),
             https_proxy: self.https_proxy_input.read(cx).value().to_string(),
             no_proxy: self.no_proxy_input.read(cx).value().to_string(),
         }
     }
 
-    fn save_settings(&mut self, cx: &mut Context<Self>) {
-        let candidate = AppSettings {
-            theme: self.settings.theme,
-            docker_proxy: self.proxy_draft(cx),
-            wsl: self.settings.wsl.clone(),
+    /// The settings as currently edited, normalized but not validated.
+    fn collect_settings(&self, cx: &App) -> Result<AppSettings, String> {
+        let threshold = self
+            .saver_threshold_input
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "资源节省阈值必须是整数秒".to_string())?;
+        let mut candidate = self.settings_draft.clone();
+        candidate.docker_proxy = self.proxy_draft(cx);
+        candidate.resource_saver.threshold_secs = threshold;
+        // Integrations are applied and saved immediately, never drafted.
+        candidate.wsl = self.settings.wsl.clone();
+        Ok(candidate.normalized())
+    }
+
+    fn settings_dirty(&self, cx: &App) -> bool {
+        self.collect_settings(cx)
+            .map_or(true, |candidate| candidate != self.settings)
+    }
+
+    /// Target of a disk move the candidate settings ask for, if any.
+    fn pending_disk_move(&self, candidate: &AppSettings) -> Option<PathBuf> {
+        if !self.manages_engine()
+            || !self.runtime_snapshot.installed
+            || candidate.vm == self.settings.vm
+        {
+            return None;
         }
-        .normalized();
-        if let Err(error) = candidate.validate() {
-            self.settings_error = Some(error);
-            self.settings_notice = None;
-            cx.notify();
-            return;
+        let target = disk_location_setting(candidate)?;
+        match &self.runtime_snapshot.disk_location {
+            Some(current) if same_path(current, &target) => None,
+            _ => Some(target),
         }
-        let Some(store) = &self.settings_store else {
+    }
+
+    fn disk_location_display(&self) -> String {
+        if let Some(location) = disk_location_setting(&self.settings_draft) {
+            return location.display().to_string();
+        }
+        if let Some(location) = &self.runtime_snapshot.disk_location {
+            return location.display().to_string();
+        }
+        self.runtime_host
+            .as_ref()
+            .map(|host| host.default_disk_location().display().to_string())
+            .unwrap_or_else(|| "不可用".into())
+    }
+
+    fn browse_disk_location(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            _ = this.update(cx, |this, cx| {
+                this.settings_draft.vm.disk_image_location = path.display().to_string();
+                this.settings_notice = None;
+                this.settings_error = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn discard_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let saved = self.settings.clone();
+        self.settings_draft = saved.clone();
+        for (input, value) in [
+            (
+                &self.http_proxy_input,
+                saved.docker_proxy.http_proxy.clone(),
+            ),
+            (
+                &self.https_proxy_input,
+                saved.docker_proxy.https_proxy.clone(),
+            ),
+            (&self.no_proxy_input, saved.docker_proxy.no_proxy.clone()),
+            (
+                &self.saver_threshold_input,
+                saved.resource_saver.threshold_secs.to_string(),
+            ),
+        ] {
+            input.update(cx, |input, cx| input.set_value(value, window, cx));
+        }
+        self.saver_slider.update(cx, |slider, cx| {
+            slider.set_value(saved.resource_saver.threshold_secs as f32, window, cx);
+        });
+        apply_theme(saved.theme, cx);
+        self.settings_error = None;
+        self.settings_notice = None;
+        cx.notify();
+    }
+
+    /// "Apply": validates the draft, moves the virtual disk first when its
+    /// location changed (settings are only saved if that succeeds), then
+    /// saves and applies everything else.
+    fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        let candidate = match self
+            .collect_settings(cx)
+            .and_then(|candidate| candidate.validate().map(|()| candidate))
+        {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.settings_error = Some(error);
+                self.settings_notice = None;
+                cx.notify();
+                return;
+            }
+        };
+        if self.settings_store.is_none() {
             self.settings_error = Some("无法确定配置目录，设置未保存".into());
             cx.notify();
             return;
+        }
+        let Some(target) = self.pending_disk_move(&candidate) else {
+            self.commit_settings(candidate, cx);
+            cx.notify();
+            return;
         };
+        let Some(host) = self.runtime_host.clone() else {
+            return;
+        };
+        if self.runtime_busy.is_some() {
+            self.settings_error = Some("运行环境正忙，请稍后再应用".into());
+            cx.notify();
+            return;
+        }
+        self.runtime_busy = Some("正在移动磁盘镜像…".into());
+        self.runtime_error = None;
+        self.settings_error = None;
+        self.settings_notice = Some("正在移动磁盘镜像，Engine 会暂时停止…".into());
+        self.connected = false;
+        cx.notify();
+        let handle = host.move_disk(target, self.settings.wsl.integrations.clone());
+        self._runtime_task = Some(cx.spawn(async move |this, cx| {
+            let result = await_runtime_host(handle).await;
+            _ = this.update(cx, |this, cx| {
+                this.runtime_busy = None;
+                match result {
+                    Ok(snapshot) => {
+                        let ready = snapshot.engine_ready;
+                        this.runtime_snapshot = snapshot;
+                        this.commit_settings(candidate, cx);
+                        if ready {
+                            this.refresh(cx);
+                        }
+                    }
+                    Err(error) => {
+                        this.settings_notice = None;
+                        this.settings_error =
+                            Some(format!("移动磁盘镜像失败，设置未保存：{error}"));
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
 
+    fn commit_settings(&mut self, candidate: AppSettings, cx: &mut Context<Self>) {
+        let Some(store) = &self.settings_store else {
+            return;
+        };
         match store.save(&candidate) {
             Ok(()) => {
-                self.settings = candidate;
+                if let Some(host) = &self.runtime_host {
+                    host.set_resource_saver(&candidate.resource_saver);
+                    host.set_install_location(disk_location_setting(&candidate));
+                }
+                self.settings = candidate.clone();
+                self.settings_draft = candidate;
                 self.settings_warning = None;
                 self.settings_error = None;
                 self.settings_notice = Some("设置已保存".into());
                 // Idempotent: dockerd is only restarted if daemon.json changes.
-                // (The enable switch edits `self.settings` before saving, so a
-                // before/after comparison here would miss toggles.)
                 self.apply_engine_proxy(cx);
             }
             Err(error) => {
@@ -859,7 +1174,6 @@ impl RuskerApp {
                 self.settings_notice = None;
             }
         }
-        cx.notify();
     }
 
     /// True when the app manages the engine itself (Windows, no
@@ -949,11 +1263,11 @@ impl RuskerApp {
     }
 
     fn theme_button(&self, preference: ThemePreference, cx: &mut Context<Self>) -> Button {
-        let selected = self.settings.theme == preference;
+        let selected = self.settings_draft.theme == preference;
         let button = Button::new(preference.label())
             .label(preference.label())
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.settings.theme = preference;
+                this.settings_draft.theme = preference;
                 this.settings_notice = None;
                 apply_theme(preference, cx);
                 cx.notify();
@@ -1594,12 +1908,16 @@ impl RuskerApp {
             .child(self.render_image_list(&images, cx))
     }
 
-    fn render_runtime_host(&self, cx: &mut Context<Self>) -> Div {
+    /// Engine runtime controls shown at the top of "VM 资源": state of the
+    /// dedicated distribution plus install / start / stop.
+    fn render_engine_runtime(&self, cx: &mut Context<Self>) -> Div {
         let snapshot = &self.runtime_snapshot;
         let status = if !snapshot.installed {
             "未安装"
         } else if snapshot.engine_ready {
             "Engine 运行中"
+        } else if self.resource_saver_active() {
+            "资源节省模式（Engine 已暂停，有客户端连接时自动恢复）"
         } else if snapshot.running {
             "发行版运行中，Engine 未就绪"
         } else {
@@ -1612,39 +1930,19 @@ impl RuskerApp {
             &snapshot.gpu.detail
         };
         let warning = snapshot.warnings.join("\n");
-        let runtime_busy_label = self.runtime_busy.clone();
 
-        section_panel(cx)
-            .p_5()
+        div()
             .flex()
             .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(div().text_lg().font_semibold().child("WSL2 运行环境"))
-                    .child(muted(
-                        "使用 Rusker 创建的专用 Ubuntu 发行版，不复用现有 Docker Engine。",
-                        cx,
-                    )),
-            )
+            .gap_3()
+            .child(settings_label("WSL2 运行环境", cx))
             .child(detail_row("专用发行版", "rusker (WSL2)", cx))
             .child(detail_row("运行状态", status, cx))
             .child(detail_row("Windows 端点", MANAGED_DOCKER_HOST, cx))
             .child(detail_row("WSL2 端点", WSL_DOCKER_HOST, cx))
             .child(detail_row("NVIDIA GPU", gpu_detail, cx))
-            .child(muted(
-                "Engine 不监听 TCP 端口。Windows 工具可执行：docker context create rusker --docker host=npipe:////./pipe/rusker_engine。退出 Rusker 时会停止 Engine，与 Docker Desktop 一致。",
-                cx,
-            ))
-            .child(muted(
-                "Windows 宿主机必须已安装支持 WSL2 GPU-PV 的 NVIDIA 驱动。这里只安装容器工具链，不在 WSL 内安装显卡驱动。",
-                cx,
-            ))
-            .when_some(runtime_busy_label, |this, label| {
-                this.child(div().text_sm().text_color(cx.theme().muted_foreground).child(label))
+            .when_some(self.runtime_busy.clone(), |this, label| {
+                this.child(muted(label, cx))
             })
             .child(
                 div()
@@ -1692,17 +1990,32 @@ impl RuskerApp {
                             })),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(div().font_semibold().child("发行版集成"))
-                    .child(muted(
-                        "开关安装或移除 Rusker 标记的 Docker CLI 包装器及 Compose/Buildx 插件，默认连接共享 socket；它不是防止手动访问的安全边界。",
-                        cx,
-                    )),
-            )
+            .when(!warning.is_empty(), |this| {
+                this.child(div().text_sm().text_color(cx.theme().warning).child(warning))
+            })
+            .when_some(self.runtime_error.clone(), |this, error| {
+                this.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            })
+            .when_some(self.runtime_notice.clone(), |this, notice| {
+                this.child(div().text_sm().text_color(cx.theme().success).child(notice))
+            })
+            .child(muted(
+                "Engine 不监听 TCP 端口。Windows 工具可执行：docker context create rusker --docker host=npipe:////./pipe/rusker_engine。退出 Rusker 时会停止 Engine。安装或修复可能需要数分钟，Engine 日志位于专用发行版的 /var/log/rusker-dockerd.log。",
+                cx,
+            ))
+    }
+
+    fn render_wsl_integration(&self, cx: &mut Context<Self>) -> Div {
+        let snapshot = &self.runtime_snapshot;
+        let busy = self.runtime_busy.is_some();
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(muted(
+                "开关安装或移除 Rusker 标记的 Docker CLI 包装器及 Compose/Buildx 插件，默认连接共享 socket；它不是防止手动访问的安全边界。",
+                cx,
+            ))
             .when(snapshot.distributions.is_empty(), |this| {
                 this.child(muted("没有发现可集成的其他 WSL2 发行版。", cx))
             })
@@ -1714,10 +2027,11 @@ impl RuskerApp {
                     distribution.name.clone()
                 };
                 div()
+                    .py_2()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(div().flex_1().child(title))
+                    .child(div().flex_1().font_medium().child(title))
                     .child(
                         div()
                             .text_sm()
@@ -1740,210 +2054,523 @@ impl RuskerApp {
                         })),
                     )
             }))
-            .when(!warning.is_empty(), |this| {
-                this.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().warning)
-                        .child(warning),
-                )
-            })
-            .when_some(self.runtime_error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(cx.theme().danger).child(error))
-            })
-            .when_some(self.runtime_notice.clone(), |this, notice| {
-                this.child(div().text_sm().text_color(cx.theme().success).child(notice))
-            })
             .child(muted(
-                "安装或修复可能需要数分钟。Engine 日志位于专用发行版的 /var/log/rusker-dockerd.log。",
+                "集成会立即生效，无需点击“应用”。资源节省模式下 WSL 发行版内的 docker 命令无法唤醒 Engine，请通过 Windows 端点或 Rusker 恢复。",
                 cx,
             ))
     }
 
     fn render_settings(&self, cx: &mut Context<Self>) -> Div {
+        let sections = SettingsSection::visible();
+        let active = self.active_settings_section(&sections);
+        let content = sections
+            .iter()
+            .enumerate()
+            .map(|(index, section)| {
+                let body = match section {
+                    SettingsSection::General => self.render_general_settings(cx),
+                    SettingsSection::VmResources => self.render_vm_settings(cx),
+                    SettingsSection::ResourceSaver => self.render_resource_saver_settings(cx),
+                    SettingsSection::Proxies => self.render_proxy_settings(cx),
+                    SettingsSection::WslIntegration => self.render_wsl_integration(cx),
+                };
+                div()
+                    .py_6()
+                    .when(index + 1 < sections.len(), |this| {
+                        this.border_b_1().border_color(cx.theme().border)
+                    })
+                    .flex()
+                    .flex_col()
+                    .gap_5()
+                    .child(div().text_2xl().font_semibold().child(section.title()))
+                    .child(body)
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .when_some(self.settings_warning.clone(), |this, warning| {
+                this.child(div().px_8().pt_6().child(callout(
+                    CalloutKind::Warning,
+                    "设置警告",
+                    div().child(warning),
+                    cx,
+                )))
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(
+                        div()
+                            .id("settings-scroll")
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.settings_scroll)
+                            .px_8()
+                            .pb_10()
+                            .children(content),
+                    )
+                    .child(
+                        div()
+                            .w(px(200.))
+                            .flex_shrink_0()
+                            .my_6()
+                            .border_l_1()
+                            .border_color(cx.theme().border)
+                            .flex()
+                            .flex_col()
+                            .children(sections.iter().enumerate().map(|(index, section)| {
+                                self.settings_nav_item(index, *section, index == active, cx)
+                            })),
+                    ),
+            )
+            .child(self.render_settings_footer(cx))
+    }
+
+    /// The section whose heading is at the top of the scroll view, or the
+    /// one last clicked when the view cannot scroll that far.
+    fn active_settings_section(&self, sections: &[SettingsSection]) -> usize {
+        let top = self
+            .settings_scroll
+            .top_item()
+            .min(sections.len().saturating_sub(1));
+        let at_bottom = self.settings_scroll.offset().y <= -self.settings_scroll.max_offset().y
+            && self.settings_scroll.max_offset().y > px(0.);
+        match self.settings_nav_target {
+            Some(target) if at_bottom && target > top => target,
+            _ => top,
+        }
+    }
+
+    fn settings_nav_item(
+        &self,
+        index: usize,
+        section: SettingsSection,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let accent = if cx.theme().mode.is_dark() {
+            rgb(0x60A5FA).into()
+        } else {
+            brand_color(cx)
+        };
+        div()
+            .id(("settings-nav", index))
+            .ml(px(-1.))
+            .pl_5()
+            .py_2()
+            .border_l_2()
+            .border_color(if selected {
+                accent
+            } else {
+                gpui_kit::transparent_black()
+            })
+            .text_sm()
+            .cursor_pointer()
+            .when(selected, |this| this.font_semibold().text_color(accent))
+            .when(!selected, |this| {
+                this.text_color(cx.theme().muted_foreground)
+                    .hover(|style| style.text_color(cx.theme().foreground))
+            })
+            .child(section.title())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.settings_nav_target = Some(index);
+                this.settings_scroll.scroll_to_top_of_item(index);
+                cx.notify();
+            }))
+    }
+
+    fn render_settings_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dirty = self.settings_dirty(cx);
+        let (message, color) = if let Some(error) = self.settings_error.clone() {
+            (error, cx.theme().danger)
+        } else if dirty {
+            ("有未保存的更改".to_string(), cx.theme().warning)
+        } else if let Some(notice) = self.settings_notice.clone() {
+            (notice, cx.theme().success)
+        } else {
+            ("没有未保存的更改".to_string(), cx.theme().muted_foreground)
+        };
+        let manages_engine = self.manages_engine();
+        let apply_blocked =
+            self.settings_store.is_none() || (manages_engine && self.runtime_busy.is_some());
+        div()
+            .flex_shrink_0()
+            .px_8()
+            .py_3()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(color)
+                    .child(message),
+            )
+            .child(
+                Button::new("discard-settings")
+                    .outline()
+                    .label("放弃更改")
+                    .disabled(!dirty)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.discard_settings(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("apply-settings")
+                    .primary()
+                    .label("应用")
+                    .disabled(!dirty || apply_blocked)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.apply_settings(cx);
+                    })),
+            )
+    }
+
+    fn render_general_settings(&self, cx: &mut Context<Self>) -> Div {
         let config_path = self
             .settings_store
             .as_ref()
             .map(|store| store.config_path().display().to_string())
             .unwrap_or_else(|| "不可用".into());
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(settings_label("外观", cx))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(self.theme_button(ThemePreference::System, cx))
+                    .child(self.theme_button(ThemePreference::Light, cx))
+                    .child(self.theme_button(ThemePreference::Dark, cx)),
+            )
+            .child(muted("主题立即预览，点击“应用”后保存。", cx))
+            .child(muted(format!("Rusker 配置文件：{config_path}"), cx))
+    }
+
+    fn render_vm_settings(&self, cx: &mut Context<Self>) -> Div {
+        if !self.manages_engine() {
+            return div().child(callout(
+                CalloutKind::Info,
+                "外部 Engine",
+                muted(
+                    "当前 Engine 不由 Rusker 管理（非 Windows 或设置了 DOCKER_HOST），CPU、内存和磁盘由该 Engine 自行配置。",
+                    cx,
+                ),
+                cx,
+            ));
+        }
+        let location = self.disk_location_display();
+        let move_pending = self.pending_disk_move(&self.settings_draft).is_some();
+        let busy = self.runtime_busy.is_some();
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(callout(
+                CalloutKind::Info,
+                "WSL 2 后端",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("你正在使用 WSL 2 后端，资源限制由 Windows 管理。")
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_1()
+                            .child("可以在")
+                            .child(
+                                div()
+                                    .id("open-wslconfig-docs")
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_color(cx.theme().link)
+                                    .underline()
+                                    .cursor_pointer()
+                                    .child(".wslconfig 文件")
+                                    .child(Icon::new(AssetIcon::ExternalLink).xsmall())
+                                    .on_click(|_, _, cx| cx.open_url(WSLCONFIG_DOCS_URL)),
+                            )
+                            .child("中配置 WSL 2 可用的内存、CPU 和交换空间上限。"),
+                    ),
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(settings_label("磁盘镜像位置", cx))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(px(36.))
+                                    .px_3()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().muted)
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Icon::new(AssetIcon::Folder)
+                                            .small()
+                                            .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .font_family(cx.theme().mono_font_family.clone())
+                                            .text_sm()
+                                            .child(location),
+                                    ),
+                            )
+                            .child(
+                                Button::new("browse-disk-location")
+                                    .outline()
+                                    .label("浏览…")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.browse_disk_location(cx);
+                                    })),
+                            ),
+                    )
+                    .child(muted(
+                        if self.runtime_snapshot.installed {
+                            "专用发行版的虚拟磁盘（ext4.vhdx）所在目录。选择一个空目录并应用即可移动，需要 WSL 2.3 或更新版本。"
+                        } else {
+                            "安装环境时虚拟磁盘（ext4.vhdx）的存放目录，必须为空目录。"
+                        },
+                        cx,
+                    ))
+                    .when(move_pending, |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().warning)
+                                .child("应用后会停止 Engine 并移动磁盘镜像，运行中的容器会被停止；磁盘较大时可能需要数分钟。"),
+                        )
+                    }),
+            )
+            .child(self.render_engine_runtime(cx))
+    }
+
+    fn render_resource_saver_settings(&self, cx: &mut Context<Self>) -> Div {
+        let enabled = self.settings_draft.resource_saver.enabled;
+        let managed = self.manages_engine();
+        let threshold_labels = [
+            "30 秒",
+            "10 分钟",
+            "20 分钟",
+            "30 分钟",
+            "40 分钟",
+            "50 分钟",
+            "60 分钟",
+        ];
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .child(div().flex_1().child(settings_label("启用资源节省", cx)))
+                    .child(
+                        Switch::new("resource-saver-enabled")
+                            .checked(enabled)
+                            .disabled(!managed)
+                            .on_change(cx.listener(|this, enabled, _, cx| {
+                                this.settings_draft.resource_saver.enabled = *enabled;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(muted(
+                if managed {
+                    "没有运行中的容器时停止 Engine 和专用发行版，释放 CPU 与内存。Windows 客户端（docker.exe、Rusker）再次连接时自动恢复。"
+                } else {
+                    "资源节省只作用于 Rusker 管理的 WSL2 Engine，当前 Engine 不由 Rusker 管理。"
+                },
+                cx,
+            ))
+            .when(self.resource_saver_active(), |this| {
+                this.child(callout(
+                    CalloutKind::Info,
+                    "正处于资源节省模式",
+                    muted("Engine 已暂停。运行 docker 命令或刷新 Rusker 即可恢复。", cx),
+                    cx,
+                ))
+            })
+            .child(
+                div()
+                    .ml_6()
+                    .pl_6()
+                    .border_l_2()
+                    .border_color(cx.theme().border)
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .when(!enabled || !managed, |this| this.opacity(0.5))
+                    .child(settings_label("资源节省阈值", cx))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_5()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div().w(px(96.)).child(
+                                            Input::new(&self.saver_threshold_input)
+                                                .disabled(!enabled || !managed),
+                                        ),
+                                    )
+                                    .child(muted("秒", cx)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(240.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        Slider::new(&self.saver_slider)
+                                            .disabled(!enabled || !managed),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .justify_between()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .children(threshold_labels.map(|label| div().child(label))),
+                                    ),
+                            ),
+                    )
+                    .child(muted(
+                        "拖动滑块设置从没有运行中的容器到进入资源节省模式之间的等待时间（30 秒到 60 分钟）。",
+                        cx,
+                    )),
+            )
+    }
+
+    fn render_proxy_settings(&self, cx: &mut Context<Self>) -> Div {
+        let manages_engine = self.manages_engine();
         let export_path = self
             .settings_store
             .as_ref()
             .map(|store| store.proxy_export_path().display().to_string())
             .unwrap_or_else(|| "不可用".into());
-        let manages_engine = self.manages_engine();
-
-        div().flex_1().min_h_0().child(
-            div()
-                .id("settings-page")
-                .size_full()
-                .overflow_y_scroll()
-                .p_6()
-                .child(
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .child(div().flex_1().child(settings_label("Docker Engine 拉取代理", cx)))
+                    .child(
+                        Switch::new("docker-proxy-enabled")
+                            .checked(self.settings_draft.docker_proxy.enabled)
+                            .on_change(cx.listener(|this, enabled, _, cx| {
+                                this.settings_draft.docker_proxy.enabled = *enabled;
+                                this.settings_notice = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(muted(
+                "Engine 拉取镜像等出站请求使用的代理。应用后直接写入受管 Engine 的 daemon.json 并生效。",
+                cx,
+            ))
+            .child(form_field(
+                "HTTP_PROXY",
+                &self.http_proxy_input,
+                "支持 http:// 或 https://，不保存内嵌用户名或密码。",
+                cx,
+            ))
+            .child(form_field(
+                "HTTPS_PROXY",
+                &self.https_proxy_input,
+                "HTTPS 请求使用的代理地址，也可以填写 http:// 代理。",
+                cx,
+            ))
+            .child(form_field(
+                "NO_PROXY",
+                &self.no_proxy_input,
+                "逗号分隔的主机、域名、IP 或 CIDR，例如 localhost,127.0.0.1,::1。",
+                cx,
+            ))
+            .child(callout(
+                CalloutKind::Warning,
+                if manages_engine { "会重启 Engine" } else { "需要手动应用" },
+                muted(
+                    if manages_engine {
+                        "代理配置变化时会重启 Engine，运行中的容器会被停止（设置了重启策略的容器会自动恢复）。WSL2 使用 NAT 网络时，127.0.0.1 指向 WSL 自身而非 Windows，请填写 Windows 主机地址。"
+                    } else {
+                        "当前 Engine 不由 Rusker 管理，无法直接修改其配置。请导出后手动合并 proxies 到 daemon.json 并重启 Engine；不要覆盖 daemon.json 中的其他配置。"
+                    },
+                    cx,
+                ),
+                cx,
+            ))
+            .when(!manages_engine, |this| {
+                this.child(
                     div()
                         .flex()
-                        .flex_col()
-                        .gap_5()
-                        .child(page_header(
-                            "设置",
-                            "WSL2 运行环境、外观与 Docker Engine 拉取代理配置。",
-                            cx,
-                        ))
-                        .when(cfg!(windows), |this| {
-                            this.child(self.render_runtime_host(cx))
-                        })
-                        .when_some(self.settings_warning.clone(), |this, warning| {
-                            this.child(
-                                div()
-                                    .p_3()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(cx.theme().warning)
-                                    .text_sm()
-                                    .text_color(cx.theme().warning)
-                                    .child(warning),
-                            )
-                        })
+                        .items_center()
+                        .gap_3()
                         .child(
-                            section_panel(cx)
-                                .p_5()
-                                .flex()
-                                .flex_col()
-                                .gap_4()
-                                .child(div().text_lg().font_semibold().child("外观"))
-                                .child(muted("主题立即生效，点击“保存设置”后持久化。", cx))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap_2()
-                                        .child(self.theme_button(ThemePreference::System, cx))
-                                        .child(self.theme_button(ThemePreference::Light, cx))
-                                        .child(self.theme_button(ThemePreference::Dark, cx)),
-                                ),
+                            Button::new("export-proxy-settings")
+                                .outline()
+                                .icon(IconName::FileText)
+                                .label("导出 Engine JSON")
+                                .disabled(self.settings_store.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.export_proxy_settings(cx);
+                                })),
                         )
-                        .child(
-                            section_panel(cx)
-                                .p_5()
-                                .flex()
-                                .flex_col()
-                                .gap_4()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_lg()
-                                                .font_semibold()
-                                                .child("Docker Engine 拉取代理"),
-                                        )
-                                        .child(muted(
-                                            "Engine 拉取镜像等出站请求使用的代理。保存后直接写入受管 Engine 的 daemon.json 并生效。",
-                                            cx,
-                                        )),
-                                )
-                                .child(
-                                    Switch::new("docker-proxy-enabled")
-                                        .label("启用代理配置")
-                                        .checked(self.settings.docker_proxy.enabled)
-                                        .on_change(cx.listener(|this, enabled, _, cx| {
-                                            this.settings.docker_proxy.enabled = *enabled;
-                                            this.settings_notice = None;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(form_field(
-                                    "HTTP_PROXY",
-                                    &self.http_proxy_input,
-                                    "支持 http:// 或 https://，不保存内嵌用户名或密码。",
-                                    cx,
-                                ))
-                                .child(form_field(
-                                    "HTTPS_PROXY",
-                                    &self.https_proxy_input,
-                                    "HTTPS 请求使用的代理地址，也可以填写 http:// 代理。",
-                                    cx,
-                                ))
-                                .child(form_field(
-                                    "NO_PROXY",
-                                    &self.no_proxy_input,
-                                    "逗号分隔的主机、域名、IP 或 CIDR，例如 localhost,127.0.0.1,::1。",
-                                    cx,
-                                ))
-                                .child(
-                                    div()
-                                        .p_3()
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(cx.theme().warning)
-                                        .text_sm()
-                                        .text_color(cx.theme().warning)
-                                        .child(if manages_engine {
-                                            "代理配置变化时会重启 Engine，运行中的容器会被停止（设置了重启策略的容器会自动恢复）。WSL2 使用 NAT 网络时，127.0.0.1 指向 WSL 自身而非 Windows，请填写 Windows 主机地址。"
-                                        } else {
-                                            "当前 Engine 不由 Rusker 管理，无法直接修改其配置。请导出后手动合并 proxies 到 daemon.json 并重启 Engine；不要覆盖 daemon.json 中的其他配置。"
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap_3()
-                                        .child(
-                                            Button::new("save-settings")
-                                                .primary()
-                                                .icon(IconName::Check)
-                                                .label(if manages_engine {
-                                                    "保存并应用"
-                                                } else {
-                                                    "保存设置"
-                                                })
-                                                .disabled(
-                                                    self.settings_store.is_none()
-                                                        || (manages_engine
-                                                            && self.runtime_busy.is_some()),
-                                                )
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.save_settings(cx);
-                                                })),
-                                        )
-                                        .when(!manages_engine, |this| {
-                                            this.child(
-                                                Button::new("export-proxy-settings")
-                                                    .outline()
-                                                    .icon(IconName::FileText)
-                                                    .label("导出 Engine JSON")
-                                                    .disabled(self.settings_store.is_none())
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.export_proxy_settings(cx);
-                                                    })),
-                                            )
-                                        }),
-                                )
-                                .child(muted(format!("Rusker 配置：{config_path}"), cx))
-                                .when(!manages_engine, |this| {
-                                    this.child(muted(format!("代理导出：{export_path}"), cx))
-                                }),
-                        )
-                        .when_some(self.settings_error.clone(), |this, error| {
-                            this.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().danger)
-                                    .child(error),
-                            )
-                        })
-                        .when_some(self.settings_notice.clone(), |this, notice| {
-                            this.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().success)
-                                    .child(notice),
-                            )
-                        }),
-                ),
-        )
+                        .child(muted(format!("导出到：{export_path}"), cx)),
+                )
+            })
     }
 
     fn render_image_list(&self, images: &[ImageSummary], cx: &mut Context<Self>) -> Div {
@@ -2309,6 +2936,9 @@ impl RuskerApp {
         if self.connected {
             return ("Engine 运行中".into(), cx.theme().success);
         }
+        if self.resource_saver_active() {
+            return ("资源节省模式".into(), cx.theme().info);
+        }
         if let Some(busy) = &self.runtime_busy {
             return (
                 busy.trim_end_matches('…').to_string() + "…",
@@ -2362,6 +2992,56 @@ pub fn apply_theme(preference: ThemePreference, cx: &mut App) {
             Theme::change(ThemeMode::Dark, None, cx);
         }
     }
+}
+
+/// The saved disk location, `None` for the default.
+fn disk_location_setting(settings: &AppSettings) -> Option<PathBuf> {
+    let location = settings.vm.disk_image_location.trim();
+    (!location.is_empty()).then(|| PathBuf::from(location))
+}
+
+fn settings_label(text: &'static str, cx: &App) -> Div {
+    div()
+        .text_base()
+        .font_semibold()
+        .text_color(cx.theme().foreground)
+        .child(text)
+}
+
+#[derive(Clone, Copy)]
+enum CalloutKind {
+    Info,
+    Warning,
+}
+
+/// Tinted notice box with an icon and a title, like Docker Desktop's
+/// "WSL2 backend" panel.
+fn callout(kind: CalloutKind, title: &'static str, body: impl IntoElement, cx: &App) -> Div {
+    let (color, icon) = match kind {
+        CalloutKind::Info => (cx.theme().info, AssetIcon::Info),
+        CalloutKind::Warning => (cx.theme().warning, AssetIcon::TriangleAlert),
+    };
+    let body: AnyElement = body.into_any_element();
+    div()
+        .p_5()
+        .rounded_lg()
+        .bg(color.opacity(0.1))
+        .border_1()
+        .border_color(color.opacity(0.25))
+        .flex()
+        .gap_3()
+        .child(Icon::new(icon).text_color(color))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .text_sm()
+                .child(div().text_base().font_semibold().child(title))
+                .child(body),
+        )
 }
 
 fn form_field(label: &str, input: &Entity<InputState>, hint: &str, cx: &App) -> Div {

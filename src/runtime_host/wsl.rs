@@ -4,7 +4,10 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Output, Stdio},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
     time::Duration,
 };
 
@@ -18,7 +21,7 @@ use tokio::{
 };
 
 use super::RuntimeHostError;
-use crate::settings::DockerProxySettings;
+use crate::settings::{DockerProxySettings, ResourceSaverSettings};
 
 pub const MANAGED_DISTRO_NAME: &str = "rusker";
 /// Windows-side endpoint, served by the in-app proxy (like Docker Desktop's
@@ -243,6 +246,11 @@ pub struct RuntimeHostSnapshot {
     pub gpu: NvidiaGpuStatus,
     pub distributions: Vec<WslDistribution>,
     pub warnings: Vec<String>,
+    /// The engine was stopped by Resource Saver and wakes on the next
+    /// Windows client connection.
+    pub resource_saver_active: bool,
+    /// Directory holding the managed distribution's `ext4.vhdx`.
+    pub disk_location: Option<PathBuf>,
 }
 
 impl Default for RuntimeHostSnapshot {
@@ -255,7 +263,74 @@ impl Default for RuntimeHostSnapshot {
             gpu: NvidiaGpuStatus::default(),
             distributions: Vec::new(),
             warnings: Vec::new(),
+            resource_saver_active: false,
+            disk_location: None,
         }
+    }
+}
+
+/// Resource Saver configuration and live state, shared between the idle
+/// monitor, the named pipe proxy (which wakes the engine) and the UI.
+pub(crate) struct ResourceSaver {
+    enabled: AtomicBool,
+    threshold_secs: AtomicU64,
+    active: AtomicBool,
+    connections: AtomicUsize,
+}
+
+impl Default for ResourceSaver {
+    fn default() -> Self {
+        let defaults = ResourceSaverSettings::default();
+        Self {
+            // Off until the app pushes the saved settings.
+            enabled: AtomicBool::new(false),
+            threshold_secs: AtomicU64::new(defaults.threshold_secs),
+            active: AtomicBool::new(false),
+            connections: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl ResourceSaver {
+    pub(crate) fn configure(&self, settings: &ResourceSaverSettings) {
+        self.threshold_secs
+            .store(settings.threshold_secs, Ordering::Relaxed);
+        self.enabled.store(settings.enabled, Ordering::Relaxed);
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn threshold(&self) -> Duration {
+        Duration::from_secs(self.threshold_secs.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::SeqCst);
+    }
+
+    /// Open Windows pipe connections; any of them keeps the engine awake.
+    pub(crate) fn connections(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn track_connection(self: &Arc<Self>) -> ConnectionGuard {
+        self.connections.fetch_add(1, Ordering::SeqCst);
+        ConnectionGuard(self.clone())
+    }
+}
+
+pub(crate) struct ConnectionGuard(Arc<ResourceSaver>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.connections.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -323,6 +398,11 @@ pub struct WslHost {
     proxy: Arc<ProxyStatus>,
     /// Desired `proxies` object for the managed dockerd's `daemon.json`.
     engine_proxies: Arc<Mutex<Map<String, Value>>>,
+    saver: Arc<ResourceSaver>,
+    /// Where a fresh install imports the distribution (None = default).
+    install_location: Arc<Mutex<Option<PathBuf>>>,
+    /// Cached `BasePath` of the installed distribution.
+    disk_location: Arc<Mutex<Option<PathBuf>>>,
 }
 
 /// What saving the Engine proxy settings did.
@@ -351,7 +431,96 @@ impl WslHost {
             session: Arc::default(),
             proxy: Arc::default(),
             engine_proxies: Arc::default(),
+            saver: Arc::default(),
+            install_location: Arc::default(),
+            disk_location: Arc::default(),
         })
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn resource_saver(&self) -> Arc<ResourceSaver> {
+        self.saver.clone()
+    }
+
+    pub fn session_running(&self) -> bool {
+        self.session.is_running()
+    }
+
+    /// Default directory for the distribution's virtual disk.
+    pub fn default_disk_location(&self) -> PathBuf {
+        self.root.join("distro")
+    }
+
+    /// Sets where a fresh install places the virtual disk (None = default).
+    pub fn set_install_location(&self, location: Option<PathBuf>) {
+        *lock(&self.install_location) = location;
+    }
+
+    /// Looks up (and caches) the registered `BasePath` of the managed
+    /// distribution, i.e. the directory holding `ext4.vhdx`.
+    async fn disk_location(&self) -> Option<PathBuf> {
+        if let Some(cached) = lock(&self.disk_location).clone() {
+            return Some(cached);
+        }
+        let location = query_disk_location().await?;
+        *lock(&self.disk_location) = Some(location.clone());
+        Some(location)
+    }
+
+    /// Moves the managed distribution's virtual disk with
+    /// `wsl --manage --move`, restarting the engine if it was running.
+    pub async fn move_disk(&self, target: &Path) -> Result<(), RuntimeHostError> {
+        ensure_windows()?;
+        self.ensure_owned().await?;
+        if let Some(current) = self.disk_location().await {
+            if same_path(&current, target) {
+                return Ok(());
+            }
+        }
+        prepare_empty_directory(target)?;
+        let was_running = self.session.is_running();
+        self.stop_engine().await;
+        let mut terminate = wsl_command();
+        terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
+        execute(terminate, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await?;
+        let mut command = wsl_command();
+        command
+            .args(["--manage", MANAGED_DISTRO_NAME, "--move"])
+            .arg(target);
+        let moved = execute(
+            command,
+            "移动磁盘镜像（需要 WSL 2.3 或更新版本）",
+            INSTALL_TIMEOUT,
+        )
+        .await;
+        *lock(&self.disk_location) = None;
+        moved?;
+        if was_running {
+            self.start_engine().await?;
+        }
+        Ok(())
+    }
+
+    /// Number of running containers, asked inside the distribution so the
+    /// check itself never counts as pipe activity.
+    pub(crate) async fn running_containers(&self) -> Result<usize, RuntimeHostError> {
+        let mut command = managed_command("root");
+        command.args(["/usr/bin/docker", "ps", "--quiet"]);
+        let output = execute(command, "检查运行中的容器", COMMAND_TIMEOUT).await?;
+        Ok(decode(&output.stdout)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count())
+    }
+
+    /// Stops the idle engine and its distribution to release memory. The
+    /// pipe proxy restarts it on the next Windows client connection.
+    pub(crate) async fn enter_resource_saver(&self) {
+        self.stop_engine().await;
+        let mut terminate = wsl_command();
+        terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
+        let _ = execute(terminate, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await;
+        self.saver.set_active(true);
     }
 
     pub fn set_engine_proxy(&self, settings: &DockerProxySettings) {
@@ -412,11 +581,6 @@ impl WslHost {
         )
         .await?;
         Ok(true)
-    }
-
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(crate) fn session(&self) -> Arc<EngineSession> {
-        self.session.clone()
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -483,6 +647,11 @@ impl WslHost {
                 is_default: distribution.is_default,
             })
             .collect();
+        let disk_location = if installed {
+            self.disk_location().await
+        } else {
+            None
+        };
         Ok(RuntimeHostSnapshot {
             supported: true,
             installed,
@@ -491,6 +660,8 @@ impl WslHost {
             gpu,
             distributions,
             warnings,
+            resource_saver_active: self.saver.is_active() && !session_alive,
+            disk_location,
         })
     }
 
@@ -506,7 +677,9 @@ impl WslHost {
             self.stop_engine().await;
         } else {
             let rootfs = self.ensure_rootfs().await?;
-            let install_dir = self.root.join("distro");
+            let install_dir = lock(&self.install_location)
+                .clone()
+                .unwrap_or_else(|| self.default_disk_location());
             prepare_empty_directory(&install_dir)?;
             let mut command = wsl_command();
             command
@@ -526,6 +699,7 @@ impl WslHost {
                 let _ = execute(unregister, "回滚未登记的发行版", COMMAND_TIMEOUT).await;
                 return Err(error);
             }
+            *lock(&self.disk_location) = None;
         }
 
         let setup_script = rendered_setup_script();
@@ -565,6 +739,8 @@ impl WslHost {
 
     pub async fn stop(&self) -> Result<(), RuntimeHostError> {
         self.ensure_owned().await?;
+        // A manual stop is not Resource Saver: clients must not wake it.
+        self.saver.set_active(false);
         self.stop_engine().await;
         let mut command = wsl_command();
         command.args(["--terminate", MANAGED_DISTRO_NAME]);
@@ -652,6 +828,7 @@ impl WslHost {
     }
 
     async fn start_engine(&self) -> Result<(), RuntimeHostError> {
+        self.saver.set_active(false);
         if !self.session.is_running() {
             // Write the current proxy config before dockerd reads it. If it
             // changed while a leftover dockerd is still running, stop that
@@ -921,6 +1098,58 @@ fn wsl_command() -> Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Windows paths compare case-insensitively and ignore trailing separators
+/// and the `\\?\` verbatim prefix.
+pub fn same_path(left: &Path, right: &Path) -> bool {
+    fn key(path: &Path) -> String {
+        strip_verbatim(&path.to_string_lossy())
+            .trim_end_matches(['\\', '/'])
+            .replace('/', "\\")
+            .to_lowercase()
+    }
+    key(left) == key(right)
+}
+
+fn strip_verbatim(path: &str) -> &str {
+    path.strip_prefix(r"\\?\").unwrap_or(path)
+}
+
+/// WSL keeps each distribution's location in `HKCU\...\Lxss\{guid}\BasePath`.
+/// PowerShell is used so non-ASCII paths come back as UTF-8.
+async fn query_disk_location() -> Option<PathBuf> {
+    const SCRIPT: &str = "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
+        Get-ChildItem 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss' -ErrorAction SilentlyContinue \
+        | ForEach-Object { Get-ItemProperty $_.PSPath } \
+        | Where-Object { $_.DistributionName -eq 'rusker' } \
+        | ForEach-Object { $_.BasePath }";
+    let mut command = Command::new("powershell.exe");
+    command.kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT]);
+    let output = execute(command, "读取磁盘镜像位置", COMMAND_TIMEOUT)
+        .await
+        .ok()?;
+    parse_base_path(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_base_path(output: &str) -> Option<PathBuf> {
+    let line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    Some(PathBuf::from(strip_verbatim(line)))
 }
 
 async fn execute(
@@ -1301,6 +1530,41 @@ fn decode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_registry_base_path_and_compares_windows_paths() {
+        assert_eq!(
+            parse_base_path("\r\n\\\\?\\D:\\WSL\\Rusker\r\n"),
+            Some(PathBuf::from(r"D:\WSL\Rusker"))
+        );
+        assert_eq!(parse_base_path("  \r\n"), None);
+        assert!(same_path(
+            Path::new(r"\\?\D:\WSL\Rusker\"),
+            Path::new("d:/wsl/rusker")
+        ));
+        assert!(!same_path(
+            Path::new(r"D:\WSL\Rusker"),
+            Path::new(r"D:\WSL")
+        ));
+    }
+
+    #[test]
+    fn resource_saver_tracks_open_connections() {
+        let saver = Arc::new(ResourceSaver::default());
+        assert!(!saver.enabled());
+        saver.configure(&ResourceSaverSettings {
+            enabled: true,
+            threshold_secs: 120,
+        });
+        assert!(saver.enabled());
+        assert_eq!(saver.threshold(), Duration::from_secs(120));
+        let first = saver.track_connection();
+        let second = saver.track_connection();
+        assert_eq!(saver.connections(), 2);
+        drop(first);
+        drop(second);
+        assert_eq!(saver.connections(), 0);
+    }
 
     #[test]
     fn parses_utf16_distribution_list_with_spaces_in_names() {

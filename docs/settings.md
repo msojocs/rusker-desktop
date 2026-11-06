@@ -2,13 +2,32 @@
 
 ## 设置界面
 
-侧边栏“设置”目前提供：
+设置页仿照 Docker Desktop 新版设置：左侧为按分区纵向排列的内容，右侧为分区导航（点击跳转，滚动时高亮当前分区），底部为“放弃更改 / 应用”栏并显示是否有未保存的更改。分区如下：
 
-- 外观：跟随系统、浅色、深色，选择后立即生效，保存后持久化。
-- Docker Engine 拉取代理：开关、`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`。
-- 保存并应用：保存 Rusker 设置，并让代理直接在受管 Engine 上生效。
-- 导出 Docker `daemon.json` 使用的 `proxies` JSON 片段（仅当 Engine 不由 Rusker 管理时显示）。
+- 常规：外观（跟随系统、浅色、深色），选择后立即预览，点击“应用”后持久化；“放弃更改”恢复已保存的主题。
+- VM 资源：WSL 2 后端说明（CPU、内存、交换空间由 Windows 的 `.wslconfig` 管理）、磁盘镜像位置，以及 WSL2 运行环境的状态与安装/启动/停止操作。
+- 资源节省：开关与阈值（30 秒到 60 分钟，默认开启、300 秒）。
+- 代理：Docker Engine 拉取代理开关、`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`；Engine 不由 Rusker 管理时可导出 `daemon.json` 的 `proxies` 片段。
+- WSL 集成（仅 Windows）：其他 WSL2 发行版的 Docker CLI 集成开关，切换后立即生效，不需要点击“应用”。
 
+### 磁盘镜像位置
+
+受管发行版 `rusker` 的虚拟磁盘（`ext4.vhdx`）所在目录，实际位置从 `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` 中该发行版的 `BasePath` 读取。
+
+- 尚未安装时，选择的目录作为安装位置（必须为空目录）。
+- 已安装时，选择一个空目录并点击“应用”，Rusker 会停止 Engine、执行 `wsl --manage rusker --move <目录>`，成功后再保存设置并恢复 Engine。需要 WSL 2.3 或更新版本；移动失败时设置不会保存。
+
+### 资源节省
+
+开启后，受管 Engine 在**没有运行中的容器且没有 Windows 管道客户端连接**达到阈值时，停止 dockerd 并终止 `rusker` 发行版以释放 CPU 与内存，状态栏显示“资源节省模式”。
+
+- 任何连接 `npipe:////./pipe/rusker_engine` 的客户端（`docker.exe`、Rusker 自身刷新等）都会让 Engine 自动恢复，连接会等待 Engine 就绪后再转发。
+- 拉取镜像、`docker logs -f` 等仍在进行的管道连接会阻止进入资源节省模式。
+- 手动“停止”不属于资源节省，客户端连接不会自动启动 Engine。
+- 已知限制：资源节省模式下，已集成的 WSL 发行版内通过 `/mnt/wsl/rusker/docker.sock` 运行的 docker 命令无法唤醒 Engine，需要先通过 Windows 端点或 Rusker 恢复；直接连接该 socket 的长时间操作也不会被计为活动连接。
+- 修改开关或阈值后点击“应用”立即生效，不会重启 Engine。
+
+### 其他
 默认配置目录由操作系统决定，可通过 `RUSKER_CONFIG_DIR` 覆盖。目录内包含：
 
 - `settings.json`：Rusker 自身设置。
@@ -20,7 +39,7 @@ Unix 下新写入的设置文件权限为 `0600`。代理地址不支持内嵌�
 
 Windows 上未设置 `DOCKER_HOST` 时，Engine 是 Rusker 自己的 WSL2 Engine（见 [WSL2 文档](wsl2.md)），代理行为与 Docker Desktop 的 “Apply & restart” 一致：
 
-1. 点击“保存并应用”后，Rusker 把 `proxies` 合并进 `rusker` 发行版的 `/etc/docker/daemon.json`。只替换 `proxies` 键，保留 NVIDIA runtime 等其他配置；关闭代理时删除该键。文件不是合法 JSON 对象时拒绝修改并报错。
+1. 点击“应用”后，Rusker 把 `proxies` 合并进 `rusker` 发行版的 `/etc/docker/daemon.json`。只替换 `proxies` 键，保留 NVIDIA runtime 等其他配置；关闭代理时删除该键。文件不是合法 JSON 对象时拒绝修改并报错。
 2. 配置有变化且 Engine 正在运行时，优雅重启 `dockerd`（运行中的容器会停止，设置了重启策略的容器会自动恢复）。配置无变化时不重启。
 3. Engine 未运行时，配置在下次启动 Engine 前写入；应用启动时也会按已保存的设置校正 `daemon.json`。
 

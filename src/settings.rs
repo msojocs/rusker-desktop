@@ -108,17 +108,80 @@ impl WslSettings {
     }
 }
 
+/// Shortest idle time before the managed engine enters Resource Saver mode.
+pub const RESOURCE_SAVER_MIN_SECS: u64 = 30;
+/// Longest idle time before the managed engine enters Resource Saver mode.
+pub const RESOURCE_SAVER_MAX_SECS: u64 = 3600;
+pub const RESOURCE_SAVER_DEFAULT_SECS: u64 = 300;
+
+/// Docker Desktop-style Resource Saver: stop the managed engine after it has
+/// had no running containers for `threshold_secs`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResourceSaverSettings {
+    pub enabled: bool,
+    pub threshold_secs: u64,
+}
+
+impl Default for ResourceSaverSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold_secs: RESOURCE_SAVER_DEFAULT_SECS,
+        }
+    }
+}
+
+impl ResourceSaverSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(RESOURCE_SAVER_MIN_SECS..=RESOURCE_SAVER_MAX_SECS).contains(&self.threshold_secs) {
+            return Err(format!(
+                "资源节省阈值需在 {RESOURCE_SAVER_MIN_SECS} 到 {RESOURCE_SAVER_MAX_SECS} 秒之间"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VmSettings {
+    /// Directory holding the managed distribution's `ext4.vhdx`. Empty means
+    /// the default location under the app data directory.
+    pub disk_image_location: String,
+}
+
+impl VmSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        let location = self.disk_image_location.trim();
+        if !location.is_empty() && !Path::new(location).is_absolute() {
+            return Err("磁盘镜像位置必须是绝对路径".into());
+        }
+        Ok(())
+    }
+
+    fn normalized(&self) -> Self {
+        Self {
+            disk_image_location: self.disk_image_location.trim().to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
     pub theme: ThemePreference,
     pub docker_proxy: DockerProxySettings,
     pub wsl: WslSettings,
+    pub resource_saver: ResourceSaverSettings,
+    pub vm: VmSettings,
 }
 
 impl AppSettings {
     pub fn validate(&self) -> Result<(), String> {
-        self.docker_proxy.validate()
+        self.docker_proxy.validate()?;
+        self.resource_saver.validate()?;
+        self.vm.validate()
     }
 
     pub fn normalized(&self) -> Self {
@@ -126,6 +189,8 @@ impl AppSettings {
             theme: self.theme,
             docker_proxy: self.docker_proxy.normalized(),
             wsl: self.wsl.normalized(),
+            resource_saver: self.resource_saver.clone(),
+            vm: self.vm.normalized(),
         }
     }
 }
@@ -299,6 +364,39 @@ fn validate_no_proxy(value: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    const DISK_LOCATION: &str = if cfg!(windows) {
+        "D:\\WSL\\Rusker"
+    } else {
+        "/srv/rusker"
+    };
+
+    #[test]
+    fn resource_saver_defaults_and_threshold_bounds() {
+        let saver = ResourceSaverSettings::default();
+        assert!(saver.enabled);
+        assert_eq!(saver.threshold_secs, RESOURCE_SAVER_DEFAULT_SECS);
+        for (threshold, valid) in [(29, false), (30, true), (3600, true), (3601, false)] {
+            let settings = ResourceSaverSettings {
+                enabled: true,
+                threshold_secs: threshold,
+            };
+            assert_eq!(settings.validate().is_ok(), valid, "阈值 {threshold}");
+        }
+        // Settings files written before Resource Saver existed keep loading.
+        let legacy: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).expect("旧设置");
+        assert_eq!(legacy.resource_saver, ResourceSaverSettings::default());
+        assert!(legacy.vm.disk_image_location.is_empty());
+    }
+
+    #[test]
+    fn disk_image_location_must_be_absolute() {
+        let relative = VmSettings {
+            disk_image_location: "relative/dir".into(),
+        };
+        assert!(relative.validate().is_err());
+        assert!(VmSettings::default().validate().is_ok());
+    }
+
     fn proxy() -> DockerProxySettings {
         DockerProxySettings {
             enabled: true,
@@ -364,6 +462,13 @@ mod tests {
                     ("Disabled".into(), false),
                 ]),
             },
+            resource_saver: ResourceSaverSettings {
+                enabled: false,
+                threshold_secs: 600,
+            },
+            vm: VmSettings {
+                disk_image_location: format!(" {DISK_LOCATION} "),
+            },
         };
         store.save(&settings).expect("保存设置");
         #[cfg(unix)]
@@ -386,6 +491,9 @@ mod tests {
             loaded.wsl.integrations,
             BTreeMap::from([("Ubuntu-24.04".into(), true)])
         );
+        assert!(!loaded.resource_saver.enabled);
+        assert_eq!(loaded.resource_saver.threshold_secs, 600);
+        assert_eq!(loaded.vm.disk_image_location, DISK_LOCATION);
 
         let export = store.export_proxy(&loaded.docker_proxy).expect("导出代理");
         assert_eq!(export, directory.path().join("docker-proxies.json"));
