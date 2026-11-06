@@ -1,22 +1,27 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use gpui_kit::component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
+    skeleton::Skeleton,
     slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
-    window_border, ActiveTheme as _, Icon, IconName, Sizable as _, Theme, ThemeMode,
+    window_border, ActiveTheme as _, Icon, IconName, Sizable as _, Size, Theme, ThemeMode,
     WindowExt as _,
 };
 use gpui_kit::{
     assets::IconName as AssetIcon,
     base::{Disableable as _, StyledExt as _},
-    div,
+    div, ease_out_quint, percentage,
     prelude::FluentBuilder as _,
-    px, rgb, AnyElement, App, AppContext as _, Context, Div, Entity, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, PathPromptOptions, Render, ScrollHandle,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    Window, WindowAppearance, WindowControlArea,
+    pulsating_between, px, rgb, Animation, AnimationExt as _, AnyElement, App, AppContext as _,
+    Context, Div, Entity, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Transformation, Window,
+    WindowAppearance, WindowControlArea,
 };
 use rusker_desktop::{
     container::ContainerDraft,
@@ -123,8 +128,55 @@ impl RuntimeOperation {
     }
 }
 
+/// Engine lifecycle phases that get the full-page loading animation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EngineTransition {
+    /// The managed WSL2 runtime is starting (launch, install or start).
+    Starting,
+    /// The runtime is ready (or external); waiting on the Docker API.
+    Connecting,
+    /// The managed runtime is shutting down.
+    Stopping,
+}
+
+impl EngineTransition {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Connecting => "connecting",
+            Self::Stopping => "stopping",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Starting => "正在启动 Docker Engine…",
+            Self::Connecting => "正在连接 Docker Engine…",
+            Self::Stopping => "正在停止 Docker Engine…",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Starting | Self::Connecting => "Docker Engine 是运行容器的底层技术",
+            Self::Stopping => "运行中的容器将被停止，Engine 关闭后可在设置中重新启动",
+        }
+    }
+}
+
 pub struct RuskerApp {
     engine: Option<EngineService>,
+    /// Set while a managed runtime start/stop is in flight.
+    engine_transition: Option<EngineTransition>,
+    /// Quit requested; the engine is being stopped before exiting.
+    quitting: bool,
+    /// The managed engine was already stopped by the quit flow, so the
+    /// blocking fallback in `on_app_quit` can be skipped.
+    shutdown_done: bool,
+    /// Clock for loading indicators. They are driven by hand instead of
+    /// `with_animation`, which freezes when the OS asks for reduced motion
+    /// (Windows "Animation effects" off) — a progress spinner must move.
+    motion_epoch: Instant,
     page: Page,
     snapshot: EngineSnapshot,
     connected: bool,
@@ -177,6 +229,7 @@ pub struct RuskerApp {
     _action_task: Option<Task<()>>,
     _logs_task: Option<Task<()>>,
     _runtime_task: Option<Task<()>>,
+    _quit_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -309,10 +362,14 @@ impl RuskerApp {
             Err(error) => (None, Some(error.to_string())),
         };
         // Like Docker Desktop, quitting the app stops the engine it owns.
-        // Runs synchronously: GPUI only waits ~200 ms for quit futures.
+        // Normally `request_quit` already did so with an animation; this is
+        // the fallback for other quit paths (e.g. OS logoff). Runs
+        // synchronously: GPUI only waits ~200 ms for quit futures.
         let quit_subscription = cx.on_app_quit(|this: &mut Self, _| {
-            if let Some(host) = this.runtime_host.clone() {
-                host.shutdown_blocking(Duration::from_secs(50));
+            if !this.shutdown_done {
+                if let Some(host) = this.runtime_host.clone() {
+                    host.shutdown_blocking(Duration::from_secs(50));
+                }
             }
             async {}
         });
@@ -321,12 +378,16 @@ impl RuskerApp {
             Ok(tray) => (Some(tray), None),
             Err(error) => (None, Some(error)),
         };
-        if tray.is_some() {
-            window.on_window_should_close(cx, |window, _| {
+        let has_tray = tray.is_some();
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            if has_tray {
                 window.minimize_window();
-                false
-            });
-        }
+            } else {
+                _ = weak.update(cx, |this, cx| this.request_quit(cx));
+            }
+            false
+        });
         if let Some(error) = tray_error {
             let warning = match settings_warning.take() {
                 Some(existing) => format!("{existing}\n{error}"),
@@ -337,6 +398,10 @@ impl RuskerApp {
 
         Self {
             engine,
+            engine_transition: None,
+            quitting: false,
+            shutdown_done: false,
+            motion_epoch: Instant::now(),
             page: Page::Overview,
             snapshot: EngineSnapshot::default(),
             connected: false,
@@ -386,6 +451,7 @@ impl RuskerApp {
             _action_task: None,
             _logs_task: None,
             _runtime_task: None,
+            _quit_task: None,
             _subscriptions: {
                 subscriptions.extend([subscription, appearance_subscription, quit_subscription]);
                 subscriptions
@@ -445,8 +511,38 @@ impl RuskerApp {
                 window.activate_window();
                 self.navigate(Page::Settings, cx);
             }
-            TrayCommand::Quit => cx.quit(),
+            TrayCommand::Quit => {
+                window.activate_window();
+                self.request_quit(cx);
+            }
         }
+    }
+
+    /// Quits the app, first stopping a managed engine with the stopping
+    /// animation on screen instead of freezing in the quit hook.
+    fn request_quit(&mut self, cx: &mut Context<Self>) {
+        if self.quitting {
+            return;
+        }
+        let Some(host) = self.runtime_host.clone() else {
+            cx.quit();
+            return;
+        };
+        if !host.engine_session_running() && self.runtime_busy.is_none() {
+            self.shutdown_done = true;
+            cx.quit();
+            return;
+        }
+        self.quitting = true;
+        cx.notify();
+        let handle = host.shutdown(Duration::from_secs(60));
+        self._quit_task = Some(cx.spawn(async move |this, cx| {
+            _ = handle.await;
+            _ = this.update(cx, |this, cx| {
+                this.shutdown_done = true;
+                cx.quit();
+            });
+        }));
     }
 
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -475,6 +571,7 @@ impl RuskerApp {
             return;
         };
         self.runtime_busy = Some("正在检查并启动 WSL2 环境…".into());
+        self.engine_transition = Some(EngineTransition::Starting);
         self.runtime_error = None;
         cx.notify();
         let handle = host.startup(self.settings.wsl.integrations.clone());
@@ -482,6 +579,7 @@ impl RuskerApp {
             let result = await_runtime_host(handle).await;
             _ = this.update(cx, |this, cx| {
                 this.runtime_busy = None;
+                this.engine_transition = None;
                 match result {
                     Ok(snapshot) => {
                         let ready = snapshot.engine_ready;
@@ -567,6 +665,10 @@ impl RuskerApp {
             return;
         };
         self.runtime_busy = Some(format!("{}…", operation.label()));
+        self.engine_transition = Some(match operation {
+            RuntimeOperation::Install | RuntimeOperation::Start => EngineTransition::Starting,
+            RuntimeOperation::Stop => EngineTransition::Stopping,
+        });
         self.runtime_error = None;
         self.runtime_notice = None;
         cx.notify();
@@ -580,6 +682,7 @@ impl RuskerApp {
             let result = await_runtime_host(handle).await;
             _ = this.update(cx, |this, cx| {
                 this.runtime_busy = None;
+                this.engine_transition = None;
                 match result {
                     Ok(snapshot) => {
                         let ready = snapshot.engine_ready;
@@ -1372,7 +1475,10 @@ impl RuskerApp {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
-        div()
+        // While the engine starts or stops, the whole menu is placeholders
+        // (Docker Desktop-style); the app bar gear still opens settings.
+        let placeholders = self.engine_phase().is_some();
+        let nav = div()
             .w(px(SIDEBAR_WIDTH))
             .h_full()
             .flex_shrink_0()
@@ -1382,13 +1488,95 @@ impl RuskerApp {
             .py_3()
             .flex()
             .flex_col()
-            .gap_1()
-            .child(self.nav_item(Page::Overview, IconName::LayoutDashboard, cx))
+            .gap_1();
+        let skeleton = || {
+            div()
+                .mx_2()
+                .h(px(36.))
+                .flex()
+                .items_center()
+                .child(Skeleton::new().h(px(28.)).rounded_md())
+        };
+        let separator = div().mx_3().my_2().h(px(1.)).bg(cx.theme().border);
+        if placeholders {
+            return nav
+                .children((0..4).map(|_| skeleton()))
+                .child(separator)
+                .child(skeleton());
+        }
+        nav.child(self.nav_item(Page::Overview, IconName::LayoutDashboard, cx))
             .child(self.nav_item(Page::Containers, AssetIcon::Container, cx))
             .child(self.nav_item(Page::Images, AssetIcon::Layers2, cx))
             .child(self.nav_item(Page::Volumes, AssetIcon::Database, cx))
-            .child(div().mx_3().my_2().h(px(1.)).bg(cx.theme().border))
+            .child(separator)
             .child(self.nav_item(Page::Settings, IconName::Settings, cx))
+    }
+
+    /// The engine phase that replaces engine-backed pages with the
+    /// starting/stopping animation, if any.
+    fn engine_phase(&self) -> Option<EngineTransition> {
+        if self.quitting {
+            return Some(EngineTransition::Stopping);
+        }
+        if let Some(transition) = self.engine_transition {
+            return Some(transition);
+        }
+        (self.loading && !self.connected).then_some(EngineTransition::Connecting)
+    }
+
+    /// Spinning ring driven by `motion_epoch`; `render` keeps frames coming
+    /// while one is on screen (see `wants_motion`).
+    fn loading_ring(&self, size: Pixels, color: Option<Hsla>) -> Icon {
+        let turn = self.motion_epoch.elapsed().as_secs_f32() / SPINNER_PERIOD_SECS;
+        Icon::new(IconName::LoaderCircle)
+            .with_size(Size::Size(size))
+            .when_some(color, |this, color| this.text_color(color))
+            .transform(Transformation::rotate(percentage(turn.fract())))
+    }
+
+    /// Whether a loading indicator is visible and needs animation frames.
+    fn wants_motion(&self) -> bool {
+        self.engine_phase().is_some() || self.runtime_busy.is_some()
+    }
+
+    /// Centered spinner with a title, faded and slid in when the phase
+    /// changes (the animation id is per phase, so it replays).
+    fn render_engine_transition(&self, phase: EngineTransition, cx: &mut Context<Self>) -> Div {
+        let accent = brand_color(cx);
+        div().flex_1().min_h_0().flex().justify_center().child(
+            div()
+                .id(SharedString::from(format!("engine-{}", phase.key())))
+                .pt(px(140.))
+                .px_6()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_4()
+                .child(self.loading_ring(px(56.), Some(accent)))
+                .child(
+                    div()
+                        .mt_2()
+                        .text_lg()
+                        .font_semibold()
+                        .text_color(cx.theme().foreground)
+                        .child(if self.quitting {
+                            "正在停止 Docker Engine 并退出…"
+                        } else {
+                            phase.title()
+                        }),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(phase.description()),
+                )
+                .with_animation(
+                    SharedString::from(format!("engine-{}-enter", phase.key())),
+                    Animation::new(Duration::from_millis(450)).with_easing(ease_out_quint()),
+                    |this, delta| this.opacity(delta).mt(px(16. * (1. - delta))),
+                ),
+        )
     }
 
     /// Docker Desktop-style navigation row: full-width, icon + label, the
@@ -1425,7 +1613,7 @@ impl RuskerApp {
             }))
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> Div {
+    fn render_header(&self, show_refresh: bool, cx: &mut Context<Self>) -> Div {
         div()
             .h(px(60.))
             .w_full()
@@ -1437,15 +1625,17 @@ impl RuskerApp {
             .items_center()
             .justify_between()
             .child(div().text_lg().font_semibold().child(self.page.title()))
-            .child(
-                Button::new("refresh")
-                    .outline()
-                    .small()
-                    .icon(IconName::RefreshCw)
-                    .label(if self.loading { "刷新中" } else { "刷新" })
-                    .disabled(self.loading || self.busy.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-            )
+            .when(show_refresh, |this| {
+                this.child(
+                    Button::new("refresh")
+                        .outline()
+                        .small()
+                        .icon(IconName::RefreshCw)
+                        .label(if self.loading { "刷新中" } else { "刷新" })
+                        .disabled(self.loading || self.busy.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                )
+            })
     }
 
     fn render_overview(&self, cx: &mut Context<Self>) -> Div {
@@ -1942,7 +2132,14 @@ impl RuskerApp {
             .child(detail_row("WSL2 端点", WSL_DOCKER_HOST, cx))
             .child(detail_row("NVIDIA GPU", gpu_detail, cx))
             .when_some(self.runtime_busy.clone(), |this, label| {
-                this.child(muted(label, cx))
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(self.loading_ring(px(16.), None))
+                        .child(muted(label, cx)),
+                )
             })
             .child(
                 div()
@@ -2659,27 +2856,33 @@ impl RuskerApp {
 
 impl Render for RuskerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let page = match self.page {
-            Page::Overview => self.render_overview(cx),
-            Page::Containers => self.render_containers(cx),
-            Page::Images => self.render_images(cx),
-            Page::Volumes => self.render_volumes(cx),
-            Page::Settings => self.render_settings(cx),
-        };
-        let mut content = div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .child(self.render_header(cx));
-        if let Some(error) = self.error.clone() {
-            content = content.child(message_banner(&error, true, cx));
+        if self.wants_motion() {
+            // Keep redrawing while a loading indicator is visible.
+            window.request_animation_frame();
         }
-        if let Some(busy) = self.busy.clone() {
-            content = content.child(message_banner(&busy, false, cx));
-        } else if let Some(notice) = self.notice.clone() {
-            content = content.child(message_banner(&notice, false, cx));
+        let phase = self.engine_phase();
+        // Settings stays usable mid-transition (reached via the app bar
+        // gear); everything else shows the start/stop animation alone.
+        let transition = phase.filter(|_| self.quitting || self.page != Page::Settings);
+        let page = match (self.page, transition) {
+            (_, Some(phase)) => self.render_engine_transition(phase, cx),
+            (Page::Overview, None) => self.render_overview(cx),
+            (Page::Containers, None) => self.render_containers(cx),
+            (Page::Images, None) => self.render_images(cx),
+            (Page::Volumes, None) => self.render_volumes(cx),
+            (Page::Settings, None) => self.render_settings(cx),
+        };
+        let mut content = div().flex_1().min_w_0().h_full().flex().flex_col();
+        if transition.is_none() {
+            content = content.child(self.render_header(phase.is_none(), cx));
+            if let Some(error) = self.error.clone() {
+                content = content.child(message_banner(&error, true, cx));
+            }
+            if let Some(busy) = self.busy.clone() {
+                content = content.child(message_banner(&busy, false, cx));
+            } else if let Some(notice) = self.notice.clone() {
+                content = content.child(message_banner(&notice, false, cx));
+            }
         }
 
         let body = div()
@@ -2704,6 +2907,10 @@ impl Render for RuskerApp {
 }
 
 const SIDEBAR_WIDTH: f32 = 216.;
+/// Seconds per spinner revolution.
+const SPINNER_PERIOD_SECS: f32 = 0.9;
+/// Seconds per status-dot breath.
+const STATUS_PULSE_PERIOD_SECS: f32 = 1.6;
 const APP_BAR_HEIGHT: f32 = 48.;
 const WINDOW_BUTTON_WIDTH: f32 = 46.;
 
@@ -2900,7 +3107,7 @@ impl RuskerApp {
                     .gap_2()
                     .border_r_1()
                     .border_color(cx.theme().border)
-                    .child(div().size(px(8.)).rounded_full().bg(color))
+                    .child(self.render_status_dot(color))
                     .child(div().font_medium().text_color(color).child(label)),
             )
             .child(
@@ -2930,9 +3137,31 @@ impl RuskerApp {
             )
     }
 
+    /// Status bar dot; breathes while the engine starts or stops.
+    fn render_status_dot(&self, color: Hsla) -> Div {
+        let dot = div().size(px(8.)).rounded_full().bg(color);
+        if !self.wants_motion() {
+            return dot;
+        }
+        let t = self.motion_epoch.elapsed().as_secs_f32() / STATUS_PULSE_PERIOD_SECS;
+        dot.opacity(pulsating_between(0.25, 1.)(t.fract()))
+    }
+
     /// Engine state shown in the status bar, combining the Docker API
     /// connection with the managed runtime's lifecycle.
     fn engine_status(&self, cx: &App) -> (String, Hsla) {
+        if self.quitting {
+            return ("Engine 停止中…".into(), cx.theme().warning);
+        }
+        match self.engine_transition {
+            Some(EngineTransition::Stopping) => {
+                return ("Engine 停止中…".into(), cx.theme().warning)
+            }
+            Some(EngineTransition::Starting) => {
+                return ("Engine 启动中…".into(), cx.theme().warning)
+            }
+            _ => {}
+        }
         if self.connected {
             return ("Engine 运行中".into(), cx.theme().success);
         }

@@ -44,7 +44,7 @@
 
 ## 线程与异步模型
 
-Bollard 和 WSL 子进程依赖 Tokio，GPUI 使用自己的 executor。`EngineService` 与 `RuntimeHostService` 各持有一个 `Arc<tokio::runtime::Runtime>`，Engine future 始终通过 runtime 提交，不能直接在 GPUI 前台 future 中执行 Tokio I/O。WSL 命令设置超时和 `kill_on_drop`，Windows 下使用无控制台窗口标志。运行环境操作由一把异步锁串行化；named pipe 代理作为常驻任务运行在 `RuntimeHostService` 的 runtime 上。应用退出钩子同步调用 `shutdown_blocking`（GPUI 只为退出 future 等待约 200 ms）。
+Bollard 和 WSL 子进程依赖 Tokio，GPUI 使用自己的 executor。`EngineService` 与 `RuntimeHostService` 各持有一个 `Arc<tokio::runtime::Runtime>`，Engine future 始终通过 runtime 提交，不能直接在 GPUI 前台 future 中执行 Tokio I/O。WSL 命令设置超时和 `kill_on_drop`，Windows 下使用无控制台窗口标志。运行环境操作由一把异步锁串行化；named pipe 代理作为常驻任务运行在 `RuntimeHostService` 的 runtime 上。应用退出时先由 `request_quit` 异步调用 `RuntimeHostService::shutdown`（停止 dockerd 并 `wsl --terminate rusker`，界面显示停止动画），完成后再 `cx.quit()`；其他退出路径的退出钩子仍同步调用 `shutdown_blocking` 兜底（GPUI 只为退出 future 等待约 200 ms）。
 
 一次刷新：
 

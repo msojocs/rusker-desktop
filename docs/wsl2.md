@@ -38,7 +38,7 @@ Windows                                   WSL2 utility VM
 
 - 应用启动时，若受管环境已安装，会自动启动 Engine 并恢复已保存的发行版集成；设置了 `DOCKER_HOST` 时不自动启动。
 - “停止”先向 `dockerd` 发送 SIGTERM（容器按 Docker 的关闭超时停止），再终止 `rusker` 发行版。容器和镜像保存在虚拟磁盘中，下次启动不会重建环境。
-- 退出应用（托盘“退出 Rusker”）会以同样方式优雅停止本应用持有的 Engine，Windows 侧 named pipe 也随之消失。应用异常退出时 `wsl.exe` 会话可能残留；下次启动会接管仍在运行的 `dockerd`。
+- 退出应用（托盘“退出 Rusker”，或无托盘时关闭窗口）会以同样方式优雅停止本应用持有的 Engine 并终止 `rusker` 发行版，期间界面显示停止动画；Windows 侧 named pipe 也随之消失。应用异常退出时 `wsl.exe` 会话可能残留；下次启动会接管仍在运行的 `dockerd`。
 - “修复环境”会先优雅停止 Engine，再重跑安装脚本。
 
 Windows 下的 `docker.exe` 可以这样使用受管 Engine：

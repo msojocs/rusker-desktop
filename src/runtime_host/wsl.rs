@@ -748,11 +748,20 @@ impl WslHost {
         Ok(())
     }
 
-    /// Graceful shutdown on application exit. Only stops an engine whose
-    /// session this process holds; the distribution then idles out by itself.
+    /// Graceful shutdown on application exit, like Docker Desktop: stops an
+    /// engine whose session this process holds, then terminates the managed
+    /// distribution. Relying on WSL's idle timeout is not enough — leftover
+    /// processes (containerd shims, systemd, …) keep it `Running` and holding
+    /// memory indefinitely.
     pub async fn shutdown(&self) {
-        if self.session.is_running() {
-            self.stop_engine().await;
+        if !self.session.is_running() {
+            return;
+        }
+        self.stop_engine().await;
+        if self.receipt_valid() {
+            let mut terminate = wsl_command();
+            terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
+            let _ = execute(terminate, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await;
         }
     }
 

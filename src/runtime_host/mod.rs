@@ -170,6 +170,21 @@ impl RuntimeHostService {
         });
     }
 
+    /// Async counterpart of [`Self::shutdown_blocking`] for the quit
+    /// animation: waits for an in-flight operation (e.g. a start) to finish
+    /// before stopping, all bounded by `limit`.
+    pub fn shutdown(&self, limit: Duration) -> JoinHandle<()> {
+        let host = self.host.clone();
+        let lock = self.operation_lock.clone();
+        self.spawn(async move {
+            let _ = tokio::time::timeout(limit, async move {
+                let _guard = lock.lock().await;
+                host.shutdown().await
+            })
+            .await;
+        })
+    }
+
     pub fn snapshot(
         &self,
         integrations: BTreeMap<String, bool>,
