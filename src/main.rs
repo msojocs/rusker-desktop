@@ -1,3 +1,8 @@
+// GUI application: use the Windows GUI subsystem so launching the exe does not
+// open a console window. All child processes (wsl.exe, curl.exe) are spawned
+// with CREATE_NO_WINDOW as well.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
 mod ui;
 
