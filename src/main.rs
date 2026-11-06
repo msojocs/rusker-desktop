@@ -17,7 +17,18 @@ use rusker_desktop::settings::{AppSettings, SettingsStore};
 
 // The default `Assets` bundle only carries gpui-component's own icons; embed
 // the extra Lucide icons the app uses on top of it.
-gpui_kit::assets::icon_assets!(ExtraIcons, [Container, Layers2]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        Container,
+        Layers2,
+        Database,
+        Upload,
+        Download,
+        Eraser,
+        BrushCleaning
+    ]
+);
 
 struct AppAssets;
 

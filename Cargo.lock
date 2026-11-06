@@ -5469,6 +5469,7 @@ name = "rusker-desktop"
 version = "0.1.0"
 dependencies = [
  "bollard",
+ "bytes",
  "directories",
  "futures-util",
  "gpui-kit",

@@ -5,3 +5,4 @@ pub mod model;
 pub mod runtime_host;
 pub mod settings;
 pub mod tray;
+pub mod volume;

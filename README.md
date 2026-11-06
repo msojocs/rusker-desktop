@@ -80,6 +80,7 @@ src/
 ├── engine/         # Tokio 执行边界、Docker API 与 WSL2 后端
 ├── format.rs       # 显示格式化与过滤
 ├── model.rs        # UI 无关的数据模型
+├── volume.rs       # 卷名称/路径校验与辅助容器脚本
 ├── lib.rs
 └── main.rs         # 原生窗口入口
 docs/

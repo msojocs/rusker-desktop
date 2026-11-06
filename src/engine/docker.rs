@@ -1,25 +1,40 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 use bollard::{
+    body_try_stream,
+    container::LogOutput,
+    errors::Error as BollardError,
     models::{
-        ContainerCreateBody, ContainerSummary, DeviceRequest, HostConfig, ImageSummary, PortBinding,
+        ContainerCreateBody, ContainerSummary, DeviceRequest, HostConfig, ImageSummary, Mount,
+        MountType, PortBinding, Volume, VolumeCreateRequest,
     },
     query_parameters::{
-        CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-        ListImagesOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-        RemoveImageOptionsBuilder,
+        CreateContainerOptionsBuilder, CreateImageOptionsBuilder, DataUsageOptionsBuilder,
+        DownloadFromContainerOptionsBuilder, ListContainersOptionsBuilder,
+        ListImagesOptionsBuilder, ListVolumesOptions, LogsOptionsBuilder,
+        RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder,
+        UploadToContainerOptionsBuilder,
     },
     Docker,
 };
-use futures_util::{pin_mut, TryStreamExt};
-use tokio::time::timeout;
+use bytes::Bytes;
+use futures_util::{pin_mut, stream, StreamExt as _, TryStreamExt};
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    time::timeout,
+};
 
 use crate::{
     engine::{with_timeout, EngineError},
     format::{bound_logs, short_id},
     model::{
         ContainerAction, ContainerSummary as ContainerDto, CreateContainerRequest, EngineInfo,
-        EngineSnapshot, ImageSummary as ImageDto, PortMapping,
+        EngineSnapshot, ImageSummary as ImageDto, PortMapping, VolumeSummary,
+    },
+    volume::{
+        container_path, parse_listing, parse_timestamp, partial_export_path, validate_volume_name,
+        DirectoryListing, CLONE_SCRIPT, EMPTY_SCRIPT, EXPORT_SOURCE, HELPER_IMAGE, HELPER_LABEL,
+        LIST_SCRIPT, VOLUME_MOUNT,
     },
 };
 
@@ -27,6 +42,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 const PULL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// Volume sizes require the engine to walk every volume.
+const DISK_USAGE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Copying or importing volume data can take a while for large volumes.
+const DATA_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const MAX_HELPER_OUTPUT: usize = 8 * 1024 * 1024;
+const IMPORT_CHUNK: usize = 256 * 1024;
 
 pub struct DockerEngine {
     client: Docker,
@@ -84,7 +105,7 @@ impl DockerEngine {
     pub async fn snapshot(&self) -> Result<EngineSnapshot, EngineError> {
         let containers_options = ListContainersOptionsBuilder::default().all(true).build();
         let images_options = ListImagesOptionsBuilder::default().all(true).build();
-        let (version, info, containers, images) = tokio::try_join!(
+        let (version, info, containers, images, volumes) = tokio::try_join!(
             with_timeout("读取引擎版本", REQUEST_TIMEOUT, self.client.version()),
             with_timeout("读取引擎信息", REQUEST_TIMEOUT, self.client.info()),
             with_timeout(
@@ -97,12 +118,24 @@ impl DockerEngine {
                 REQUEST_TIMEOUT,
                 self.client.list_images(Some(images_options)),
             ),
+            with_timeout(
+                "读取卷列表",
+                REQUEST_TIMEOUT,
+                self.client.list_volumes(None::<ListVolumesOptions>),
+            ),
         )?;
 
         let mut containers: Vec<ContainerDto> = containers.into_iter().map(container_dto).collect();
         containers.sort_by_cached_key(|container| container.name.to_lowercase());
         let mut images: Vec<ImageDto> = images.into_iter().map(image_dto).collect();
         images.sort_by_cached_key(|image| image.tags.first().cloned().unwrap_or_default());
+        let mut volumes: Vec<VolumeSummary> = volumes
+            .volumes
+            .unwrap_or_default()
+            .into_iter()
+            .map(volume_dto)
+            .collect();
+        volumes.sort_by_cached_key(|volume| volume.name.to_lowercase());
 
         Ok(EngineSnapshot {
             engine: EngineInfo {
@@ -135,6 +168,7 @@ impl DockerEngine {
             },
             containers,
             images,
+            volumes,
         })
     }
 
@@ -342,6 +376,524 @@ impl DockerEngine {
             }),
         }
     }
+
+    /// Per-volume disk usage. Only engines with API ≥ 1.52 report it in a
+    /// shape bollard can read; others yield an empty map (sizes unknown).
+    pub async fn volume_sizes(&self) -> Result<HashMap<String, u64>, EngineError> {
+        let options = DataUsageOptionsBuilder::default().verbose(true).build();
+        // bollard cannot URL-encode the `type` list, so add `type=volume`
+        // to the request itself; this keeps the engine from also sizing
+        // every image layer and container filesystem.
+        let client = self.client.clone().with_request_modifier(|mut request| {
+            let uri = request.uri().to_string();
+            if uri.contains("/system/df") && !uri.contains("type=") {
+                let separator = if uri.contains('?') { '&' } else { '?' };
+                if let Ok(uri) = format!("{uri}{separator}type=volume").parse() {
+                    *request.uri_mut() = uri;
+                }
+            }
+            request
+        });
+        let usage =
+            with_timeout("统计卷大小", DISK_USAGE_TIMEOUT, client.df(Some(options))).await?;
+        let mut sizes = HashMap::new();
+        for item in usage
+            .volume_usage
+            .and_then(|usage| usage.items)
+            .unwrap_or_default()
+        {
+            let Ok(volume) = serde_json::from_value::<Volume>(item) else {
+                continue;
+            };
+            if let Some(size) = volume
+                .usage_data
+                .and_then(|usage| u64::try_from(usage.size).ok())
+            {
+                sizes.insert(volume.name, size);
+            }
+        }
+        Ok(sizes)
+    }
+
+    pub async fn create_volume(&self, name: Option<String>) -> Result<(), EngineError> {
+        if let Some(name) = &name {
+            validate_volume_name(name).map_err(|error| EngineError::operation("创建卷", error))?;
+            self.ensure_volume_absent("创建卷", name).await?;
+        }
+        with_timeout(
+            "创建卷",
+            ACTION_TIMEOUT,
+            self.client.create_volume(VolumeCreateRequest {
+                name,
+                ..Default::default()
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_volume(&self, name: &str) -> Result<(), EngineError> {
+        let options = RemoveVolumeOptionsBuilder::default().force(false).build();
+        with_timeout(
+            format!("删除卷 {name}").as_str(),
+            ACTION_TIMEOUT,
+            self.client.remove_volume(name, Some(options)),
+        )
+        .await
+    }
+
+    /// Creates `target` and copies every file of `source` into it. The new
+    /// volume is removed again when copying fails.
+    pub async fn clone_volume(&self, source: &str, target: &str) -> Result<(), EngineError> {
+        let action = format!("克隆卷 {source}");
+        validate_volume_name(target).map_err(|error| EngineError::operation(&action, error))?;
+        self.ensure_volume_absent(&action, target).await?;
+        with_timeout(
+            &action,
+            ACTION_TIMEOUT,
+            self.client.create_volume(VolumeCreateRequest {
+                name: Some(target.to_string()),
+                ..Default::default()
+            }),
+        )
+        .await?;
+
+        let result = self
+            .run_helper(
+                &action,
+                vec![
+                    volume_mount(source, "/from", true),
+                    volume_mount(target, "/to", false),
+                ],
+                CLONE_SCRIPT,
+                Vec::new(),
+                DATA_TIMEOUT,
+            )
+            .await
+            .and_then(|output| output.success(&action));
+        if let Err(error) = result {
+            let options = RemoveVolumeOptionsBuilder::default().force(true).build();
+            let cleanup = match self.client.remove_volume(target, Some(options)).await {
+                Ok(()) => format!("已删除未完成的卷 {target}"),
+                Err(cleanup) => format!("未完成的卷 {target} 删除失败：{cleanup}"),
+            };
+            return Err(EngineError::operation(
+                action,
+                format!("{error}；{cleanup}"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Deletes all files inside the volume, keeping the volume itself.
+    pub async fn empty_volume(&self, name: &str) -> Result<(), EngineError> {
+        let action = format!("清空卷 {name}");
+        self.run_helper(
+            &action,
+            vec![volume_mount(name, VOLUME_MOUNT, false)],
+            EMPTY_SCRIPT,
+            Vec::new(),
+            DATA_TIMEOUT,
+        )
+        .await?
+        .success(&action)
+    }
+
+    /// Lists one directory of the volume (`relative` to its root), mounted
+    /// read-only into a short-lived helper container.
+    pub async fn list_volume_directory(
+        &self,
+        name: &str,
+        relative: &str,
+    ) -> Result<DirectoryListing, EngineError> {
+        let action = "读取卷内容";
+        let path =
+            container_path(relative).map_err(|error| EngineError::operation(action, error))?;
+        let output = self
+            .run_helper(
+                action,
+                vec![volume_mount(name, VOLUME_MOUNT, true)],
+                LIST_SCRIPT,
+                vec![format!("RUSKER_PATH={path}")],
+                ACTION_TIMEOUT,
+            )
+            .await?;
+        if output.code == 3 {
+            return Err(EngineError::operation(
+                action,
+                format!("目录 /{relative} 不存在或无法访问"),
+            ));
+        }
+        output.success(action)?;
+        Ok(parse_listing(&output.stdout))
+    }
+
+    /// Extracts a tar archive (optionally gzip/bzip2/xz compressed) from the
+    /// local file system into the volume root. Existing files with the same
+    /// path are overwritten; ownership in the archive is preserved.
+    pub async fn import_volume(&self, name: &str, archive: &Path) -> Result<(), EngineError> {
+        let action = format!("导入数据到卷 {name}");
+        let file = tokio::fs::File::open(archive).await.map_err(|error| {
+            EngineError::operation(&action, format!("无法读取 {}：{error}", archive.display()))
+        })?;
+        let id = self
+            .create_helper(
+                &action,
+                vec![volume_mount(name, VOLUME_MOUNT, false)],
+                vec!["true".into()],
+                Vec::new(),
+            )
+            .await?;
+        let options = UploadToContainerOptionsBuilder::default()
+            .path(VOLUME_MOUNT)
+            .build();
+        let result = with_timeout(
+            &action,
+            DATA_TIMEOUT,
+            self.client
+                .upload_to_container(&id, Some(options), body_try_stream(file_chunks(file))),
+        )
+        .await;
+        self.remove_helper(&id).await;
+        result
+    }
+
+    /// Removes several volumes one by one (never forced). Returns one
+    /// message per volume that could not be removed.
+    pub async fn remove_volumes(&self, names: &[String]) -> Vec<String> {
+        let mut failures = Vec::new();
+        for name in names {
+            if let Err(error) = self.remove_volume(name).await {
+                failures.push(error.to_string());
+            }
+        }
+        failures
+    }
+
+    /// Writes the volume content as an uncompressed tar to `destination`
+    /// and returns its size. Entries are relative to the volume root, so the
+    /// file can be imported again with [`Self::import_volume`]. Data is
+    /// streamed into a sibling temporary file that only replaces
+    /// `destination` once complete.
+    pub async fn export_volume(&self, name: &str, destination: &Path) -> Result<u64, EngineError> {
+        let action = format!("导出卷 {name}");
+        let partial = partial_export_path(destination);
+        let mut file = tokio::fs::File::create(&partial).await.map_err(|error| {
+            EngineError::operation(&action, format!("无法创建 {}：{error}", partial.display()))
+        })?;
+        let id = match self
+            .create_helper(
+                &action,
+                vec![volume_mount(name, VOLUME_MOUNT, true)],
+                vec!["true".into()],
+                Vec::new(),
+            )
+            .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                drop(file);
+                _ = tokio::fs::remove_file(&partial).await;
+                return Err(error);
+            }
+        };
+
+        let options = DownloadFromContainerOptionsBuilder::default()
+            .path(EXPORT_SOURCE)
+            .build();
+        let archive = self.client.download_from_container(&id, Some(options));
+        let copy = timeout(DATA_TIMEOUT, async {
+            pin_mut!(archive);
+            let mut written = 0u64;
+            while let Some(chunk) = archive
+                .try_next()
+                .await
+                .map_err(|error| EngineError::operation(&action, error))?
+            {
+                file.write_all(&chunk).await.map_err(|error| {
+                    EngineError::operation(&action, format!("写入导出文件失败：{error}"))
+                })?;
+                written += chunk.len() as u64;
+            }
+            file.flush().await.map_err(|error| {
+                EngineError::operation(&action, format!("写入导出文件失败：{error}"))
+            })?;
+            Ok(written)
+        })
+        .await;
+        self.remove_helper(&id).await;
+        drop(file);
+
+        let result = match copy {
+            Ok(result) => result,
+            Err(_) => Err(EngineError::Timeout {
+                action: action.clone(),
+                seconds: DATA_TIMEOUT.as_secs(),
+            }),
+        };
+        let written = match result {
+            Ok(written) => written,
+            Err(error) => {
+                _ = tokio::fs::remove_file(&partial).await;
+                return Err(error);
+            }
+        };
+        // The save dialog already confirmed overwriting; Windows rename does
+        // not replace an existing file.
+        if tokio::fs::metadata(destination).await.is_ok() {
+            _ = tokio::fs::remove_file(destination).await;
+        }
+        if let Err(error) = tokio::fs::rename(&partial, destination).await {
+            _ = tokio::fs::remove_file(&partial).await;
+            return Err(EngineError::operation(
+                &action,
+                format!("无法保存到 {}：{error}", destination.display()),
+            ));
+        }
+        Ok(written)
+    }
+
+    async fn ensure_volume_absent(&self, action: &str, name: &str) -> Result<(), EngineError> {
+        match timeout(REQUEST_TIMEOUT, self.client.inspect_volume(name)).await {
+            Ok(Ok(_)) => Err(EngineError::operation(action, format!("卷 {name} 已存在"))),
+            Ok(Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            })) => Ok(()),
+            Ok(Err(error)) => Err(EngineError::operation(action, error)),
+            Err(_) => Err(EngineError::Timeout {
+                action: action.into(),
+                seconds: REQUEST_TIMEOUT.as_secs(),
+            }),
+        }
+    }
+
+    async fn ensure_helper_image(&self) -> Result<(), EngineError> {
+        if self.client.inspect_image(HELPER_IMAGE).await.is_ok() {
+            return Ok(());
+        }
+        self.pull_image(HELPER_IMAGE).await.map_err(|error| {
+            EngineError::operation(
+                "准备卷辅助镜像",
+                format!("卷操作需要 {HELPER_IMAGE} 镜像，自动拉取失败：{error}"),
+            )
+        })
+    }
+
+    async fn create_helper(
+        &self,
+        action: &str,
+        mounts: Vec<Mount>,
+        cmd: Vec<String>,
+        env: Vec<String>,
+    ) -> Result<String, EngineError> {
+        self.ensure_helper_image().await?;
+        let body = ContainerCreateBody {
+            image: Some(HELPER_IMAGE.into()),
+            cmd: Some(cmd),
+            env: (!env.is_empty()).then_some(env),
+            labels: Some(HashMap::from([(HELPER_LABEL.into(), "volume".into())])),
+            host_config: Some(HostConfig {
+                mounts: Some(mounts),
+                network_mode: Some("none".into()),
+                // Output is read back through the logs API, so do not depend
+                // on the engine's default log driver.
+                log_config: Some(bollard::models::HostConfigLogConfig {
+                    typ: Some("json-file".into()),
+                    config: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let created = with_timeout(
+            action,
+            ACTION_TIMEOUT,
+            self.client.create_container(None, body),
+        )
+        .await?;
+        Ok(created.id)
+    }
+
+    async fn remove_helper(&self, id: &str) {
+        let options = RemoveContainerOptionsBuilder::default()
+            .force(true)
+            .v(false)
+            .build();
+        _ = timeout(
+            ACTION_TIMEOUT,
+            self.client.remove_container(id, Some(options)),
+        )
+        .await;
+    }
+
+    /// Runs `script` with `sh -c` in a fresh helper container, waits for it
+    /// and returns its exit code and output. The container is always removed.
+    async fn run_helper(
+        &self,
+        action: &str,
+        mounts: Vec<Mount>,
+        script: &str,
+        env: Vec<String>,
+        duration: Duration,
+    ) -> Result<HelperOutput, EngineError> {
+        let id = self
+            .create_helper(
+                action,
+                mounts,
+                vec!["sh".into(), "-c".into(), script.into()],
+                env,
+            )
+            .await?;
+        let result = self.run_created_helper(action, &id, duration).await;
+        self.remove_helper(&id).await;
+        result
+    }
+
+    async fn run_created_helper(
+        &self,
+        action: &str,
+        id: &str,
+        duration: Duration,
+    ) -> Result<HelperOutput, EngineError> {
+        with_timeout(
+            action,
+            ACTION_TIMEOUT,
+            self.client.start_container(id, None),
+        )
+        .await?;
+        let wait = self.client.wait_container(id, None);
+        pin_mut!(wait);
+        let code = match timeout(duration, wait.next()).await {
+            Err(_) => {
+                return Err(EngineError::Timeout {
+                    action: action.into(),
+                    seconds: duration.as_secs(),
+                })
+            }
+            Ok(Some(Ok(response))) => response.status_code,
+            Ok(Some(Err(BollardError::DockerContainerWaitError { code, .. }))) => code,
+            Ok(Some(Err(error))) => return Err(EngineError::operation(action, error)),
+            Ok(None) => {
+                return Err(EngineError::operation(action, "辅助容器未返回退出状态"));
+            }
+        };
+
+        let options = LogsOptionsBuilder::default()
+            .follow(false)
+            .stdout(true)
+            .stderr(true)
+            .timestamps(false)
+            .build();
+        let logs = self.client.logs(id, Some(options));
+        pin_mut!(logs);
+        let collected = timeout(REQUEST_TIMEOUT, async {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            while let Some(output) = logs
+                .try_next()
+                .await
+                .map_err(|error| EngineError::operation(action, error))?
+            {
+                let (target, message) = match output {
+                    LogOutput::StdErr { message } => (&mut stderr, message),
+                    LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                        (&mut stdout, message)
+                    }
+                    LogOutput::StdIn { .. } => continue,
+                };
+                if target.len() + message.len() > MAX_HELPER_OUTPUT {
+                    return Err(EngineError::operation(action, "辅助容器输出过大"));
+                }
+                target.extend_from_slice(&message);
+            }
+            Ok((stdout, stderr))
+        })
+        .await;
+        let (stdout, stderr) = match collected {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(EngineError::Timeout {
+                    action: action.into(),
+                    seconds: REQUEST_TIMEOUT.as_secs(),
+                })
+            }
+        };
+        Ok(HelperOutput {
+            code,
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        })
+    }
+}
+
+struct HelperOutput {
+    code: i64,
+    stdout: String,
+    stderr: String,
+}
+
+impl HelperOutput {
+    fn success(&self, action: &str) -> Result<(), EngineError> {
+        if self.code == 0 {
+            return Ok(());
+        }
+        let detail = self.stderr.trim();
+        let detail = if detail.is_empty() {
+            format!("辅助容器退出码 {}", self.code)
+        } else {
+            format!("辅助容器退出码 {}：{}", self.code, bound_logs(detail))
+        };
+        Err(EngineError::operation(action, detail))
+    }
+}
+
+fn volume_mount(name: &str, target: &str, read_only: bool) -> Mount {
+    Mount {
+        typ: Some(MountType::VOLUME),
+        source: Some(name.to_string()),
+        target: Some(target.to_string()),
+        read_only: Some(read_only),
+        // Never copy image content into the volume on first mount.
+        volume_options: Some(bollard::models::MountVolumeOptions {
+            no_copy: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn file_chunks(
+    file: tokio::fs::File,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static {
+    stream::try_unfold(file, |mut file| async move {
+        let mut buffer = vec![0; IMPORT_CHUNK];
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(None);
+        }
+        buffer.truncate(read);
+        Ok(Some((Bytes::from(buffer), file)))
+    })
+}
+
+fn volume_dto(volume: Volume) -> VolumeSummary {
+    let mut labels: Vec<(String, String)> = volume.labels.into_iter().collect();
+    labels.sort();
+    VolumeSummary {
+        name: volume.name,
+        driver: volume.driver,
+        mountpoint: volume.mountpoint,
+        scope: volume
+            .scope
+            .map(|scope| scope.to_string())
+            .unwrap_or_default(),
+        created: volume
+            .created_at
+            .as_deref()
+            .map(parse_timestamp)
+            .unwrap_or(0),
+        labels,
+    }
 }
 
 fn container_dto(container: ContainerSummary) -> ContainerDto {
@@ -363,6 +915,13 @@ fn container_dto(container: ContainerSummary) -> ContainerDto {
             protocol: port.typ.map(|kind| kind.to_string()).unwrap_or_default(),
         })
         .collect();
+    let volumes = container
+        .mounts
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|mount| mount.typ.as_deref() == Some("volume"))
+        .filter_map(|mount| mount.name)
+        .collect();
 
     ContainerDto {
         id,
@@ -375,6 +934,7 @@ fn container_dto(container: ContainerSummary) -> ContainerDto {
         status: container.status.unwrap_or_default(),
         created: container.created.unwrap_or_default(),
         ports,
+        volumes,
     }
 }
 

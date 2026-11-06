@@ -121,6 +121,14 @@ RUSKER_DOCKER_OPERATIONS=1 cargo test --test engine_operations -- --nocapture
 
 测试覆盖创建并启动、TCP 端口绑定、日志、启动、重启、停止、删除容器和删除专用镜像标签，并在结束时尝试清理。不要对任意已有资源运行变更型测试。
 
+卷管理的变更型测试只创建和删除 `rusker-test-volume-*` 卷，首次运行可能拉取 `busybox:1.37`：
+
+```bash
+RUSKER_DOCKER_OPERATIONS=1 cargo test --test volume_operations -- --nocapture
+```
+
+它覆盖创建、重名拒绝、tar 导入、目录浏览、克隆、导出后再导入的往返一致性、清空、大小统计、单个与批量删除。Windows 上需把 `DOCKER_HOST` 指向被测 Engine（例如 `npipe:////./pipe/rusker_engine`）。
+
 ## 提交前
 
 - 更新功能复选框，确保代码与文档一致。

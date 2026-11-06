@@ -38,11 +38,16 @@ use crate::ui::{
     detail_row, empty_state, message_banner, muted, page_header, section_panel, stat_card,
 };
 
+mod volumes;
+
+use volumes::VolumeState;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Overview,
     Containers,
     Images,
+    Volumes,
     Settings,
 }
 
@@ -52,6 +57,7 @@ impl Page {
             Self::Overview => "概览",
             Self::Containers => "容器",
             Self::Images => "镜像",
+            Self::Volumes => "卷",
             Self::Settings => "设置",
         }
     }
@@ -95,6 +101,8 @@ pub struct RuskerApp {
     create_ports_input: Entity<InputState>,
     create_nvidia_gpu: bool,
     create_error: Option<String>,
+    volumes: VolumeState,
+    volume_name_input: Entity<InputState>,
     settings: AppSettings,
     settings_store: Option<SettingsStore>,
     settings_warning: Option<String>,
@@ -142,6 +150,8 @@ impl RuskerApp {
         });
         let create_ports_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("例如：8080:80, 8443:443"));
+        let volume_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("例如：postgres-data"));
         let http_proxy_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(settings.docker_proxy.http_proxy.clone())
@@ -233,6 +243,8 @@ impl RuskerApp {
             create_ports_input,
             create_nvidia_gpu: false,
             create_error: None,
+            volumes: VolumeState::default(),
+            volume_name_input,
             settings,
             settings_store,
             settings_warning,
@@ -315,9 +327,13 @@ impl RuskerApp {
     }
 
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
+        let entering_volumes = page == Page::Volumes && self.page != Page::Volumes;
         self.page = page;
         if page == Page::Settings {
             self.refresh_runtime_host(cx);
+        }
+        if entering_volumes && self.connected {
+            self.after_volume_snapshot(cx);
         }
         cx.notify();
     }
@@ -521,6 +537,7 @@ impl RuskerApp {
                     Ok(snapshot) => {
                         this.connected = true;
                         this.apply_snapshot(snapshot);
+                        this.after_volume_snapshot(cx);
                     }
                     Err(error) => {
                         this.connected = false;
@@ -547,6 +564,7 @@ impl RuskerApp {
             }
         }
         self.snapshot = snapshot;
+        self.prune_volume_selection();
     }
 
     fn select_container(&mut self, id: String, cx: &mut Context<Self>) {
@@ -974,6 +992,7 @@ impl RuskerApp {
                         this.connected = true;
                         this.apply_snapshot(snapshot);
                         this.notice = Some(format!("{label}完成"));
+                        this.after_volume_snapshot(cx);
                     }
                     Err(error) => this.error = Some(error.to_string()),
                 }
@@ -1053,6 +1072,7 @@ impl RuskerApp {
             .child(self.nav_item(Page::Overview, IconName::LayoutDashboard, cx))
             .child(self.nav_item(Page::Containers, AssetIcon::Container, cx))
             .child(self.nav_item(Page::Images, AssetIcon::Layers2, cx))
+            .child(self.nav_item(Page::Volumes, AssetIcon::Database, cx))
             .child(div().mx_3().my_2().h(px(1.)).bg(cx.theme().border))
             .child(self.nav_item(Page::Settings, IconName::Settings, cx))
     }
@@ -1154,6 +1174,19 @@ impl RuskerApp {
                                 self.snapshot.images.len().to_string(),
                                 "包含无标签镜像",
                                 cx,
+                            ))
+                            .child(stat_card(
+                                "卷",
+                                self.snapshot.volumes.len().to_string(),
+                                format!(
+                                    "{} 个正被容器使用",
+                                    self.snapshot
+                                        .volumes
+                                        .iter()
+                                        .filter(|volume| self.snapshot.volume_in_use(&volume.name))
+                                        .count()
+                                ),
+                                cx,
                             )),
                     )
                     .child(
@@ -1170,7 +1203,7 @@ impl RuskerApp {
                             .child(detail_row("架构", engine.architecture.clone(), cx)),
                     )
                     .child(muted(
-                        "连接已有本地或 WSL2 引擎；发行版/虚拟机安装、Compose、Volumes 和 Networks 管理见路线图。",
+                        "连接已有本地或 WSL2 引擎；发行版/虚拟机安装、Compose 和 Networks 管理见路线图。",
                         cx,
                     )),
             ),
@@ -2003,6 +2036,7 @@ impl Render for RuskerApp {
             Page::Overview => self.render_overview(cx),
             Page::Containers => self.render_containers(cx),
             Page::Images => self.render_images(cx),
+            Page::Volumes => self.render_volumes(cx),
             Page::Settings => self.render_settings(cx),
         };
         let mut content = div()
@@ -2204,6 +2238,7 @@ impl RuskerApp {
                 self.snapshot.containers.len()
             ));
             facts.push(format!("镜像 {}", self.snapshot.images.len()));
+            facts.push(format!("卷 {}", self.snapshot.volumes.len()));
             if let Some(gpu) = self
                 .runtime_snapshot
                 .gpu

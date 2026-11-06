@@ -1,11 +1,14 @@
 mod docker;
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
 use thiserror::Error;
 use tokio::{runtime::Runtime, task::JoinHandle};
 
-use crate::model::{ContainerAction, CreateContainerRequest, EngineSnapshot};
+use crate::{
+    model::{ContainerAction, CreateContainerRequest, EngineSnapshot},
+    volume::DirectoryListing,
+};
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -105,6 +108,102 @@ impl EngineService {
             let engine = docker::DockerEngine::connect().await?;
             engine.pull_image(&reference).await?;
             engine.snapshot().await
+        })
+    }
+
+    pub fn volume_sizes(&self) -> JoinHandle<Result<HashMap<String, u64>, EngineError>> {
+        self.spawn(async {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.volume_sizes().await
+        })
+    }
+
+    /// `name: None` lets the engine generate a name.
+    pub fn create_volume(
+        &self,
+        name: Option<String>,
+    ) -> JoinHandle<Result<EngineSnapshot, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.create_volume(name).await?;
+            engine.snapshot().await
+        })
+    }
+
+    pub fn remove_volume(&self, name: String) -> JoinHandle<Result<EngineSnapshot, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.remove_volume(&name).await?;
+            engine.snapshot().await
+        })
+    }
+
+    /// Removes each volume independently and returns the fresh snapshot
+    /// together with one error message per volume that was not removed.
+    pub fn remove_volumes(
+        &self,
+        names: Vec<String>,
+    ) -> JoinHandle<Result<(EngineSnapshot, Vec<String>), EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            let failures = engine.remove_volumes(&names).await;
+            Ok((engine.snapshot().await?, failures))
+        })
+    }
+
+    /// Saves the volume as a tar file; returns the number of bytes written.
+    pub fn export_volume(
+        &self,
+        name: String,
+        destination: PathBuf,
+    ) -> JoinHandle<Result<u64, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.export_volume(&name, &destination).await
+        })
+    }
+
+    pub fn clone_volume(
+        &self,
+        source: String,
+        target: String,
+    ) -> JoinHandle<Result<EngineSnapshot, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.clone_volume(&source, &target).await?;
+            engine.snapshot().await
+        })
+    }
+
+    pub fn empty_volume(&self, name: String) -> JoinHandle<Result<EngineSnapshot, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.empty_volume(&name).await?;
+            engine.snapshot().await
+        })
+    }
+
+    pub fn import_volume(
+        &self,
+        name: String,
+        archive: PathBuf,
+    ) -> JoinHandle<Result<EngineSnapshot, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.import_volume(&name, &archive).await?;
+            engine.snapshot().await
+        })
+    }
+
+    /// Lists a directory inside the volume; `relative` is `""` for the root.
+    pub fn list_volume_directory(
+        &self,
+        name: String,
+        relative: String,
+    ) -> JoinHandle<Result<DirectoryListing, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.list_volume_directory(&name, &relative).await
         })
     }
 }

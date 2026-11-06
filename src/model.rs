@@ -16,9 +16,24 @@ pub struct EngineSnapshot {
     pub engine: EngineInfo,
     pub containers: Vec<ContainerSummary>,
     pub images: Vec<ImageSummary>,
+    pub volumes: Vec<VolumeSummary>,
 }
 
 impl EngineSnapshot {
+    /// Containers (running or not) that mount the named volume.
+    pub fn volume_users(&self, volume: &str) -> Vec<&ContainerSummary> {
+        self.containers
+            .iter()
+            .filter(|container| container.volumes.iter().any(|name| name == volume))
+            .collect()
+    }
+
+    pub fn volume_in_use(&self, volume: &str) -> bool {
+        self.containers
+            .iter()
+            .any(|container| container.volumes.iter().any(|name| name == volume))
+    }
+
     pub fn running_containers(&self) -> usize {
         self.containers
             .iter()
@@ -40,6 +55,8 @@ pub struct ContainerSummary {
     pub status: String,
     pub created: i64,
     pub ports: Vec<PortMapping>,
+    /// Names of the named/anonymous volumes this container mounts.
+    pub volumes: Vec<String>,
 }
 
 impl ContainerSummary {
@@ -80,6 +97,37 @@ pub struct ImageSummary {
     pub size: u64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VolumeSummary {
+    pub name: String,
+    pub driver: String,
+    pub mountpoint: String,
+    pub scope: String,
+    /// Unix timestamp; 0 when the engine did not report it.
+    pub created: i64,
+    pub labels: Vec<(String, String)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeEntryKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
+}
+
+/// One entry of a directory inside a volume.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VolumeEntry {
+    pub name: String,
+    pub kind: VolumeEntryKind,
+    /// File size, or the recursive disk usage for directories.
+    pub size: u64,
+    pub modified: i64,
+    /// `ls -l` style mode string, e.g. `drwxr-xr-x`.
+    pub mode: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContainerAction {
     Start,
@@ -110,6 +158,10 @@ impl Revision {
 
     pub fn is_current(self, candidate: u64) -> bool {
         self.0 == candidate
+    }
+
+    pub fn current(self) -> u64 {
+        self.0
     }
 }
 

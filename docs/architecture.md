@@ -29,14 +29,15 @@
 - `tray.rs`：原生托盘生命周期、菜单 ID 和事件到 `TrayCommand` 的转换；不包含 GPUI 或 Engine 类型。
 - `settings.rs`：用户级设置模型、代理校验、持久化和 Engine JSON 片段导出；不修改系统 daemon 配置。
 - `container.rs`：创建容器草稿、命令解析与统一配置校验，UI 和 Engine 共用。
-- `model.rs`：Engine、容器、镜像、快照和操作结果的 owned DTO。
+- `volume.rs`：卷名称与卷内路径校验、辅助容器脚本及其输出解析，不含 I/O。
+- `model.rs`：Engine、容器、镜像、卷、快照和操作结果的 owned DTO。
 - `engine/mod.rs`：运行时所有权、跨执行器任务提交和统一错误类型。
-- `engine/docker.rs`：Bollard 连接、查询和第三方模型转换。
+- `engine/docker.rs`：Bollard 连接、查询、第三方模型转换，以及卷操作用的临时辅助容器。
 - `runtime_host/mod.rs`：WSL2 运行环境服务、操作串行锁、启动与退出钩子。
 - `runtime_host/wsl.rs`：专用发行版安装、所有权校验、Engine 会话（supervisor）、发行版集成与 GPU 检测。
 - `runtime_host/proxy.rs`：`//./pipe/rusker_engine` → `docker system dial-stdio` 的逐连接转发。
 - `format.rs`：不含 I/O 的格式化、过滤和展示逻辑。
-- `app.rs`：页面、选择、忙碌状态、请求序号、通知和 GPUI Task。
+- `app.rs`：页面、选择、忙碌状态、请求序号、通知和 GPUI Task；`app/volumes.rs` 为卷页面与卷详情。
 - `main.rs`：只负责应用、资源、主题初始化和窗口创建。
 
 后续支持更多后端时，可在 `engine` 下引入异步 trait；首版不提前建立复杂插件系统。
@@ -56,6 +57,19 @@ Bollard 和 WSL 子进程依赖 Tokio，GPUI 使用自己的 executor。`EngineS
 `Task` 必须由 View 持有。替换任务会取消旧的前台等待，但已发送到 Engine 的停止或删除操作可能已生效，因此取消界面等待不等于回滚外部副作用。所有用户操作都应通过最终刷新反映真实状态。
 
 日志和镜像拉取响应使用有界消费：日志只请求固定尾部行数并限制单条/总展示长度；拉取完整消费响应流并检查其中的错误，不能把未消费的流留作后台泄漏。
+
+## 卷数据操作
+
+Docker API 没有直接读写卷内容的接口，卷的浏览、克隆和清空均通过临时辅助容器完成：
+
+- 镜像固定为 `busybox:1.37`，缺失时自动拉取；容器带 `dev.rusker.helper` 标签、`network_mode=none`、显式 `json-file` 日志驱动，卷以 `nocopy` 挂载，结束后无论成败都强制删除。
+- 浏览：卷只读挂载到 `/volume`，目标目录通过环境变量传入（不拼接 shell），一次 `find … -exec stat` 加一次 `du -d 1` 列出单层目录，界面按需逐级展开；单目录最多返回 5000 项。
+- 克隆：先确认目标名不存在再创建卷，源卷只读挂载到 `/from`、新卷挂载到 `/to` 执行 `cp -a`；失败时删除新卷。
+- 清空：删除卷根目录下的全部条目（含点文件），保留卷本身。
+- 导入：创建但不启动辅助容器，把本地归档以流的形式通过 `PUT /containers/{id}/archive` 解压到 `/volume`；Engine 负责 gzip/bzip2/xz 解压，并保留归档中的属主。
+- 导出：卷只读挂载到未启动的辅助容器，`GET /containers/{id}/archive?path=/volume/.` 的 tar 流写入目标旁的 `.partial` 文件，成功后才重命名为目标文件；`/.` 使条目相对卷根目录，导出文件可直接再导入。
+- 批量删除与清理未使用卷：逐个 `force=false` 删除并汇总失败项；“未使用”以快照中所有容器（含已停止）的卷挂载为准，Engine 仍会拒绝删除在此期间被新容器引用的卷。
+- 卷大小来自 `GET /system/df?type=volume&verbose=true`，与快照分开异步加载，仅在卷页面可见时请求；旧 Engine（API < 1.52）显示为“—”。
 
 ## 状态与错误
 
