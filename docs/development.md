@@ -150,4 +150,9 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Windows 安装包按用户安装到 `%LOCALAPPDATA%\Programs\Rusker Desktop`，不需要管理员权限；卸载不会删除用户设置和受管 WSL2 发行版。
+Windows 安装包支持两种安装模式：
+
+- 仅为我安装（默认）：安装到 `%LOCALAPPDATA%\Programs\Rusker Desktop`，写入 HKCU
+- 为所有用户安装：安装到 `%ProgramFiles%\Rusker Desktop`，写入 HKLM，快捷方式放到公共开始菜单与桌面，需要管理员权限
+
+管理员账户启动安装包时会出现 UAC 提示，并可在“选择用户”页面选择模式；普通用户只能为自己安装。静默安装可用 `/S /CurrentUser` 或 `/S /AllUsers`。升级时默认沿用已有安装的模式和目录。卸载不会删除用户设置和受管 WSL2 发行版（它们始终按用户存放）。
