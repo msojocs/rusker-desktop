@@ -1651,11 +1651,7 @@ impl RuskerApp {
                     .flex()
                     .flex_col()
                     .gap_6()
-                    .child(page_header(
-                        "容器运行概览",
-                        "直接读取本地 Docker/Podman 兼容引擎，不使用模拟数据。",
-                        cx,
-                    ))
+                    .child(div().text_2xl().font_semibold().child("容器运行概览"))
                     .child(
                         div()
                             .w_full()
@@ -1705,11 +1701,7 @@ impl RuskerApp {
                             .child(detail_row("API", engine.api_version.clone(), cx))
                             .child(detail_row("操作系统", engine.operating_system.clone(), cx))
                             .child(detail_row("架构", engine.architecture.clone(), cx)),
-                    )
-                    .child(muted(
-                        "连接已有本地或 WSL2 引擎；发行版/虚拟机安装、Compose 和 Networks 管理见路线图。",
-                        cx,
-                    )),
+                    ),
             ),
         )
     }

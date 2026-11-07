@@ -11,7 +11,7 @@ use std::borrow::Cow;
 use app::{apply_theme, RuskerApp};
 use gpui_kit::{
     assets, component::TitleBar, open_window, px, size, AppContext as _, AssetSource, Bounds,
-    Point, SharedString, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
+    SharedString, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
 };
 use rusker_desktop::settings::{AppSettings, SettingsStore};
 
@@ -74,10 +74,13 @@ fn main() {
             // Windows the controls map to native hit-test areas, so Snap
             // Layouts and the system menu keep working.
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    origin: Point::default(),
-                    size: size(px(1280.), px(800.)),
-                })),
+                // Center on the primary display's visible area (also clamps
+                // the size to the screen on small displays).
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                    None,
+                    size(px(1280.), px(800.)),
+                    cx,
+                ))),
                 window_min_size: Some(size(px(1040.), px(680.))),
                 titlebar: Some(TitlebarOptions {
                     // Still used for the taskbar / Alt+Tab entry.
