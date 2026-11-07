@@ -386,8 +386,11 @@ mod tests {
         // Observed in a WSL2 VM: a VHDX whose unique ID bytes are
         // 66 55 88 77 99 aa bb cc dd ee ff 00 00 00 00 00 shows up as
         // naa.600224806655887799aaff0000000000.
+        // Built with `join` so the separator matches the host: on Linux/macOS a
+        // literal `D:\WSL\docker-data.vhdx` has no parent directory.
+        let directory = PathBuf::from("WSL");
         let disk = DataDisk {
-            path: PathBuf::from(r"D:\WSL\docker-data.vhdx"),
+            path: directory.join("docker-data.vhdx"),
             id: "6655887799aabbccddeeff0000000000".into(),
         };
         assert_eq!(
@@ -400,7 +403,7 @@ mod tests {
         }
         .wwid()
         .is_err());
-        assert_eq!(disk.directory(), PathBuf::from(r"D:\WSL"));
+        assert_eq!(disk.directory(), directory);
     }
 
     #[test]
