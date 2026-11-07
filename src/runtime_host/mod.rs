@@ -46,6 +46,11 @@ pub enum RuntimeHostError {
     Task(String),
 }
 
+/// Result of [`RuntimeHostService::apply_integrations`]: the refreshed
+/// snapshot, the integrations actually in effect, and per-change failure
+/// messages.
+pub type ApplyIntegrationsOutcome = (RuntimeHostSnapshot, BTreeMap<String, bool>, Vec<String>);
+
 #[derive(Clone)]
 pub struct RuntimeHostService {
     runtime: Arc<Runtime>,
@@ -307,9 +312,7 @@ impl RuntimeHostService {
         &self,
         changes: Vec<(String, bool)>,
         integrations: BTreeMap<String, bool>,
-    ) -> JoinHandle<
-        Result<(RuntimeHostSnapshot, BTreeMap<String, bool>, Vec<String>), RuntimeHostError>,
-    > {
+    ) -> JoinHandle<Result<ApplyIntegrationsOutcome, RuntimeHostError>> {
         let host = self.host.clone();
         let lock = self.operation_lock.clone();
         self.spawn(async move {

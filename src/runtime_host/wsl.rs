@@ -312,6 +312,9 @@ pub struct RuntimeHostSnapshot {
     pub disk_location: Option<PathBuf>,
 }
 
+// `supported` is only `true` on Windows; elsewhere every field is the type
+// default and clippy would suggest deriving.
+#[cfg_attr(not(windows), allow(clippy::derivable_impls))]
 impl Default for RuntimeHostSnapshot {
     fn default() -> Self {
         Self {
@@ -357,10 +360,12 @@ impl ResourceSaver {
         self.enabled.store(settings.enabled, Ordering::Relaxed);
     }
 
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
 
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn threshold(&self) -> Duration {
         Duration::from_secs(self.threshold_secs.load(Ordering::Relaxed))
     }
@@ -374,6 +379,7 @@ impl ResourceSaver {
     }
 
     /// Open Windows pipe connections; any of them keeps the engine awake.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn connections(&self) -> usize {
         self.connections.load(Ordering::SeqCst)
     }
@@ -516,6 +522,7 @@ impl WslHost {
     /// The engine should be running but its session is gone: WSL was shut
     /// down from outside (`wsl --shutdown`), the distribution was
     /// terminated, or dockerd crashed.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn engine_lost(&self) -> bool {
         self.engine_wanted.load(Ordering::Relaxed)
             && !self.saver.is_active()
@@ -677,6 +684,7 @@ impl WslHost {
 
     /// Number of running containers, asked inside the distribution so the
     /// check itself never counts as pipe activity.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) async fn running_containers(&self) -> Result<usize, RuntimeHostError> {
         let mut command = managed_command("root");
         command.args(["/usr/bin/docker", "ps", "--quiet"]);
@@ -689,6 +697,7 @@ impl WslHost {
 
     /// Stops the idle engine and its distribution to release memory. The
     /// pipe proxy restarts it on the next Windows client connection.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) async fn enter_resource_saver(&self) {
         // Resource Saver wakes the engine itself; this is not a crash.
         self.engine_wanted.store(false, Ordering::Relaxed);

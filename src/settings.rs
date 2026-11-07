@@ -624,6 +624,7 @@ fn windows_system_proxy() -> Option<ResolvedProxy> {
 /// Parses WinINet's `ProxyServer` (`host:port`, or per protocol
 /// `http=host:port;https=host:port`) and `ProxyOverride`
 /// (`localhost;127.*;<local>`).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_windows_proxy(server: &str, bypass: &str) -> ResolvedProxy {
     let with_scheme = |address: &str| {
         let address = address.trim();
