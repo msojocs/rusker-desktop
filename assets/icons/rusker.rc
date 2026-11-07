@@ -1,0 +1,6 @@
+// Windows resources linked into rusker-desktop.exe by build.rs.
+//
+// gpui registers its window class with the icon at resource ID 1
+// (`LoadImageW(module, 1, IMAGE_ICON)`), which the taskbar and Alt+Tab use;
+// Explorer shows the same icon for the exe and its shortcuts.
+1 ICON "rusker.ico"

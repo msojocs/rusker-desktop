@@ -5471,6 +5471,7 @@ dependencies = [
  "bollard",
  "bytes",
  "directories",
+ "embed-resource",
  "futures-util",
  "gpui-kit",
  "httparse",

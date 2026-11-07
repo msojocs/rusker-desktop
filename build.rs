@@ -18,6 +18,7 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    app_icon();
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let embedded = out_dir.join("rusker-vm-proxy");
     if let Some(prebuilt) = env::var_os("RUSKER_VM_PROXY") {
@@ -83,6 +84,18 @@ fn build_helper(out_dir: &std::path::Path, embedded: &std::path::Path) {
         .join("rusker-vm-proxy");
     fs::copy(&built, embedded)
         .unwrap_or_else(|error| panic!("无法复制 {}：{error}", built.display()));
+}
+
+/// Embeds `assets/icons/rusker.ico` as the exe's icon resource (ID 1). gpui
+/// loads that resource for its window class, so without it the taskbar and
+/// Alt+Tab show the generic application icon.
+fn app_icon() {
+    const RESOURCES: &str = "assets/icons/rusker.rc";
+    println!("cargo:rerun-if-changed={RESOURCES}");
+    println!("cargo:rerun-if-changed=assets/icons/rusker.ico");
+    embed_resource::compile(RESOURCES, embed_resource::NONE)
+        .manifest_optional()
+        .unwrap_or_else(|error| panic!("无法嵌入应用图标 {RESOURCES}：{error}"));
 }
 
 /// Exposes the WSL2 system image version (`images/wsl-rootfs/VERSION`) as

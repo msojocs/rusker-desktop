@@ -433,7 +433,8 @@ Section "Install"
 
   ; SetShellVarContext (set by ApplyMode) points these at the current user's
   ; or the shared Start menu/Desktop; SHCTX is HKCU or HKLM accordingly.
-  ; The exe carries no icon resource, so the shortcuts point at the .ico.
+  ; The exe embeds the same icon (assets\icons\rusker.rc); the shortcuts
+  ; point at the installed .ico so they look the same either way.
   CreateShortcut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_ICON}" 0
   CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_ICON}" 0
 
