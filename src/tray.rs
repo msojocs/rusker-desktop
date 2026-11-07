@@ -3,7 +3,7 @@ use tray_icon::{
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 
-const ICON_SIZE: u32 = 64;
+const ICON_PNG: &[u8] = include_bytes!("../assets/icons/rusker-64.png");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -59,7 +59,8 @@ impl TrayMenu {
             &quit,
         ])
         .map_err(|error| format!("创建托盘菜单失败：{error}"))?;
-        let icon = Icon::from_rgba(icon_rgba(), ICON_SIZE, ICON_SIZE)
+        let (rgba, width, height) = decode_icon(ICON_PNG)?;
+        let icon = Icon::from_rgba(rgba, width, height)
             .map_err(|error| format!("创建托盘图标失败：{error}"))?;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -123,41 +124,26 @@ impl TrayMenu {
     }
 }
 
-fn icon_rgba() -> Vec<u8> {
-    let mut pixels = vec![0; (ICON_SIZE * ICON_SIZE * 4) as usize];
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            let background = inside_rounded_square(x, y);
-            let foreground = (16..30).contains(&x) && (19..30).contains(&y)
-                || (34..48).contains(&x) && (19..30).contains(&y)
-                || (16..30).contains(&x) && (34..45).contains(&y)
-                || (34..48).contains(&x) && (34..45).contains(&y);
-            let color = if foreground {
-                [236, 253, 245, 255]
-            } else if background {
-                [13, 148, 136, 255]
-            } else {
-                [0, 0, 0, 0]
-            };
-            let offset = ((y * ICON_SIZE + x) * 4) as usize;
-            pixels[offset..offset + 4].copy_from_slice(&color);
-        }
+fn decode_icon(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(
+        png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
+    );
+    let mut reader = decoder
+        .read_info()
+        .map_err(|error| format!("解析托盘图标失败：{error}"))?;
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| "解析托盘图标失败：图像过大".to_string())?;
+    let mut buffer = vec![0; size];
+    let info = reader
+        .next_frame(&mut buffer)
+        .map_err(|error| format!("解析托盘图标失败：{error}"))?;
+    if info.color_type != png::ColorType::Rgba {
+        return Err(format!("托盘图标颜色格式不受支持：{:?}", info.color_type));
     }
-    pixels
-}
-
-fn inside_rounded_square(x: u32, y: u32) -> bool {
-    const MIN: u32 = 4;
-    const MAX: u32 = 59;
-    const RADIUS: u32 = 12;
-    if !(MIN..=MAX).contains(&x) || !(MIN..=MAX).contains(&y) {
-        return false;
-    }
-    let nearest_x = x.clamp(MIN + RADIUS, MAX - RADIUS);
-    let nearest_y = y.clamp(MIN + RADIUS, MAX - RADIUS);
-    let dx = x.abs_diff(nearest_x);
-    let dy = y.abs_diff(nearest_y);
-    dx * dx + dy * dy <= RADIUS * RADIUS
+    buffer.truncate(info.buffer_size());
+    Ok((buffer, info.width, info.height))
 }
 
 #[cfg(test)]
@@ -165,22 +151,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tray_icon_has_expected_dimensions_transparency_and_shapes() {
-        let pixels = icon_rgba();
-        assert_eq!(pixels.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
-        assert_eq!(&pixels[0..4], &[0, 0, 0, 0]);
-
-        let foreground = ((22 * ICON_SIZE + 22) * 4) as usize;
-        assert_eq!(&pixels[foreground..foreground + 4], &[236, 253, 245, 255]);
-        let background = ((50 * ICON_SIZE + 10) * 4) as usize;
-        assert_eq!(&pixels[background..background + 4], &[13, 148, 136, 255]);
-    }
-
-    #[test]
-    fn rounded_icon_does_not_paint_outside_its_bounds() {
-        assert!(!inside_rounded_square(0, 0));
-        assert!(!inside_rounded_square(4, 4));
-        assert!(inside_rounded_square(32, 32));
-        assert!(inside_rounded_square(4, 32));
+    fn embedded_tray_icon_decodes_to_rgba() {
+        let (pixels, width, height) = decode_icon(ICON_PNG).unwrap();
+        assert_eq!((width, height), (64, 64));
+        assert_eq!(pixels.len(), (width * height * 4) as usize);
     }
 }

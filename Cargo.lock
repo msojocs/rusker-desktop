@@ -5474,6 +5474,7 @@ dependencies = [
  "futures-util",
  "gpui-kit",
  "httparse",
+ "png 0.18.1",
  "rustls",
  "rustls-native-certs",
  "serde",
