@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Rusker Desktop</title>
+  <defs>
+    <!-- tile background: deep slate -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#0B1120"/>
+    </linearGradient>
+    <!-- Rust: oxidised orange cog -->
+    <linearGradient id="cog" gradientUnits="userSpaceOnUse" x1="150" y1="120" x2="874" y2="904">
+      <stop offset="0" stop-color="#FB923C"/>
+      <stop offset="0.55" stop-color="#EA580C"/>
+      <stop offset="1" stop-color="#B7410E"/>
+    </linearGradient>
+    <!-- GPUI: GPU-rendered glow behind the container -->
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#38BDF8" stop-opacity="0.55"/>
+      <stop offset="0.6" stop-color="#2563EB" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#2563EB" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="top" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#93C5FD"/>
+      <stop offset="1" stop-color="#60A5FA"/>
+    </linearGradient>
+    <linearGradient id="left" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#1D4ED8"/>
+    </linearGradient>
+    <linearGradient id="right" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2563EB"/>
+      <stop offset="1" stop-color="#1E3A8A"/>
+    </linearGradient>
+    <rect id="tooth" x="464" y="100" width="96" height="110" rx="18"/>
+  </defs>
+
+  <!-- app tile -->
+  <rect x="32" y="32" width="960" height="960" rx="216" fill="url(#bg)"/>
+  <rect x="33.5" y="33.5" width="957" height="957" rx="214.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3"/>
+
+  <!-- Rust cog: 12 teeth + ring, one gradient via mask -->
+  <mask id="cogShape" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+  <g fill="#fff">
+    <use xlink:href="#tooth"/>
+    <use xlink:href="#tooth" transform="rotate(30 512 512)"/>
+    <use xlink:href="#tooth" transform="rotate(60 512 512)"/>
+    <use xlink:href="#tooth" transform="rotate(90 512 512)"/>
+    <use xlink:href="#tooth" transform="rotate(120 512 512)"/>
+    <use xlink:href="#tooth" transform="rotate(150 512 512)"/>
+    <use xlink:href="#tooth" transform="rotate(180 512 512)"/>
+    <use xlink:href="#tooth" transform="rotate(210 512 512)"/>
+    <use xlink:href="#tooth" transform="rotate(240 512 512)"/>
+    <use xlink:href="#tooth" transform="rotate(270 512 512)"/>
+    <use xlink:href="#tooth" transform="rotate(300 512 512)"/>
+    <use xlink:href="#tooth" transform="rotate(330 512 512)"/>
+  </g>
+    <circle cx="512" cy="512" r="327" fill="none" stroke="#fff" stroke-width="74"/>
+  </mask>
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#cog)" mask="url(#cogShape)"/>
+  <circle cx="512" cy="512" r="290" fill="#0F172A"/>
+
+  <!-- GPU glow -->
+  <circle cx="512" cy="512" r="286" fill="url(#glow)"/>
+
+  <!-- Docker-style shipping container, isometric -->
+  <g stroke-linejoin="round">
+    <polygon points="512,318 680,415 512,512 344,415" fill="url(#top)"/>
+    <polygon points="344,415 512,512 512,706 344,609" fill="url(#left)"/>
+    <polygon points="512,512 680,415 680,609 512,706" fill="url(#right)"/>
+  </g>
+  <!-- corrugation ribs -->
+  <g stroke="#0B1F5C" stroke-opacity="0.55" stroke-width="12" stroke-linecap="round">
+    <line x1="386" y1="461" x2="386" y2="611"/>
+    <line x1="428" y1="485" x2="428" y2="635"/>
+    <line x1="470" y1="509" x2="470" y2="659"/>
+    <line x1="554" y1="509" x2="554" y2="659"/>
+    <line x1="596" y1="485" x2="596" y2="635"/>
+    <line x1="638" y1="461" x2="638" y2="611"/>
+  </g>
+  <!-- edge highlights -->
+  <g fill="none" stroke="#DBEAFE" stroke-opacity="0.85" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="344,415 512,512 680,415"/>
+    <line x1="512" y1="512" x2="512" y2="706"/>
+  </g>
+</svg>

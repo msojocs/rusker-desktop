@@ -44,6 +44,7 @@ SetCompressor /SOLID lzma
 !define APP_URL "https://github.com/msojocs/rusker-desktop"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\RuskerDesktop"
 !define INSTALL_KEY "Software\Rusker\Rusker Desktop"
+!define APP_ICON "rusker.ico"
 
 ; MultiUser: read HKCU/HKLM INSTALL_KEY to find a previous install's mode and
 ; directory, and accept /CurrentUser and /AllUsers on the command line.
@@ -79,6 +80,8 @@ VIAddVersionKey /LANG=0 "CompanyName" "${APP_PUBLISHER}"
 VIAddVersionKey /LANG=0 "LegalCopyright" "Apache-2.0"
 
 !define MUI_ABORTWARNING
+!define MUI_ICON "..\..\assets\icons\${APP_ICON}"
+!define MUI_UNICON "..\..\assets\icons\${APP_ICON}"
 ; The installer may be elevated; launch the app through Explorer so it runs
 ; as the signed-in user rather than as administrator.
 !define MUI_FINISHPAGE_RUN
@@ -163,19 +166,21 @@ Section "Install"
   SetOutPath "$INSTDIR"
   File "/oname=${APP_EXE}" "${SOURCE_EXE}"
   File "/oname=LICENSE.txt" "..\..\LICENSE"
+  File "/oname=${APP_ICON}" "..\..\assets\icons\${APP_ICON}"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; SetShellVarContext (set by MultiUser) points these at the current user's
   ; or the shared Start menu/Desktop; SHCTX is HKCU or HKLM accordingly.
-  CreateShortcut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
-  CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+  ; The exe carries no icon resource, so the shortcuts point at the .ico.
+  CreateShortcut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_ICON}" 0
+  CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_ICON}" 0
 
   WriteRegStr SHCTX "${INSTALL_KEY}" "InstallDir" "$INSTDIR"
   WriteRegStr SHCTX "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME}"
   WriteRegStr SHCTX "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr SHCTX "${UNINSTALL_KEY}" "Publisher" "${APP_PUBLISHER}"
   WriteRegStr SHCTX "${UNINSTALL_KEY}" "URLInfoAbout" "${APP_URL}"
-  WriteRegStr SHCTX "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
+  WriteRegStr SHCTX "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\${APP_ICON}"
   WriteRegStr SHCTX "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr SHCTX "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe" /$MultiUser.InstallMode'
   WriteRegStr SHCTX "${UNINSTALL_KEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /$MultiUser.InstallMode /S'
@@ -195,6 +200,7 @@ Section "Uninstall"
 
   Delete "$INSTDIR\${APP_EXE}"
   Delete "$INSTDIR\LICENSE.txt"
+  Delete "$INSTDIR\${APP_ICON}"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 
