@@ -18,8 +18,9 @@ use tokio::{runtime::Runtime, sync::Mutex, task::JoinHandle};
 
 pub use lan_forward::{LanForwardState, Protocol as ForwardProtocol};
 pub use wsl::{
-    same_path, validate_daemon_config, NvidiaGpuStatus, ProxyApplyOutcome, RuntimeHostSnapshot,
-    WslDistribution, MANAGED_DISTRO_NAME, MANAGED_DOCKER_HOST, MANAGED_PIPE, WSL_DOCKER_HOST,
+    same_path, validate_daemon_config, EngineRecovery, NvidiaGpuStatus, ProxyApplyOutcome,
+    RuntimeHostSnapshot, WslDistribution, MANAGED_DISTRO_NAME, MANAGED_DOCKER_HOST, MANAGED_PIPE,
+    WSL_DOCKER_HOST,
 };
 
 use crate::settings::{DockerProxySettings, NetworkSettings, ResourceSaverSettings};
@@ -69,6 +70,7 @@ impl RuntimeHostService {
             runtime.spawn(proxy::serve(host.clone(), operation_lock.clone()));
             runtime.spawn(resource_saver_monitor(host.clone(), operation_lock.clone()));
             runtime.spawn(lan_forward::serve(host.clone()));
+            runtime.spawn(engine_watchdog(host.clone(), operation_lock.clone()));
         }
         Ok(Self {
             runtime: Arc::new(runtime),
@@ -95,6 +97,12 @@ impl RuntimeHostService {
     /// NAT-mode LAN forwarding of published ports, for the settings page.
     pub fn lan_forward_state(&self) -> LanForwardState {
         self.host.lan_forward_status().get()
+    }
+
+    /// Automatic restart of a lost engine, and how many restarts have
+    /// succeeded (the app reconnects when that number changes).
+    pub fn engine_recovery(&self) -> (EngineRecovery, u64) {
+        self.host.recovery_status().get()
     }
 
     /// Docker Desktop's "Enable host networking": also forward the ports
@@ -322,6 +330,46 @@ impl RuntimeHostService {
             let snapshot = host.snapshot(&effective).await?;
             Ok((snapshot, effective, failures))
         })
+    }
+}
+
+/// How often the watchdog checks for a lost engine.
+#[cfg(windows)]
+const WATCHDOG_POLL: Duration = Duration::from_secs(3);
+/// Consecutive failed restarts before the watchdog gives up.
+#[cfg(windows)]
+const MAX_RECOVERY_ATTEMPTS: u32 = 3;
+
+/// Restarts the engine when its session disappears without a deliberate
+/// stop (`wsl --shutdown`, a terminated distribution, a dockerd crash).
+/// Runs under the operation lock, so it waits for an apply or disk move
+/// that is restarting the engine itself; backs off between failed attempts
+/// and gives up after [`MAX_RECOVERY_ATTEMPTS`].
+#[cfg(windows)]
+async fn engine_watchdog(host: Arc<wsl::WslHost>, lock: Arc<Mutex<()>>) {
+    let mut attempt = 0u32;
+    loop {
+        tokio::time::sleep(WATCHDOG_POLL * 2u32.pow(attempt)).await;
+        if !host.engine_lost() {
+            attempt = 0;
+            continue;
+        }
+        let _guard = lock.lock().await;
+        if !host.engine_lost() {
+            attempt = 0;
+            continue;
+        }
+        attempt += 1;
+        match host.recover(attempt).await {
+            Ok(()) => attempt = 0,
+            Err(error) if attempt >= MAX_RECOVERY_ATTEMPTS => {
+                host.give_up_recovery(format!(
+                    "Engine 意外退出，自动重启 {attempt} 次均失败：{error}"
+                ));
+                attempt = 0;
+            }
+            Err(_) => {}
+        }
     }
 }
 

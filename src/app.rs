@@ -34,8 +34,9 @@ use rusker_desktop::{
     },
     model::{ContainerAction, ContainerSummary, EngineSnapshot, ImageSummary, Revision},
     runtime_host::{
-        same_path, validate_daemon_config, LanForwardState, ProxyApplyOutcome, RuntimeHostError,
-        RuntimeHostService, RuntimeHostSnapshot, MANAGED_DOCKER_HOST, WSL_DOCKER_HOST,
+        same_path, validate_daemon_config, EngineRecovery, LanForwardState, ProxyApplyOutcome,
+        RuntimeHostError, RuntimeHostService, RuntimeHostSnapshot, MANAGED_DOCKER_HOST,
+        WSL_DOCKER_HOST,
     },
     settings::{
         apply_client_proxy, docker_client_config_path, AppSettings, DockerProxySettings,
@@ -149,6 +150,9 @@ enum EngineTransition {
     Connecting,
     /// The managed runtime is shutting down.
     Stopping,
+    /// The engine went away without a deliberate stop (`wsl --shutdown`,
+    /// a crash) and the backend is restarting it.
+    Recovering,
 }
 
 impl EngineTransition {
@@ -157,6 +161,7 @@ impl EngineTransition {
             Self::Starting => "starting",
             Self::Connecting => "connecting",
             Self::Stopping => "stopping",
+            Self::Recovering => "recovering",
         }
     }
 
@@ -165,6 +170,7 @@ impl EngineTransition {
             Self::Starting => "正在启动 Docker Engine…",
             Self::Connecting => "正在连接 Docker Engine…",
             Self::Stopping => "正在停止 Docker Engine…",
+            Self::Recovering => "Engine 意外退出，正在自动重启…",
         }
     }
 
@@ -172,6 +178,9 @@ impl EngineTransition {
         match self {
             Self::Starting | Self::Connecting => "Docker Engine 是运行容器的底层技术",
             Self::Stopping => "运行中的容器将被停止，Engine 关闭后可在设置中重新启动",
+            Self::Recovering => {
+                "WSL 被关闭或 Engine 崩溃。设置了重启策略的容器会随 Engine 一起恢复"
+            }
         }
     }
 }
@@ -248,6 +257,10 @@ pub struct RuskerApp {
     saver_seen: bool,
     /// Last NAT LAN forwarding state shown in the Network section.
     lan_forward: LanForwardState,
+    /// Last automatic engine restart state seen from the backend, and the
+    /// number of completed restarts (a change means: reconnect).
+    recovery: EngineRecovery,
+    recovery_generation: u64,
     _saver_watch_task: Task<()>,
     runtime_host: Option<RuntimeHostService>,
     runtime_snapshot: RuntimeHostSnapshot,
@@ -401,6 +414,7 @@ impl RuskerApp {
                 .update(cx, |this, cx| {
                     this.sync_resource_saver(cx);
                     this.sync_lan_forward(cx);
+                    this.sync_engine_recovery(cx);
                 })
                 .is_err()
             {
@@ -534,6 +548,8 @@ impl RuskerApp {
             saver_slider,
             saver_seen: false,
             lan_forward: LanForwardState::default(),
+            recovery: EngineRecovery::default(),
+            recovery_generation: 0,
             _saver_watch_task: saver_watch_task,
             runtime_host,
             runtime_snapshot: RuntimeHostSnapshot::default(),
@@ -809,6 +825,39 @@ impl RuskerApp {
         if state != self.lan_forward {
             self.lan_forward = state;
             cx.notify();
+        }
+    }
+
+    /// Polled with Resource Saver: follows the backend's automatic restart
+    /// of a lost engine, and reconnects once it is back.
+    fn sync_engine_recovery(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = self.runtime_host.as_ref().filter(|_| self.manages_engine()) else {
+            return;
+        };
+        let (recovery, generation) = host.engine_recovery();
+        if recovery != self.recovery {
+            match &recovery {
+                EngineRecovery::Restarting { .. } => {
+                    self.connected = false;
+                    self.runtime_snapshot.engine_ready = false;
+                    self.runtime_snapshot.running = false;
+                }
+                EngineRecovery::Failed(message) => {
+                    self.connected = false;
+                    self.runtime_error = Some(message.clone());
+                }
+                EngineRecovery::Idle => {}
+            }
+            self.recovery = recovery;
+            cx.notify();
+        }
+        // A restart may also finish between two polls; either way the old
+        // connection is gone.
+        if generation != self.recovery_generation && self.runtime_busy.is_none() {
+            self.recovery_generation = generation;
+            self.connected = false;
+            self.runtime_error = None;
+            self.refresh_runtime_host(cx);
         }
     }
 
@@ -1382,10 +1431,8 @@ impl RuskerApp {
             cx.notify();
             return;
         }
-        let changes = integration_changes(
-            &self.settings.wsl.integrations,
-            &candidate.wsl.integrations,
-        );
+        let changes =
+            integration_changes(&self.settings.wsl.integrations, &candidate.wsl.integrations);
         if changes.is_empty() {
             self.apply_validated_settings(candidate, None, cx);
             return;
@@ -1821,7 +1868,15 @@ impl RuskerApp {
         if let Some(transition) = self.engine_transition {
             return Some(transition);
         }
+        if self.recovering() {
+            return Some(EngineTransition::Recovering);
+        }
         (self.loading && !self.connected).then_some(EngineTransition::Connecting)
+    }
+
+    /// The backend is restarting an engine that went away unexpectedly.
+    fn recovering(&self) -> bool {
+        matches!(self.recovery, EngineRecovery::Restarting { .. })
     }
 
     /// Spinning ring driven by `motion_epoch`; `render` keeps frames coming
@@ -3891,12 +3946,18 @@ impl RuskerApp {
         if self.quitting {
             return ("Engine 停止中…".into(), cx.theme().warning);
         }
-        match self.engine_transition {
+        match self
+            .engine_transition
+            .or(self.recovering().then_some(EngineTransition::Recovering))
+        {
             Some(EngineTransition::Stopping) => {
                 return ("Engine 停止中…".into(), cx.theme().warning)
             }
             Some(EngineTransition::Starting) => {
                 return ("Engine 启动中…".into(), cx.theme().warning)
+            }
+            Some(EngineTransition::Recovering) => {
+                return ("Engine 重启中…".into(), cx.theme().warning)
             }
             _ => {}
         }

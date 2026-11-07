@@ -85,9 +85,10 @@ async fn relay(pipe: NamedPipeServer, host: &WslHost, lock: &Mutex<()>) -> io::R
     let _connection = saver.track_connection();
     // Never boot the distribution from a stray client: only relay while the
     // supervisor session that owns dockerd is alive, except to leave
-    // Resource Saver mode.
+    // Resource Saver mode or to restart an engine that went away without a
+    // deliberate stop (e.g. `wsl --shutdown`).
     if !host.session_running() {
-        if !saver.is_active() {
+        if !saver.is_active() && !host.engine_lost() {
             return Ok(());
         }
         wake(host, lock).await;
@@ -113,11 +114,20 @@ async fn relay(pipe: NamedPipeServer, host: &WslHost, lock: &Mutex<()>) -> io::R
     Ok(())
 }
 
-/// Leaves Resource Saver mode. Concurrent clients queue on the operation
-/// lock; the first one starts the engine and the rest find it running.
+/// Leaves Resource Saver mode, or restarts a lost engine. Concurrent clients
+/// queue on the operation lock; the first one starts the engine and the
+/// rest find it running.
 async fn wake(host: &WslHost, lock: &Mutex<()>) {
     let _guard = lock.lock().await;
-    if host.session_running() || !host.resource_saver().is_active() {
+    if host.session_running() {
+        return;
+    }
+    if host.engine_lost() {
+        // A failure is retried by the engine watchdog.
+        let _ = host.recover(1).await;
+        return;
+    }
+    if !host.resource_saver().is_active() {
         return;
     }
     if let Err(error) = host.start().await {

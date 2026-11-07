@@ -253,6 +253,49 @@ pub struct WslDistribution {
     pub integration_enabled: bool,
 }
 
+/// Automatic restart of an engine that went away unexpectedly, like Docker
+/// Desktop restarting its WSL distribution after `wsl --shutdown`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum EngineRecovery {
+    #[default]
+    Idle,
+    /// The session ended unexpectedly and is being restarted.
+    Restarting { attempt: u32 },
+    /// Gave up after repeated failures; a manual start is needed.
+    Failed(String),
+}
+
+#[derive(Default)]
+pub(crate) struct RecoveryStatus {
+    /// The state, and how many recoveries have succeeded so far (the app
+    /// reconnects when it changes).
+    state: Mutex<(EngineRecovery, u64)>,
+}
+
+impl RecoveryStatus {
+    pub(crate) fn get(&self) -> (EngineRecovery, u64) {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn set(&self, recovery: EngineRecovery) {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).0 = recovery;
+    }
+
+    fn recovered(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.0 = EngineRecovery::Idle;
+        state.1 += 1;
+    }
+
+    /// A successful (manual) start ends a failed recovery.
+    fn clear_failure(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if matches!(state.0, EngineRecovery::Failed(_)) {
+            state.0 = EngineRecovery::Idle;
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeHostSnapshot {
     pub supported: bool,
@@ -418,6 +461,10 @@ pub struct WslHost {
     engine_network: Arc<Mutex<Map<String, Value>>>,
     saver: Arc<ResourceSaver>,
     lan_forward: Arc<LanForwardStatus>,
+    /// Set once the engine started successfully, cleared by deliberate
+    /// stops (manual, quit, Resource Saver); see [`Self::engine_lost`].
+    engine_wanted: Arc<AtomicBool>,
+    recovery: Arc<RecoveryStatus>,
     /// Where a new Docker data disk is created (None = default).
     data_location: Arc<Mutex<Option<PathBuf>>>,
 }
@@ -451,6 +498,8 @@ impl WslHost {
             engine_network: Arc::default(),
             saver: Arc::default(),
             lan_forward: Arc::default(),
+            engine_wanted: Arc::default(),
+            recovery: Arc::default(),
             data_location: Arc::default(),
         })
     }
@@ -462,6 +511,35 @@ impl WslHost {
 
     pub fn session_running(&self) -> bool {
         self.session.is_running()
+    }
+
+    /// The engine should be running but its session is gone: WSL was shut
+    /// down from outside (`wsl --shutdown`), the distribution was
+    /// terminated, or dockerd crashed.
+    pub(crate) fn engine_lost(&self) -> bool {
+        self.engine_wanted.load(Ordering::Relaxed)
+            && !self.saver.is_active()
+            && !self.session.is_running()
+    }
+
+    pub(crate) fn recovery_status(&self) -> Arc<RecoveryStatus> {
+        self.recovery.clone()
+    }
+
+    /// Restarts a lost engine. The caller holds the operation lock.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) async fn recover(&self, attempt: u32) -> Result<(), RuntimeHostError> {
+        self.recovery.set(EngineRecovery::Restarting { attempt });
+        self.start().await?;
+        self.recovery.recovered();
+        Ok(())
+    }
+
+    /// Stops recovering after repeated failures; a manual start is needed.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn give_up_recovery(&self, message: String) {
+        self.engine_wanted.store(false, Ordering::Relaxed);
+        self.recovery.set(EngineRecovery::Failed(message));
     }
 
     /// Default directory for the Docker data disk (`docker-data.vhdx`).
@@ -612,6 +690,8 @@ impl WslHost {
     /// Stops the idle engine and its distribution to release memory. The
     /// pipe proxy restarts it on the next Windows client connection.
     pub(crate) async fn enter_resource_saver(&self) {
+        // Resource Saver wakes the engine itself; this is not a crash.
+        self.engine_wanted.store(false, Ordering::Relaxed);
         self.stop_engine().await;
         let mut terminate = wsl_command();
         terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
@@ -934,6 +1014,7 @@ impl WslHost {
         self.ensure_owned().await?;
         // A manual stop is not Resource Saver: clients must not wake it.
         self.saver.set_active(false);
+        self.engine_wanted.store(false, Ordering::Relaxed);
         self.stop_engine().await;
         let mut command = wsl_command();
         command.args(["--terminate", MANAGED_DISTRO_NAME]);
@@ -948,6 +1029,7 @@ impl WslHost {
     /// processes (containerd shims, systemd, …) keep it `Running` and holding
     /// memory indefinitely.
     pub async fn shutdown(&self) {
+        self.engine_wanted.store(false, Ordering::Relaxed);
         if !self.session.is_running() {
             return;
         }
@@ -1062,7 +1144,11 @@ impl WslHost {
                 })?;
             self.session.replace(child);
         }
-        self.wait_until_ready().await
+        self.wait_until_ready().await?;
+        // From now on a vanished session is an accident to recover from.
+        self.engine_wanted.store(true, Ordering::Relaxed);
+        self.recovery.clear_failure();
+        Ok(())
     }
 
     /// SIGTERM dockerd (so containers stop cleanly), then release the session.
@@ -1913,6 +1999,25 @@ mod tests {
         assert!(!rendered.contains("__MOUNT_DATA_DISK__"));
         let mount = rendered.find("mount --bind").expect("mount");
         assert!(mount < rendered.find("exec /usr/bin/dockerd").expect("dockerd"));
+    }
+
+    #[test]
+    fn recovery_status_counts_successful_restarts() {
+        let status = RecoveryStatus::default();
+        assert_eq!(status.get(), (EngineRecovery::Idle, 0));
+        status.set(EngineRecovery::Restarting { attempt: 1 });
+        assert_eq!(status.get(), (EngineRecovery::Restarting { attempt: 1 }, 0));
+        status.recovered();
+        assert_eq!(status.get(), (EngineRecovery::Idle, 1));
+
+        // A manual start clears a failure without counting as a recovery,
+        // and never hides a restart in progress.
+        status.set(EngineRecovery::Failed("x".into()));
+        status.clear_failure();
+        assert_eq!(status.get(), (EngineRecovery::Idle, 1));
+        status.set(EngineRecovery::Restarting { attempt: 2 });
+        status.clear_failure();
+        assert_eq!(status.get().0, EngineRecovery::Restarting { attempt: 2 });
     }
 
     #[test]
