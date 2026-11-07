@@ -1,4 +1,5 @@
 mod data_disk;
+mod lan_forward;
 mod path_translation;
 #[cfg(windows)]
 mod proxy;
@@ -15,6 +16,7 @@ use std::{
 use thiserror::Error;
 use tokio::{runtime::Runtime, sync::Mutex, task::JoinHandle};
 
+pub use lan_forward::{LanForwardState, Protocol as ForwardProtocol};
 pub use wsl::{
     same_path, validate_daemon_config, NvidiaGpuStatus, ProxyApplyOutcome, RuntimeHostSnapshot,
     WslDistribution, MANAGED_DISTRO_NAME, MANAGED_DOCKER_HOST, MANAGED_PIPE, WSL_DOCKER_HOST,
@@ -66,6 +68,7 @@ impl RuntimeHostService {
         {
             runtime.spawn(proxy::serve(host.clone(), operation_lock.clone()));
             runtime.spawn(resource_saver_monitor(host.clone(), operation_lock.clone()));
+            runtime.spawn(lan_forward::serve(host.clone()));
         }
         Ok(Self {
             runtime: Arc::new(runtime),
@@ -87,6 +90,17 @@ impl RuntimeHostService {
     /// Whether this process holds a live engine session.
     pub fn engine_session_running(&self) -> bool {
         self.host.session_running()
+    }
+
+    /// NAT-mode LAN forwarding of published ports, for the settings page.
+    pub fn lan_forward_state(&self) -> LanForwardState {
+        self.host.lan_forward_status().get()
+    }
+
+    /// Docker Desktop's "Enable host networking": also forward the ports
+    /// `--net=host` containers listen on. Takes effect immediately.
+    pub fn set_host_networking(&self, enabled: bool) {
+        self.host.lan_forward_status().set_host_networking(enabled);
     }
 
     /// Default directory for the Docker data disk.

@@ -34,8 +34,8 @@ use rusker_desktop::{
     },
     model::{ContainerAction, ContainerSummary, EngineSnapshot, ImageSummary, Revision},
     runtime_host::{
-        same_path, validate_daemon_config, ProxyApplyOutcome, RuntimeHostError, RuntimeHostService,
-        RuntimeHostSnapshot, MANAGED_DOCKER_HOST, WSL_DOCKER_HOST,
+        same_path, validate_daemon_config, LanForwardState, ProxyApplyOutcome, RuntimeHostError,
+        RuntimeHostService, RuntimeHostSnapshot, MANAGED_DOCKER_HOST, WSL_DOCKER_HOST,
     },
     settings::{
         apply_client_proxy, docker_client_config_path, AppSettings, DockerProxySettings,
@@ -246,6 +246,8 @@ pub struct RuskerApp {
     saver_slider: Entity<SliderState>,
     /// Last Resource Saver state the UI reacted to.
     saver_seen: bool,
+    /// Last NAT LAN forwarding state shown in the Network section.
+    lan_forward: LanForwardState,
     _saver_watch_task: Task<()>,
     runtime_host: Option<RuntimeHostService>,
     runtime_snapshot: RuntimeHostSnapshot,
@@ -396,7 +398,10 @@ impl RuskerApp {
         let saver_watch_task = cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_secs(2)).await;
             if this
-                .update(cx, |this, cx| this.sync_resource_saver(cx))
+                .update(cx, |this, cx| {
+                    this.sync_resource_saver(cx);
+                    this.sync_lan_forward(cx);
+                })
                 .is_err()
             {
                 break;
@@ -433,6 +438,7 @@ impl RuskerApp {
             Ok(host) => {
                 host.set_engine_proxy(&settings.docker_proxy);
                 host.set_engine_network(&settings.network);
+                host.set_host_networking(settings.network.host_networking);
                 host.set_resource_saver(&settings.resource_saver);
                 host.set_data_location(disk_location_setting(&settings));
                 (Some(host), None)
@@ -527,6 +533,7 @@ impl RuskerApp {
             saver_threshold_input,
             saver_slider,
             saver_seen: false,
+            lan_forward: LanForwardState::default(),
             _saver_watch_task: saver_watch_task,
             runtime_host,
             runtime_snapshot: RuntimeHostSnapshot::default(),
@@ -788,6 +795,20 @@ impl RuskerApp {
             // Waits on the wake-up (it holds the operation lock), then
             // reconnects once the engine is ready.
             self.refresh_runtime_host(cx);
+        }
+    }
+
+    /// Polled with Resource Saver: re-renders when the forwarded ports change.
+    fn sync_lan_forward(&mut self, cx: &mut Context<Self>) {
+        let state = self
+            .runtime_host
+            .as_ref()
+            .filter(|_| self.manages_engine())
+            .map(RuntimeHostService::lan_forward_state)
+            .unwrap_or_default();
+        if state != self.lan_forward {
+            self.lan_forward = state;
+            cx.notify();
         }
     }
 
@@ -1476,6 +1497,7 @@ impl RuskerApp {
             Ok(()) => {
                 if let Some(host) = &self.runtime_host {
                     host.set_resource_saver(&candidate.resource_saver);
+                    host.set_host_networking(candidate.network.host_networking);
                     host.set_data_location(disk_location_setting(&candidate));
                 }
                 // Modes that follow other sources are re-resolved on every
@@ -3307,6 +3329,43 @@ impl RuskerApp {
             })
     }
 
+    /// How published ports reach the LAN under the current WSL networking
+    /// mode, plus listen failures. None while no engine session runs.
+    fn lan_forward_summary(&self) -> Option<(String, Vec<String>)> {
+        let state = &self.lan_forward;
+        let mode = state.mode.as_deref()?;
+        let text = match mode {
+            "mirrored" => {
+                "WSL 使用镜像网络：已发布端口直接出现在 Windows 网络上，局域网设备可通过本机 IP 访问。".to_string()
+            }
+            "nat" | "unknown" if self.settings.network.port_binding == PortBinding::LocalhostOnly => {
+                "WSL 使用 NAT 网络：端口仅绑定本机，不转发到局域网。".to_string()
+            }
+            "nat" | "unknown" => {
+                let ports = if state.forwarded.is_empty() {
+                    "当前没有需要转发的端口".to_string()
+                } else {
+                    let mut list = state
+                        .forwarded
+                        .iter()
+                        .take(12)
+                        .map(|(protocol, port)| format!("{} {port}", protocol.label()))
+                        .collect::<Vec<_>>()
+                        .join("、");
+                    if state.forwarded.len() > 12 {
+                        list.push_str(&format!(" 等 {} 个", state.forwarded.len()));
+                    }
+                    format!("已转发 {list}")
+                };
+                format!(
+                    "WSL 使用 NAT 网络：与 Docker Desktop 相同，Rusker 在 Windows 上监听发布到所有接口的端口（TCP/UDP，IPv4 与 IPv6）并转发到 VM，局域网设备可通过本机 IP 访问（{ports}）。首次监听时请在 Windows 防火墙提示中允许 Rusker 访问网络。"
+                )
+            }
+            other => format!("WSL 网络模式为 {other}，Rusker 不转发端口。"),
+        };
+        Some((text, state.failures.clone()))
+    }
+
     /// Docker Desktop's "Network" section, applied to the managed Engine's
     /// `daemon.json`.
     fn render_network_settings(&self, cx: &mut Context<Self>) -> Div {
@@ -3339,6 +3398,29 @@ impl RuskerApp {
                         cx,
                     )),
             )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .child(div().flex_1().child(settings_label("启用主机网络", cx)))
+                    .child(
+                        Switch::new("network-host-networking")
+                            .checked(network.host_networking)
+                            .disabled(!managed)
+                            .pointer(managed)
+                            .on_change(cx.listener(|this, enabled, _, cx| {
+                                this.settings_draft.network.host_networking = *enabled;
+                                this.settings_notice = None;
+                                this.settings_error = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(muted(
+                "以 --net=host 启动的容器监听的 TCP 和 UDP 端口也会在 Windows 上转发：NAT 网络下局域网设备可访问，UDP 也可通过 localhost 访问。localhost 上的 TCP 由 WSL 自身转发，不受此开关影响；镜像网络下无需转发。应用后立即生效，不会重启 Engine。",
+                cx,
+            ))
             .child(proxy_heading(
                 "端口绑定行为",
                 self.settings_select(
@@ -3356,6 +3438,18 @@ impl RuskerApp {
                 "控制发布的容器端口绑定到所有网络接口（默认），还是只绑定到 127.0.0.1。端口映射中显式指定的地址（如 0.0.0.0:8080:80）不受影响。",
                 cx,
             ))
+            .when_some(self.lan_forward_summary(), |this, (text, failures)| {
+                this.child(
+                    indented(cx)
+                        .child(muted(text, cx))
+                        .children(failures.into_iter().map(|failure| {
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().warning)
+                                .child(failure)
+                        })),
+                )
+            })
             .child(proxy_heading(
                 "默认网络模式",
                 self.settings_select(

@@ -20,7 +20,7 @@ use tokio::{
     time::timeout,
 };
 
-use super::{data_disk, RuntimeHostError};
+use super::{data_disk, lan_forward::LanForwardStatus, RuntimeHostError};
 use crate::settings::{
     DockerProxySettings, NetworkSettings, ResourceSaverSettings, ENGINE_NETWORK_KEYS,
 };
@@ -417,6 +417,7 @@ pub struct WslHost {
     /// Desired network keys ([`ENGINE_NETWORK_KEYS`]) of `daemon.json`.
     engine_network: Arc<Mutex<Map<String, Value>>>,
     saver: Arc<ResourceSaver>,
+    lan_forward: Arc<LanForwardStatus>,
     /// Where a new Docker data disk is created (None = default).
     data_location: Arc<Mutex<Option<PathBuf>>>,
 }
@@ -449,6 +450,7 @@ impl WslHost {
             engine_proxies: Arc::default(),
             engine_network: Arc::default(),
             saver: Arc::default(),
+            lan_forward: Arc::default(),
             data_location: Arc::default(),
         })
     }
@@ -771,6 +773,10 @@ impl WslHost {
         )
         .await?;
         Ok(true)
+    }
+
+    pub fn lan_forward_status(&self) -> Arc<LanForwardStatus> {
+        self.lan_forward.clone()
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -1275,7 +1281,7 @@ fn parse_distributions(output: &str) -> Vec<DistroInfo> {
         .collect()
 }
 
-fn managed_command(user: &str) -> Command {
+pub(super) fn managed_command(user: &str) -> Command {
     wsl_command_for(MANAGED_DISTRO_NAME, user)
 }
 
@@ -1975,6 +1981,7 @@ mod tests {
             r#"{"runtimes":{"nvidia":{"path":"nvidia-container-runtime"}},"ip":"0.0.0.0"}"#;
         let network = NetworkSettings {
             subnet: "192.168.65.0/24".into(),
+            host_networking: false,
             port_binding: PortBinding::Open,
             mode: NetworkingMode::DualStack,
         };

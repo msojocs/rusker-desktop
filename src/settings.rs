@@ -360,6 +360,10 @@ pub struct NetworkSettings {
     /// IPv4 subnet of the default bridge (`docker0`) in CIDR notation.
     /// Empty: Docker's default ([`DEFAULT_DOCKER_SUBNET`]).
     pub subnet: String,
+    /// Docker Desktop's "Enable host networking": also forward ports that
+    /// `--net=host` containers listen on (NAT LAN forwarding, UDP on
+    /// localhost). Takes effect immediately; not a `daemon.json` key.
+    pub host_networking: bool,
     pub port_binding: PortBinding,
     pub mode: NetworkingMode,
 }
@@ -897,6 +901,7 @@ mod tests {
 
         let settings = NetworkSettings {
             subnet: "10.200.0.0/24".into(),
+            host_networking: true,
             port_binding: PortBinding::LocalhostOnly,
             mode: NetworkingMode::DualStack,
         };
@@ -1151,6 +1156,7 @@ mod tests {
             },
             network: NetworkSettings {
                 subnet: " 10.200.0.0/24 ".into(),
+                host_networking: true,
                 port_binding: PortBinding::LocalhostOnly,
                 mode: NetworkingMode::DualStack,
             },
@@ -1182,6 +1188,7 @@ mod tests {
         assert_eq!(loaded.network.subnet, "10.200.0.0/24");
         assert_eq!(loaded.network.port_binding, PortBinding::LocalhostOnly);
         assert_eq!(loaded.network.mode, NetworkingMode::DualStack);
+        assert!(loaded.network.host_networking);
 
         let export = store.export_proxy(&loaded.docker_proxy).expect("导出代理");
         assert_eq!(export, directory.path().join("docker-proxies.json"));
