@@ -9,6 +9,7 @@ use gpui_kit::component::{
     skeleton::Skeleton,
     slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
+    tooltip::Tooltip,
     window_border, ActiveTheme as _, Icon, IconName, Sizable as _, Size, Theme, ThemeMode,
     WindowExt as _,
 };
@@ -178,6 +179,8 @@ pub struct RuskerApp {
     /// (Windows "Animation effects" off) — a progress spinner must move.
     motion_epoch: Instant,
     page: Page,
+    /// Sidebar shows icons only (labels move into tooltips).
+    sidebar_collapsed: bool,
     snapshot: EngineSnapshot,
     connected: bool,
     loading: bool,
@@ -403,6 +406,7 @@ impl RuskerApp {
             shutdown_done: false,
             motion_epoch: Instant::now(),
             page: Page::Overview,
+            sidebar_collapsed: false,
             snapshot: EngineSnapshot::default(),
             connected: false,
             loading: false,
@@ -1479,7 +1483,7 @@ impl RuskerApp {
         // (Docker Desktop-style); the app bar gear still opens settings.
         let placeholders = self.engine_phase().is_some();
         let nav = div()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(self.sidebar_width()))
             .h_full()
             .flex_shrink_0()
             .border_r_1()
@@ -1510,6 +1514,49 @@ impl RuskerApp {
             .child(self.nav_item(Page::Volumes, AssetIcon::Database, cx))
             .child(separator)
             .child(self.nav_item(Page::Settings, IconName::Settings, cx))
+            .child(div().flex_1())
+            .child(self.sidebar_toggle(cx))
+    }
+
+    fn sidebar_width(&self) -> f32 {
+        if self.sidebar_collapsed {
+            SIDEBAR_COLLAPSED_WIDTH
+        } else {
+            SIDEBAR_WIDTH
+        }
+    }
+
+    /// Bottom row of the sidebar that collapses it to icons or expands it.
+    fn sidebar_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let collapsed = self.sidebar_collapsed;
+        let (icon, label) = if collapsed {
+            (IconName::PanelLeftOpen, "展开菜单")
+        } else {
+            (IconName::PanelLeftClose, "收起菜单")
+        };
+        div()
+            .id("sidebar-toggle")
+            .mx_2()
+            .px_3()
+            .h(px(36.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .when(collapsed, |this| this.justify_center())
+            .gap_3()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .cursor_pointer()
+            .hover(|style| style.bg(cx.theme().sidebar_accent))
+            .child(Icon::new(icon).small())
+            .when(!collapsed, |this| this.child(label))
+            .when(collapsed, |this| {
+                this.tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.sidebar_collapsed = !this.sidebar_collapsed;
+                cx.notify();
+            }))
     }
 
     /// The engine phase that replaces engine-backed pages with the
@@ -1588,6 +1635,7 @@ impl RuskerApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.page == page;
+        let collapsed = self.sidebar_collapsed;
         let accent = brand_color(cx);
         div()
             .id(SharedString::from(format!("nav-{}", page.title())))
@@ -1597,6 +1645,7 @@ impl RuskerApp {
             .rounded_md()
             .flex()
             .items_center()
+            .when(collapsed, |this| this.justify_center())
             .gap_3()
             .text_sm()
             .cursor_pointer()
@@ -1607,7 +1656,10 @@ impl RuskerApp {
                 this.hover(|style| style.bg(cx.theme().sidebar_accent))
             })
             .child(Icon::new(icon).small())
-            .child(page.title())
+            .when(!collapsed, |this| this.child(page.title()))
+            .when(collapsed, |this| {
+                this.tooltip(move |window, cx| Tooltip::new(page.title()).build(window, cx))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate(page, cx);
             }))
@@ -1645,64 +1697,66 @@ impl RuskerApp {
                 .id("overview-page")
                 .size_full()
                 .overflow_y_scroll()
-            .p_6()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_6()
-                    .child(div().text_2xl().font_semibold().child("容器运行概览"))
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .gap_4()
-                            .child(stat_card(
-                                "全部容器",
-                                self.snapshot.containers.len().to_string(),
-                                "包括运行中和已停止",
-                                cx,
-                            ))
-                            .child(stat_card(
-                                "运行中",
-                                self.snapshot.running_containers().to_string(),
-                                format!("{} 个未运行", self.snapshot.stopped_containers()),
-                                cx,
-                            ))
-                            .child(stat_card(
-                                "本地镜像",
-                                self.snapshot.images.len().to_string(),
-                                "包含无标签镜像",
-                                cx,
-                            ))
-                            .child(stat_card(
-                                "卷",
-                                self.snapshot.volumes.len().to_string(),
-                                format!(
-                                    "{} 个正被容器使用",
-                                    self.snapshot
-                                        .volumes
-                                        .iter()
-                                        .filter(|volume| self.snapshot.volume_in_use(&volume.name))
-                                        .count()
-                                ),
-                                cx,
-                            )),
-                    )
-                    .child(
-                        section_panel(cx)
-                            .p_5()
-                            .flex()
-                            .flex_col()
-                            .gap_4()
-                            .child(div().text_lg().font_semibold().child("引擎信息"))
-                            .child(detail_row("名称", engine.name.clone(), cx))
-                            .child(detail_row("Engine", engine.version.clone(), cx))
-                            .child(detail_row("API", engine.api_version.clone(), cx))
-                            .child(detail_row("操作系统", engine.operating_system.clone(), cx))
-                            .child(detail_row("架构", engine.architecture.clone(), cx)),
-                    ),
-            ),
+                .p_6()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_6()
+                        .child(div().text_2xl().font_semibold().child("容器运行概览"))
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .gap_4()
+                                .child(stat_card(
+                                    "全部容器",
+                                    self.snapshot.containers.len().to_string(),
+                                    "包括运行中和已停止",
+                                    cx,
+                                ))
+                                .child(stat_card(
+                                    "运行中",
+                                    self.snapshot.running_containers().to_string(),
+                                    format!("{} 个未运行", self.snapshot.stopped_containers()),
+                                    cx,
+                                ))
+                                .child(stat_card(
+                                    "本地镜像",
+                                    self.snapshot.images.len().to_string(),
+                                    "包含无标签镜像",
+                                    cx,
+                                ))
+                                .child(stat_card(
+                                    "卷",
+                                    self.snapshot.volumes.len().to_string(),
+                                    format!(
+                                        "{} 个正被容器使用",
+                                        self.snapshot
+                                            .volumes
+                                            .iter()
+                                            .filter(|volume| self
+                                                .snapshot
+                                                .volume_in_use(&volume.name))
+                                            .count()
+                                    ),
+                                    cx,
+                                )),
+                        )
+                        .child(
+                            section_panel(cx)
+                                .p_5()
+                                .flex()
+                                .flex_col()
+                                .gap_4()
+                                .child(div().text_lg().font_semibold().child("引擎信息"))
+                                .child(detail_row("名称", engine.name.clone(), cx))
+                                .child(detail_row("Engine", engine.version.clone(), cx))
+                                .child(detail_row("API", engine.api_version.clone(), cx))
+                                .child(detail_row("操作系统", engine.operating_system.clone(), cx))
+                                .child(detail_row("架构", engine.architecture.clone(), cx)),
+                        ),
+                ),
         )
     }
 
@@ -2899,6 +2953,7 @@ impl Render for RuskerApp {
 }
 
 const SIDEBAR_WIDTH: f32 = 216.;
+const SIDEBAR_COLLAPSED_WIDTH: f32 = 56.;
 /// Seconds per spinner revolution.
 const SPINNER_PERIOD_SECS: f32 = 0.9;
 /// Seconds per status-dot breath.
@@ -3090,17 +3145,20 @@ impl RuskerApp {
             .text_color(cx.theme().muted_foreground)
             .child(
                 div()
-                    .w(px(SIDEBAR_WIDTH))
+                    .w(px(self.sidebar_width()))
                     .h_full()
                     .flex_shrink_0()
                     .px_4()
                     .flex()
                     .items_center()
+                    .when(self.sidebar_collapsed, |this| this.justify_center())
                     .gap_2()
                     .border_r_1()
                     .border_color(cx.theme().border)
                     .child(self.render_status_dot(color))
-                    .child(div().font_medium().text_color(color).child(label)),
+                    .when(!self.sidebar_collapsed, |this| {
+                        this.child(div().font_medium().text_color(color).child(label))
+                    }),
             )
             .child(
                 div()
