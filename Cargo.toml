@@ -37,6 +37,21 @@ windows-registry = "0.6"
 [dev-dependencies]
 tempfile = "3"
 
+[package.metadata.deb]
+name = "rusker-desktop"
+maintainer = "msojocs"
+section = "devel"
+priority = "optional"
+extended-description = "Rusker Desktop manages containers and images through a Docker/Podman compatible engine."
+depends = "$auto"
+recommends = "docker.io | podman"
+assets = [
+    ["target/release/rusker-desktop", "usr/bin/", "755"],
+    ["packaging/linux/rusker-desktop.desktop", "usr/share/applications/", "644"],
+    ["LICENSE", "usr/share/doc/rusker-desktop/", "644"],
+    ["README.md", "usr/share/doc/rusker-desktop/", "644"],
+]
+
 [profile.dev.package]
 gpui-pre = { opt-level = 3 }
 gpui-component = { opt-level = 3 }

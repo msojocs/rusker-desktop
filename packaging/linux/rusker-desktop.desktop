@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Rusker Desktop
+GenericName=Container Desktop Manager
+Comment=An open-source, cross-platform container desktop manager
+Exec=rusker-desktop
+Terminal=false
+Categories=Development;Utility;
+Keywords=docker;podman;container;
+StartupNotify=true

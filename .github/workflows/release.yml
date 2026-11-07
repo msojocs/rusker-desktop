@@ -1,0 +1,190 @@
+name: Release
+
+# master pushes publish a rolling "preview" prerelease; v* tags publish a
+# versioned release. Both build the Windows NSIS installer and Linux packages.
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 5
+
+jobs:
+  meta:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.version.outputs.channel }}
+      version: ${{ steps.version.outputs.version }}
+      version_numeric: ${{ steps.version.outputs.version_numeric }}
+      deb_version: ${{ steps.version.outputs.deb_version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rusker-desktop") | .version')"
+          core="${cargo_version%%-*}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ "$version" != "$cargo_version" ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_version"
+              exit 1
+            fi
+            channel=release
+            version_numeric="${core}.0"
+            deb_version="${version//-/\~}"
+            if [[ "$version" == *-* ]]; then prerelease=true; else prerelease=false; fi
+          else
+            channel=preview
+            version="${cargo_version}-preview.${GITHUB_RUN_NUMBER}"
+            version_numeric="${core}.${GITHUB_RUN_NUMBER}"
+            deb_version="${cargo_version//-/\~}~preview.${GITHUB_RUN_NUMBER}"
+            prerelease=true
+          fi
+          {
+            echo "channel=$channel"
+            echo "version=$version"
+            echo "version_numeric=$version_numeric"
+            echo "deb_version=$deb_version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Channel: $channel, version: $version"
+
+  windows:
+    name: Windows installer
+    needs: meta
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      VERSION_NUMERIC: ${{ needs.meta.outputs.version_numeric }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - name: Build
+        run: cargo build --release --locked
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            $default = 'C:\Program Files (x86)\NSIS'
+            if (-not (Test-Path "$default\makensis.exe")) {
+              choco install nsis -y --no-progress
+            }
+            Add-Content $env:GITHUB_PATH $default
+          }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'target\release\rusker-desktop.exe'
+          $out = Join-Path $dist "rusker-desktop-$env:VERSION-windows-x64-setup.exe"
+          makensis /V3 "/DVERSION=$env:VERSION" "/DVERSION_NUMERIC=$env:VERSION_NUMERIC" `
+            "/DSOURCE_EXE=$exe" "/DOUTFILE=$out" packaging\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  linux:
+    name: Linux packages
+    needs: meta
+    # Oldest supported runner: binaries built here link against an older glibc
+    # and therefore run on more distributions.
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ clang pkg-config libfontconfig-dev libwayland-dev \
+            libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libssl-dev libzstd-dev libvulkan1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - name: Install cargo-deb
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+      - name: Build
+        run: cargo build --release --locked
+      - name: Build .deb
+        run: |
+          mkdir -p dist
+          cargo deb --no-build --deb-version "$DEB_VERSION" \
+            --output "dist/rusker-desktop-${VERSION}-linux-amd64.deb"
+      - name: Build tarball
+        run: |
+          name="rusker-desktop-${VERSION}-linux-x64"
+          mkdir -p "staging/$name"
+          cp target/release/rusker-desktop packaging/linux/rusker-desktop.desktop \
+            LICENSE README.md "staging/$name/"
+          strip "staging/$name/rusker-desktop"
+          tar -C staging -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish ${{ needs.meta.outputs.channel }}
+    needs: [meta, windows, linux]
+    # Manual runs on other branches only build artifacts, never publish.
+    if: github.ref == 'refs/heads/master' || github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Publish preview
+        if: needs.meta.outputs.channel == 'preview'
+        run: |
+          gh release delete preview --cleanup-tag --yes || true
+          gh release create preview dist/* \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Preview $VERSION" \
+            --notes "Automated preview build of \`master\` at ${GITHUB_SHA::7}. Not a stable release."
+      - name: Publish release
+        if: needs.meta.outputs.channel == 'release'
+        run: |
+          flags=()
+          if [[ "${{ needs.meta.outputs.prerelease }}" == "true" ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "Rusker Desktop $VERSION" \
+            --generate-notes \
+            "${flags[@]}"

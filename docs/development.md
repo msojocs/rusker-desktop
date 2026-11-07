@@ -136,3 +136,18 @@ RUSKER_DOCKER_OPERATIONS=1 cargo test --test volume_operations -- --nocapture
 - 不提交 `target/`、编辑器临时文件和生成的诊断日志。
 - 新功能应有纯逻辑测试；平台相关变更至少执行对应平台的 `cargo check`。
 - 未实机验证的平台或操作必须在交付说明中明确标记。
+
+## 打包与发布
+
+`.github/workflows/release.yml` 构建 Windows NSIS 安装包（`packaging/windows/installer.nsi`）和 Linux 的 `.deb` 与 `tar.gz`：
+
+- 推送到 `master`：发布滚动预览版 `preview`（GitHub prerelease，每次覆盖），版本号为 `<Cargo 版本>-preview.<run 编号>`
+- 推送 `v*` tag：发布正式 Release；tag 必须与 `Cargo.toml` 的 `version` 一致（如 `v0.1.0`），带 `-` 的版本（如 `v0.2.0-rc.1`）标记为 prerelease
+
+```bash
+# 发布正式版：先修改 Cargo.toml 中的 version 并提交
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Windows 安装包按用户安装到 `%LOCALAPPDATA%\Programs\Rusker Desktop`，不需要管理员权限；卸载不会删除用户设置和受管 WSL2 发行版。
