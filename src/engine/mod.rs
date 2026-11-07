@@ -96,6 +96,19 @@ impl EngineService {
         })
     }
 
+    /// Removes each container independently and returns the fresh snapshot
+    /// with one error message per failed container.
+    pub fn remove_containers(
+        &self,
+        ids: Vec<String>,
+    ) -> JoinHandle<Result<(EngineSnapshot, Vec<String>), EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            let failures = engine.remove_containers(&ids).await;
+            Ok((engine.snapshot().await?, failures))
+        })
+    }
+
     pub fn remove_image(&self, id: String) -> JoinHandle<Result<EngineSnapshot, EngineError>> {
         self.spawn(async move {
             let engine = docker::DockerEngine::connect().await?;

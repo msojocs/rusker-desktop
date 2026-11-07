@@ -301,6 +301,18 @@ impl DockerEngine {
         }
     }
 
+    /// Removes several containers one by one (never forced). Returns one
+    /// message per container that could not be removed.
+    pub async fn remove_containers(&self, ids: &[String]) -> Vec<String> {
+        let mut failures = Vec::new();
+        for id in ids {
+            if let Err(error) = self.container_action(id, ContainerAction::Remove).await {
+                failures.push(format!("{}: {error}", short_id(id)));
+            }
+        }
+        failures
+    }
+
     pub async fn container_logs(&self, id: &str) -> Result<String, EngineError> {
         let options = LogsOptionsBuilder::default()
             .follow(false)

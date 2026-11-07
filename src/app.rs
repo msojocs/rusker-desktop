@@ -1,15 +1,19 @@
 use std::{
+    collections::HashSet,
     path::PathBuf,
     time::{Duration, Instant},
 };
 
 use gpui_kit::component::{
+    breadcrumb::{Breadcrumb, BreadcrumbItem},
     button::{Button, ButtonVariant, ButtonVariants as _},
+    checkbox::Checkbox,
     input::{Editor, EditorState, Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
     skeleton::Skeleton,
     slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
+    tab::{Tab, TabBar},
     tooltip::Tooltip,
     window_border, ActiveTheme as _, Icon, IconName, Sizable as _, Size, Theme, ThemeMode,
     WindowExt as _,
@@ -20,14 +24,17 @@ use gpui_kit::{
     div, ease_out_quint, percentage,
     prelude::FluentBuilder as _,
     pulsating_between, px, rgb, Anchor, Animation, AnimationExt as _, AnyElement, AnyWindowHandle,
-    App, AppContext as _, Context, Div, Entity, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, PathPromptOptions, Pixels, Render, ScrollHandle, SharedString,
-    Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Transformation,
-    Window, WindowAppearance, WindowControlArea,
+    App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, PathPromptOptions,
+    Pixels, Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Transformation, Window, WindowAppearance, WindowControlArea,
 };
 use rusker_desktop::{
     engine::{EngineError, EngineService},
-    format::{container_matches, format_bytes, format_ports, format_timestamp, short_id},
+    format::{
+        container_matches, format_bytes, format_port_bindings, format_ports, format_relative,
+        format_timestamp, short_id,
+    },
     model::{ContainerAction, ContainerSummary, EngineSnapshot, Revision},
     runtime_host::{
         same_path, validate_daemon_config, EngineRecovery, LanForwardState, ProxyApplyOutcome,
@@ -41,11 +48,10 @@ use rusker_desktop::{
     },
     tray::{TrayCommand, TrayMenu},
 };
+use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 
-use crate::ui::{
-    detail_row, empty_state, message_banner, muted, page_header, section_panel, stat_card,
-};
+use crate::ui::{detail_row, empty_state, message_banner, muted, section_panel, stat_card};
 
 mod images;
 mod run;
@@ -208,6 +214,14 @@ pub struct RuskerApp {
     notice: Option<String>,
     busy: Option<String>,
     selected_container: Option<String>,
+    /// Container list shows only running containers.
+    containers_running_only: bool,
+    /// IDs ticked for batch removal in the container list.
+    containers_checked: HashSet<String>,
+    /// Container detail tab: 0 logs, 1 details, 2 mounts.
+    container_tab: usize,
+    /// Scroll state of the container log viewer.
+    container_logs_scroll: ScrollHandle,
     logs: String,
     logs_loading: bool,
     logs_error: Option<String>,
@@ -511,6 +525,10 @@ impl RuskerApp {
             notice: None,
             busy: None,
             selected_container: None,
+            containers_running_only: false,
+            containers_checked: HashSet::new(),
+            container_tab: 0,
+            container_logs_scroll: ScrollHandle::new(),
             logs: String::new(),
             logs_loading: false,
             logs_error: None,
@@ -664,7 +682,17 @@ impl RuskerApp {
 
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
         let entering_volumes = page == Page::Volumes && self.page != Page::Volumes;
+        let entering_containers = page == Page::Containers && self.page != Page::Containers;
         self.page = page;
+        if entering_containers {
+            // The sidebar entry always opens the container list, not the
+            // detail page of the last selected container.
+            self.selected_container = None;
+            self.logs_revision.advance();
+            self.logs_loading = false;
+            self.logs.clear();
+            self.logs_error = None;
+        }
         if page == Page::Settings {
             self.refresh_runtime_host(cx);
             // Keep unsaved edits; otherwise pick up the current file.
@@ -997,13 +1025,34 @@ impl RuskerApp {
             }
         }
         self.snapshot = snapshot;
+        let ids: HashSet<&str> = self
+            .snapshot
+            .containers
+            .iter()
+            .map(|container| container.id.as_str())
+            .collect();
+        self.containers_checked
+            .retain(|id| ids.contains(id.as_str()));
         self.prune_volume_selection();
         self.after_image_snapshot();
     }
 
     fn select_container(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.selected_container.as_deref() != Some(id.as_str()) {
+            self.container_tab = 0;
+        }
         self.selected_container = Some(id.clone());
         self.load_logs(id, cx);
+    }
+
+    /// Returns from the container detail page to the container list.
+    fn close_container_detail(&mut self, cx: &mut Context<Self>) {
+        self.selected_container = None;
+        self.logs_revision.advance();
+        self.logs_loading = false;
+        self.logs.clear();
+        self.logs_error = None;
+        cx.notify();
     }
 
     fn load_logs(&mut self, id: String, cx: &mut Context<Self>) {
@@ -1024,7 +1073,10 @@ impl RuskerApp {
                 }
                 this.logs_loading = false;
                 match result {
-                    Ok(logs) => this.logs = logs,
+                    Ok(logs) => {
+                        this.logs = logs;
+                        this.container_logs_scroll.scroll_to_bottom();
+                    }
                     Err(error) => this.logs_error = Some(error.to_string()),
                 }
                 cx.notify();
@@ -1583,6 +1635,97 @@ impl RuskerApp {
         });
     }
 
+    fn confirm_remove_containers(
+        &mut self,
+        containers: Vec<ContainerSummary>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if containers.is_empty() || self.busy.is_some() {
+            return;
+        }
+        let mut listed: Vec<String> = containers
+            .iter()
+            .take(8)
+            .map(|container| format!("{}（{}）", container.name, short_id(&container.id)))
+            .collect();
+        if containers.len() > listed.len() {
+            listed.push("…".into());
+        }
+        let title = format!("删除 {} 个容器？", containers.len());
+        let description = format!(
+            "此操作不可撤销。关联卷不会被删除；运行中的容器会被 Engine 拒绝。\n{}",
+            listed.join("\n")
+        );
+        let ids: Vec<String> = containers
+            .into_iter()
+            .map(|container| container.id)
+            .collect();
+        let weak = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let ids = ids.clone();
+            let weak = weak.clone();
+            dialog
+                .title(title.clone())
+                .description(description.clone())
+                .confirm()
+                .ok_text("删除")
+                .cancel_text("取消")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    let ids = ids.clone();
+                    _ = weak.update(cx, |this, cx| this.remove_containers(ids, cx));
+                    true
+                })
+        });
+    }
+
+    fn remove_containers(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        if ids.is_empty() || self.busy.is_some() {
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            self.error = Some("容器引擎不可用".into());
+            cx.notify();
+            return;
+        };
+        let total = ids.len();
+        let handle = engine.remove_containers(ids);
+        let revision = self.refresh_revision.advance();
+        self.busy = Some(format!("删除 {total} 个容器…"));
+        self.loading = false;
+        self.error = None;
+        self.notice = None;
+        cx.notify();
+        self._action_task = Some(cx.spawn(async move |this, cx| {
+            let result = await_engine(handle).await;
+            _ = this.update(cx, |this, cx| {
+                if !this.refresh_revision.is_current(revision) {
+                    return;
+                }
+                this.busy = None;
+                match result {
+                    Ok((snapshot, failures)) => {
+                        this.connected = true;
+                        this.apply_snapshot(snapshot);
+                        if failures.is_empty() {
+                            this.notice = Some(format!("已删除 {total} 个容器"));
+                        } else {
+                            this.error = Some(format!(
+                                "已删除 {} 个容器，{} 个失败：\n{}",
+                                total - failures.len(),
+                                failures.len(),
+                                failures.join("\n")
+                            ));
+                        }
+                    }
+                    Err(error) => this.error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
         // While the engine starts or stops, the whole menu is placeholders
         // (Docker Desktop-style); the app bar gear still opens settings.
@@ -1874,14 +2017,6 @@ impl RuskerApp {
     }
 
     fn render_containers(&self, cx: &mut Context<Self>) -> Div {
-        let query = self.search_input.read(cx).value().to_string();
-        let containers: Vec<ContainerSummary> = self
-            .snapshot
-            .containers
-            .iter()
-            .filter(|container| container_matches(container, &query))
-            .cloned()
-            .collect();
         let selected = self
             .selected_container
             .as_ref()
@@ -1892,6 +2027,258 @@ impl RuskerApp {
                     .find(|container| &container.id == id)
             })
             .cloned();
+        match selected {
+            Some(container) => self.render_container_detail(&container, cx),
+            None => self.render_container_list(cx),
+        }
+    }
+
+    /// Docker Desktop-style container list: usage summary, search and the
+    /// running-only switch above a table with selection and row actions.
+    fn render_container_list(&self, cx: &mut Context<Self>) -> Div {
+        let query = self.search_input.read(cx).value().to_string();
+        let all_containers = &self.snapshot.containers;
+        let containers: Vec<ContainerSummary> = all_containers
+            .iter()
+            .filter(|container| {
+                container_matches(container, &query)
+                    && (!self.containers_running_only || container.is_running())
+            })
+            .cloned()
+            .collect();
+        let shown = containers.len();
+        let running = all_containers
+            .iter()
+            .filter(|container| container.is_running())
+            .count();
+        let busy = self.busy.is_some();
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let mut checked: Vec<String> = self.containers_checked.iter().cloned().collect();
+        checked.sort();
+        let selected_containers: Vec<ContainerSummary> = all_containers
+            .iter()
+            .filter(|container| self.containers_checked.contains(&container.id))
+            .cloned()
+            .collect();
+
+        let usage = if running == 0 {
+            "暂无运行中的容器。".to_string()
+        } else {
+            format!("{running} 个容器运行中，实时统计尚未支持。")
+        };
+
+        let title = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(div().text_2xl().font_semibold().child("容器"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "{running} 个运行中 · 共 {} 个",
+                        all_containers.len()
+                    )),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("refresh-containers")
+                    .ghost()
+                    .small()
+                    .icon(IconName::RotateCw)
+                    .tooltip("刷新")
+                    .disabled(self.loading || busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+            )
+            .child(
+                Button::new("open-create-container")
+                    .primary()
+                    .icon(IconName::Plus)
+                    .label("创建")
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_create_container_dialog(None, window, cx);
+                    })),
+            );
+
+        let usage_row = div()
+            .flex()
+            .items_start()
+            .gap_8()
+            .child(container_usage(
+                "容器 CPU 使用率",
+                "需要 Engine 实时统计支持，当前版本暂未提供。",
+                &usage,
+                cx,
+            ))
+            .child(container_usage(
+                "容器内存使用率",
+                "需要 Engine 实时统计支持，当前版本暂未提供。",
+                &usage,
+                cx,
+            ));
+
+        let toolbar = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div().w(px(340.)).child(
+                    Input::new(&self.search_input)
+                        .prefix(Icon::new(IconName::Search).small())
+                        .cleanable(true),
+                ),
+            )
+            .child(
+                Switch::new("container-running-only")
+                    .checked(self.containers_running_only)
+                    .label("仅显示运行中的容器")
+                    .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                        this.containers_running_only = *checked;
+                        cx.notify();
+                    })),
+            )
+            .child(div().flex_1())
+            .when(!checked.is_empty(), |this| {
+                let count = checked.len();
+                let selected = selected_containers.clone();
+                this.child(
+                    Button::new("clear-container-selection")
+                        .ghost()
+                        .label("取消选择")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.containers_checked.clear();
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("remove-checked-containers")
+                        .danger()
+                        .icon(IconName::Delete)
+                        .label(format!("删除所选（{count}）"))
+                        .disabled(busy)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.confirm_remove_containers(selected.clone(), window, cx);
+                        })),
+                )
+            });
+
+        let all_checked = shown > 0
+            && containers
+                .iter()
+                .all(|container| self.containers_checked.contains(&container.id));
+        let visible_ids: Vec<String> = containers
+            .iter()
+            .map(|container| container.id.clone())
+            .collect();
+
+        let header = div()
+            .px_4()
+            .py_3()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .items_center()
+            .text_xs()
+            .font_semibold()
+            .text_color(cx.theme().muted_foreground)
+            .child(
+                div().w(px(CONTAINER_CHECK_COLUMN)).flex_shrink_0().child(
+                    Checkbox::new("check-all-containers")
+                        .checked(all_checked)
+                        .tooltip("全选当前列表")
+                        .disabled(visible_ids.is_empty())
+                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                            for id in &visible_ids {
+                                if *checked {
+                                    this.containers_checked.insert(id.clone());
+                                } else {
+                                    this.containers_checked.remove(id);
+                                }
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(div().w(px(CONTAINER_STATUS_COLUMN)).flex_shrink_0())
+            .child(div().flex_1().min_w(px(112.)).child("名称"))
+            .child(
+                div()
+                    .w(px(CONTAINER_ID_COLUMN))
+                    .flex_shrink_0()
+                    .child("容器 ID"),
+            )
+            .child(div().flex_1().min_w(px(112.)).child("镜像"))
+            .child(
+                div()
+                    .w(px(CONTAINER_PORTS_COLUMN))
+                    .flex_shrink_0()
+                    .child("端口"),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_CPU_COLUMN))
+                    .flex_shrink_0()
+                    .child("CPU (%)"),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_CREATED_COLUMN))
+                    .flex_shrink_0()
+                    .child("创建时间"),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_ACTIONS_COLUMN))
+                    .flex_shrink_0()
+                    .child("操作"),
+            );
+
+        let panel = section_panel(cx)
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(header);
+
+        let footer = div()
+            .flex()
+            .justify_end()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(format!("显示 {shown} 个"));
+
+        if containers.is_empty() {
+            return div()
+                .flex_1()
+                .min_h_0()
+                .p_6()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(title)
+                .child(usage_row)
+                .child(toolbar)
+                .child(panel.child(if all_containers.is_empty() {
+                    empty_state("还没有容器", "点击右上角“创建”，从镜像运行第一个容器。", cx)
+                } else if self.containers_running_only && running == 0 {
+                    empty_state(
+                        "没有运行中的容器",
+                        "关闭“仅显示运行中的容器”可查看全部容器。",
+                        cx,
+                    )
+                } else {
+                    empty_state("没有匹配的容器", "调整搜索条件或筛选方式。", cx)
+                }))
+                .child(footer);
+        }
+
+        let rows = containers
+            .iter()
+            .enumerate()
+            .map(|(index, container)| self.render_container_row(index, container, now, busy, cx));
 
         div()
             .flex_1()
@@ -1900,178 +2287,463 @@ impl RuskerApp {
             .flex()
             .flex_col()
             .gap_4()
-            .child(page_header(
-                "容器",
-                format!(
-                    "共 {} 个，当前显示 {} 个",
-                    self.snapshot.containers.len(),
-                    containers.len()
+            .child(title)
+            .child(usage_row)
+            .child(toolbar)
+            .child(
+                panel.child(
+                    div()
+                        .id("container-rows")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .children(rows),
                 ),
-                cx,
-            ))
+            )
+            .child(footer)
+    }
+
+    fn render_container_row(
+        &self,
+        index: usize,
+        container: &ContainerSummary,
+        now: i64,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let detail_id = container.id.clone();
+        let check_id = container.id.clone();
+        let toggle_id = container.id.clone();
+        let is_checked = self.containers_checked.contains(&container.id);
+        let running = container.is_running();
+        let paused = container.state.eq_ignore_ascii_case("paused");
+        let state_color = if running {
+            cx.theme().success
+        } else if paused {
+            cx.theme().warning
+        } else {
+            cx.theme().muted_foreground
+        };
+        let state_dot = if running || paused {
+            div().size(px(8.)).rounded_full().bg(state_color)
+        } else {
+            div()
+                .size(px(8.))
+                .rounded_full()
+                .border_1()
+                .border_color(state_color)
+        };
+        let status = if container.status.trim().is_empty() {
+            container.state.clone()
+        } else {
+            container.status.clone()
+        };
+        let state_tooltip = status.clone();
+        let menu_container = container.clone();
+        let remove_container = container.clone();
+        let weak = cx.weak_entity();
+
+        div()
+            .id(("container-row", index))
+            .px_4()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .items_center()
+            .text_sm()
+            .cursor_pointer()
+            .when(is_checked, |this| this.bg(cx.theme().accent))
+            .hover(|this| this.bg(cx.theme().accent))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.select_container(detail_id.clone(), cx);
+            }))
+            .child(
+                div().w(px(CONTAINER_CHECK_COLUMN)).flex_shrink_0().child(
+                    Checkbox::new(("check-container", index))
+                        .checked(is_checked)
+                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                            if *checked {
+                                this.containers_checked.insert(check_id.clone());
+                            } else {
+                                this.containers_checked.remove(&check_id);
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        })),
+                ),
+            )
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div().w(px(420.)).child(
-                            Input::new(&self.search_input)
-                                .prefix(Icon::new(IconName::Search).small())
-                                .cleanable(true),
-                        ),
-                    )
-                    .child(
-                        Button::new("open-create-container")
-                            .primary()
-                            .icon(IconName::Plus)
-                            .label("创建容器")
-                            .disabled(self.busy.is_some())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_create_container_dialog(None, window, cx);
-                            })),
-                    ),
+                    .id(("container-state", index))
+                    .w(px(CONTAINER_STATUS_COLUMN))
+                    .flex_shrink_0()
+                    .child(state_dot)
+                    .tooltip(move |window, cx| {
+                        Tooltip::new(state_tooltip.clone()).build(window, cx)
+                    }),
             )
             .child(
                 div()
                     .flex_1()
-                    .min_h_0()
+                    .min_w(px(112.))
+                    .py_3()
+                    .pr_3()
+                    .truncate()
+                    .child(container.name.clone()),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_ID_COLUMN))
+                    .flex_shrink_0()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_xs()
+                    .child(copyable_value(
+                        ("copy-container-id", index),
+                        AssetIcon::Link,
+                        short_id(&container.id),
+                        "复制容器 ID",
+                        cx.theme().muted_foreground,
+                        cx.theme().muted_foreground,
+                    )),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(112.))
+                    .pr_3()
+                    .truncate()
+                    .child(copyable_value(
+                        ("copy-container-image", index),
+                        AssetIcon::Link,
+                        container.image.clone(),
+                        "复制镜像引用",
+                        cx.theme().primary,
+                        cx.theme().muted_foreground,
+                    )),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_PORTS_COLUMN))
+                    .flex_shrink_0()
+                    .pr_2()
+                    .truncate()
+                    .child(format_port_bindings(&container.ports)),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_CPU_COLUMN))
+                    .flex_shrink_0()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("N/A"),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_CREATED_COLUMN))
+                    .flex_shrink_0()
+                    .child(format_relative(container.created, now)),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_ACTIONS_COLUMN))
+                    .flex_shrink_0()
                     .flex()
-                    .gap_4()
-                    .child(self.render_container_list(&containers, cx))
-                    .child(self.render_container_details(selected.as_ref(), cx)),
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Button::new(("toggle-container", index))
+                            .ghost()
+                            .small()
+                            .icon(
+                                Icon::new(if running {
+                                    IconName::Square
+                                } else {
+                                    IconName::Play
+                                })
+                                .text_color(cx.theme().primary),
+                            )
+                            .tooltip(if running { "停止" } else { "启动" })
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.start_container_action(
+                                    toggle_id.clone(),
+                                    if running {
+                                        ContainerAction::Stop
+                                    } else {
+                                        ContainerAction::Start
+                                    },
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new(("container-more", index))
+                            .ghost()
+                            .small()
+                            .icon(
+                                Icon::new(IconName::EllipsisVertical)
+                                    .text_color(cx.theme().primary),
+                            )
+                            .disabled(busy)
+                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                                container_menu(menu, &menu_container, weak.clone())
+                            }),
+                    )
+                    .child(
+                        Button::new(("remove-container-row", index))
+                            .ghost()
+                            .small()
+                            .icon(Icon::new(IconName::Delete).text_color(cx.theme().danger))
+                            .tooltip("删除")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.confirm_remove_container(&remove_container, window, cx);
+                            })),
+                    ),
             )
     }
 
-    fn render_container_list(
-        &self,
-        containers: &[ContainerSummary],
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let list = section_panel(cx)
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(div().w(px(190.)).child("名称"))
-                    .child(div().flex_1().child("镜像"))
-                    .child(div().w(px(90.)).child("状态")),
-            );
-
-        if containers.is_empty() {
-            return list.child(empty_state(
-                "没有匹配的容器",
-                "调整搜索条件，或确认引擎中存在容器。",
-                cx,
-            ));
-        }
-
-        let rows = containers.iter().enumerate().map(|(index, container)| {
-            let id = container.id.clone();
-            let selected = self.selected_container.as_ref() == Some(&container.id);
-            let state_color = if container.is_running() {
-                cx.theme().success
-            } else {
-                cx.theme().muted_foreground
-            };
-            div()
-                .id(("container-row", index))
-                .px_4()
-                .py_3()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .flex()
-                .items_center()
-                .cursor_pointer()
-                .when(selected, |row| row.bg(cx.theme().accent))
-                .hover(|row| row.bg(cx.theme().accent))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.select_container(id.clone(), cx);
-                }))
-                .child(
-                    div()
-                        .w(px(190.))
-                        .flex_shrink_0()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_ellipsis()
-                                .child(container.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(short_id(&container.id)),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .pr_3()
-                        .text_sm()
-                        .text_ellipsis()
-                        .child(container.image.clone()),
-                )
-                .child(
-                    div()
-                        .w(px(90.))
-                        .flex_shrink_0()
-                        .text_sm()
-                        .text_color(state_color)
-                        .child(container.state.clone()),
-                )
-        });
-
-        list.child(
-            div()
-                .id("container-rows")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .children(rows),
-        )
-    }
-
-    fn render_container_details(
-        &self,
-        container: Option<&ContainerSummary>,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let panel = section_panel(cx)
-            .w(px(430.))
-            .h_full()
-            .flex_shrink_0()
-            .flex()
-            .flex_col();
-        let Some(container) = container else {
-            return panel.child(empty_state(
-                "选择一个容器",
-                "查看详情、日志并执行操作。",
-                cx,
-            ));
-        };
-
+    /// Container detail page: breadcrumb, identity header with the Docker
+    /// Desktop action cluster, and logs / details / mounts tabs.
+    fn render_container_detail(&self, container: &ContainerSummary, cx: &mut Context<Self>) -> Div {
         let busy = self.busy.is_some();
+        let running = container.is_running();
+        let status = if container.status.trim().is_empty() {
+            container.state.clone()
+        } else {
+            container.status.clone()
+        };
+        let tab = self.container_tab.min(2);
+        let weak = cx.weak_entity();
+        let back_weak = weak.clone();
         let start_id = container.id.clone();
         let stop_id = container.id.clone();
         let restart_id = container.id.clone();
         let remove_container = container.clone();
-        let logs = if self.logs_loading {
+        let logs_id = container.id.clone();
+        let logs_for_copy = self.logs.clone();
+
+        let actions = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                Button::new("stop-container")
+                    .secondary()
+                    .icon(IconName::Square)
+                    .tooltip("停止")
+                    .disabled(busy || !running)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_container_action(stop_id.clone(), ContainerAction::Stop, cx);
+                    })),
+            )
+            .child(
+                Button::new("start-container")
+                    .primary()
+                    .icon(IconName::Play)
+                    .tooltip("启动")
+                    .disabled(busy || running)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_container_action(start_id.clone(), ContainerAction::Start, cx);
+                    })),
+            )
+            .child(
+                Button::new("restart-container")
+                    .outline()
+                    .icon(IconName::RotateCw)
+                    .tooltip("重启")
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_container_action(
+                            restart_id.clone(),
+                            ContainerAction::Restart,
+                            cx,
+                        );
+                    })),
+            )
+            .child(
+                Button::new("remove-container")
+                    .danger()
+                    .icon(IconName::Delete)
+                    .tooltip("删除")
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm_remove_container(&remove_container, window, cx);
+                    })),
+            );
+
+        let tabs = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_6()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                TabBar::new("container-detail-tabs")
+                    .underline()
+                    .flex_1()
+                    .selected_index(tab)
+                    .child(Tab::new().label("日志"))
+                    .child(Tab::new().label("详情"))
+                    .child(Tab::new().label("挂载"))
+                    .on_click({
+                        let weak = weak.clone();
+                        move |index, _, cx| {
+                            _ = weak.update(cx, |this, cx| {
+                                this.container_tab = *index;
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .child(
+                Button::new("copy-container-logs")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Copy)
+                    .tooltip("复制日志")
+                    .disabled(self.logs.is_empty())
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(logs_for_copy.clone()));
+                    }),
+            )
+            .child(
+                Button::new("refresh-container-logs")
+                    .ghost()
+                    .small()
+                    .icon(IconName::RotateCw)
+                    .tooltip("刷新日志")
+                    .disabled(self.logs_loading)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.load_logs(logs_id.clone(), cx);
+                    })),
+            );
+
+        let content = match tab {
+            1 => self
+                .render_container_details_tab(container, cx)
+                .into_any_element(),
+            2 => self
+                .render_container_mounts_tab(container, cx)
+                .into_any_element(),
+            _ => self.render_container_logs_tab(cx).into_any_element(),
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div().px_6().pt_4().child(
+                    Breadcrumb::new()
+                        .child(
+                            BreadcrumbItem::new("容器")
+                                .text_color(cx.theme().primary)
+                                .on_click(move |_, _, cx| {
+                                    _ = back_weak
+                                        .update(cx, |this, cx| this.close_container_detail(cx));
+                                }),
+                        )
+                        .child(BreadcrumbItem::new(container.name.clone())),
+                ),
+            )
+            .child(
+                div()
+                    .px_6()
+                    .py_4()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .child(
+                        Button::new("container-back")
+                            .ghost()
+                            .small()
+                            .icon(IconName::ChevronLeft)
+                            .tooltip("返回容器列表")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.close_container_detail(cx)),
+                            ),
+                    )
+                    .child(
+                        Icon::new(AssetIcon::Container)
+                            .size(px(40.))
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_2xl()
+                                    .font_semibold()
+                                    .truncate()
+                                    .child(container.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_4()
+                                    .flex_wrap()
+                                    .text_sm()
+                                    .child(copyable_value(
+                                        "copy-detail-id",
+                                        AssetIcon::Link,
+                                        short_id(&container.id),
+                                        "复制容器 ID",
+                                        cx.theme().foreground,
+                                        cx.theme().muted_foreground,
+                                    ))
+                                    .child(copyable_value(
+                                        "copy-detail-image",
+                                        AssetIcon::Link,
+                                        container.image.clone(),
+                                        "复制镜像引用",
+                                        cx.theme().primary,
+                                        cx.theme().muted_foreground,
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format_port_bindings(&container.ports)),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_6()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_end()
+                                    .gap_1()
+                                    .child(div().text_xs().font_semibold().child("状态"))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(status),
+                                    ),
+                            )
+                            .child(actions),
+                    ),
+            )
+            .child(tabs)
+            .child(content)
+    }
+
+    fn render_container_logs_tab(&self, cx: &mut Context<Self>) -> Div {
+        let is_placeholder =
+            self.logs_loading || self.logs_error.is_some() || self.logs.trim().is_empty();
+        let text = if self.logs_loading {
             "正在读取日志…".to_string()
         } else if let Some(error) = &self.logs_error {
             error.clone()
@@ -2080,130 +2752,130 @@ impl RuskerApp {
         } else {
             self.logs.clone()
         };
+        let color = if self.logs_error.is_some() {
+            cx.theme().danger
+        } else if is_placeholder {
+            cx.theme().muted_foreground
+        } else {
+            cx.theme().foreground
+        };
 
-        panel.child(
-            div()
-                .id("container-details")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .p_5()
-                .flex()
-                .flex_col()
-                .gap_5()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_semibold()
-                                .child(container.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(container.id.clone()),
-                        ),
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .child(
+                div()
+                    .id("container-log-scroll")
+                    .size_full()
+                    .overflow_scroll()
+                    .track_scroll(&self.container_logs_scroll)
+                    .child(
+                        div()
+                            .p_4()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_xs()
+                            .text_color(color)
+                            .when(!is_placeholder, |this| this.whitespace_nowrap())
+                            .child(text),
+                    ),
+            )
+            .when(!is_placeholder, |this| {
+                this.child(
+                    div().absolute().bottom_4().right_6().child(
+                        Button::new("container-logs-bottom")
+                            .outline()
+                            .icon(IconName::ArrowDown)
+                            .tooltip("滚动到底部")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.container_logs_scroll.scroll_to_bottom();
+                                cx.notify();
+                            })),
+                    ),
                 )
-                .child(
+            })
+    }
+
+    fn render_container_details_tab(
+        &self,
+        container: &ContainerSummary,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let state = if container.status.trim().is_empty() {
+            container.state.clone()
+        } else {
+            format!("{}（{}）", container.state, container.status)
+        };
+        let volumes = if container.volumes.is_empty() {
+            "—".to_string()
+        } else {
+            container.volumes.join(", ")
+        };
+
+        div()
+            .id("container-details-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_6()
+            .child(
+                section_panel(cx)
+                    .p_5()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(detail_row("容器 ID", container.id.clone(), cx))
+                    .child(detail_row("镜像", container.image.clone(), cx))
+                    .child(detail_row("镜像 ID", short_id(&container.image_id), cx))
+                    .child(detail_row("状态", state, cx))
+                    .child(detail_row(
+                        "创建时间",
+                        format_timestamp(container.created),
+                        cx,
+                    ))
+                    .child(detail_row("端口", format_ports(&container.ports), cx))
+                    .child(detail_row("命名卷", volumes, cx)),
+            )
+    }
+
+    fn render_container_mounts_tab(
+        &self,
+        container: &ContainerSummary,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let content = if container.volumes.is_empty() {
+            empty_state("没有命名卷挂载", "该容器没有挂载命名卷。", cx)
+        } else {
+            let mut list = section_panel(cx).flex().flex_col();
+            for (index, volume) in container.volumes.iter().enumerate() {
+                list = list.child(
                     div()
+                        .id(("container-volume", index))
+                        .px_4()
+                        .py_3()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
                         .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            Button::new("start-container")
-                                .outline()
-                                .small()
-                                .icon(IconName::Play)
-                                .label("启动")
-                                .disabled(busy || container.is_running())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.start_container_action(
-                                        start_id.clone(),
-                                        ContainerAction::Start,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            Button::new("stop-container")
-                                .outline()
-                                .small()
-                                .icon(IconName::Square)
-                                .label("停止")
-                                .disabled(busy || !container.is_running())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.start_container_action(
-                                        stop_id.clone(),
-                                        ContainerAction::Stop,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            Button::new("restart-container")
-                                .outline()
-                                .small()
-                                .icon(IconName::RotateCw)
-                                .label("重启")
-                                .disabled(busy)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.start_container_action(
-                                        restart_id.clone(),
-                                        ContainerAction::Restart,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            Button::new("remove-container")
-                                .danger()
-                                .small()
-                                .icon(IconName::Delete)
-                                .label("删除")
-                                .disabled(busy)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.confirm_remove_container(&remove_container, window, cx);
-                                })),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
+                        .items_center()
                         .gap_3()
-                        .child(detail_row("状态", container.status.clone(), cx))
-                        .child(detail_row("镜像", container.image.clone(), cx))
-                        .child(detail_row("端口", format_ports(&container.ports), cx))
-                        .child(detail_row(
-                            "创建于",
-                            format_timestamp(container.created),
-                            cx,
-                        )),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(div().font_semibold().child("最近日志（200 行）"))
                         .child(
-                            div()
-                                .p_3()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().background)
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_xs()
-                                .child(logs),
-                        ),
-                ),
-        )
+                            Icon::new(AssetIcon::Database)
+                                .small()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(div().text_sm().child(volume.clone())),
+                );
+            }
+            list
+        };
+
+        div()
+            .id("container-mounts-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_6()
+            .child(content)
     }
 
     /// Engine runtime controls shown at the top of "VM 资源": state of the
@@ -3314,6 +3986,116 @@ impl RuskerApp {
     }
 }
 
+/// Usage summary block shown above the container table.
+fn container_usage(
+    title: &'static str,
+    tooltip: &'static str,
+    value: &str,
+    cx: &App,
+) -> impl IntoElement {
+    let muted = cx.theme().muted_foreground;
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(div().text_sm().font_medium().child(title))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("container-usage-{title}")))
+                        .child(Icon::new(IconName::Info).xsmall().text_color(muted))
+                        .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx)),
+                ),
+        )
+        .child(div().text_sm().text_color(muted).child(value.to_string()))
+}
+
+/// A link-coloured value that copies `text` when clicked.
+fn copyable_value(
+    id: impl Into<ElementId>,
+    icon: impl Into<AssetIcon>,
+    text: impl Into<SharedString>,
+    tooltip: &'static str,
+    text_color: Hsla,
+    icon_color: Hsla,
+) -> impl IntoElement {
+    let text: SharedString = text.into();
+    let copy_text = text.clone();
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1()
+        .min_w_0()
+        .cursor_pointer()
+        .hover(|style| style.underline())
+        .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
+        })
+        .child(Icon::new(icon.into()).xsmall().text_color(icon_color))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(text_color)
+                .child(text),
+        )
+}
+
+fn container_menu(
+    menu: gpui_kit::component::menu::PopupMenu,
+    container: &ContainerSummary,
+    weak: gpui_kit::WeakEntity<RuskerApp>,
+) -> gpui_kit::component::menu::PopupMenu {
+    let detail_container = container.clone();
+    let detail_weak = weak.clone();
+    let restart_id = container.id.clone();
+    let restart_weak = weak;
+    let id = container.id.clone();
+    let image = container.image.clone();
+    menu.item(
+        PopupMenuItem::new("查看详情")
+            .icon(AssetIcon::Container)
+            .on_click(move |_, _, cx| {
+                _ = detail_weak.update(cx, |this, cx| {
+                    this.select_container(detail_container.id.clone(), cx);
+                });
+            }),
+    )
+    .item(
+        PopupMenuItem::new("重启")
+            .icon(IconName::RotateCw)
+            .on_click(move |_, _, cx| {
+                _ = restart_weak.update(cx, |this, cx| {
+                    this.start_container_action(restart_id.clone(), ContainerAction::Restart, cx);
+                });
+            }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new("复制容器 ID")
+            .icon(IconName::Copy)
+            .on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+            }),
+    )
+    .item(
+        PopupMenuItem::new("复制镜像引用")
+            .icon(IconName::Copy)
+            .on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(image.clone()));
+            }),
+    )
+}
+
 impl Render for RuskerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.wants_motion() {
@@ -3334,7 +4116,11 @@ impl Render for RuskerApp {
         };
         let mut content = div().flex_1().min_w_0().h_full().flex().flex_col();
         if transition.is_none() {
-            content = content.child(self.render_header(phase.is_none(), cx));
+            // The container pages carry their own Docker Desktop-style title
+            // row (list) or breadcrumb (detail).
+            if self.page != Page::Containers {
+                content = content.child(self.render_header(phase.is_none(), cx));
+            }
             if let Some(error) = self.error.clone() {
                 content = content.child(message_banner(&error, true, cx));
             }
@@ -3374,6 +4160,14 @@ const SPINNER_PERIOD_SECS: f32 = 0.9;
 const STATUS_PULSE_PERIOD_SECS: f32 = 1.6;
 const APP_BAR_HEIGHT: f32 = 48.;
 const WINDOW_BUTTON_WIDTH: f32 = 46.;
+/// Container table columns; the name and image columns share the rest.
+const CONTAINER_CHECK_COLUMN: f32 = 34.;
+const CONTAINER_STATUS_COLUMN: f32 = 26.;
+const CONTAINER_ID_COLUMN: f32 = 108.;
+const CONTAINER_PORTS_COLUMN: f32 = 88.;
+const CONTAINER_CPU_COLUMN: f32 = 56.;
+const CONTAINER_CREATED_COLUMN: f32 = 88.;
+const CONTAINER_ACTIONS_COLUMN: f32 = 108.;
 
 /// Brand blue used for the app bar and selection accents (Docker
 /// Desktop-like). A deeper navy keeps contrast in dark mode.

@@ -82,6 +82,32 @@ pub fn format_ports(ports: &[PortMapping]) -> String {
     }
 }
 
+/// Compact `host:container` port bindings for list columns, matching what
+/// Docker Desktop shows (`8080:80`, `53/udp`). Host addresses are omitted.
+pub fn format_port_bindings(ports: &[PortMapping]) -> String {
+    let mut mappings: Vec<String> = ports
+        .iter()
+        .map(|port| {
+            let protocol = if port.protocol.is_empty() || port.protocol == "tcp" {
+                String::new()
+            } else {
+                format!("/{}", port.protocol)
+            };
+            match port.public_port {
+                Some(public) => format!("{public}:{}{protocol}", port.private_port),
+                None => format!("{}{protocol}", port.private_port),
+            }
+        })
+        .collect();
+    mappings.sort();
+    mappings.dedup();
+    if mappings.is_empty() {
+        "—".into()
+    } else {
+        mappings.join(", ")
+    }
+}
+
 pub fn image_tags(image: &ImageSummary) -> String {
     let tags: Vec<&str> = image
         .tags
@@ -181,6 +207,38 @@ mod tests {
             },
         ];
         assert_eq!(format_ports(&ports), "127.0.0.1:8080→80/tcp, 53/udp");
+    }
+
+    #[test]
+    fn formats_compact_port_bindings() {
+        let ports = vec![
+            PortMapping {
+                host_ip: Some("127.0.0.1".into()),
+                private_port: 80,
+                public_port: Some(8080),
+                protocol: "tcp".into(),
+            },
+            PortMapping {
+                host_ip: Some("0.0.0.0".into()),
+                private_port: 53,
+                public_port: Some(5353),
+                protocol: "udp".into(),
+            },
+            PortMapping {
+                private_port: 443,
+                public_port: None,
+                protocol: "tcp".into(),
+                ..PortMapping::default()
+            },
+            PortMapping {
+                host_ip: Some("127.0.0.1".into()),
+                private_port: 80,
+                public_port: Some(8080),
+                protocol: "tcp".into(),
+            },
+        ];
+        assert_eq!(format_port_bindings(&ports), "443, 5353:53/udp, 8080:80");
+        assert_eq!(format_port_bindings(&[]), "—");
     }
 
     #[test]
