@@ -30,6 +30,9 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process"
 tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
 url = "2"
 
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+
 [dev-dependencies]
 tempfile = "3"
 

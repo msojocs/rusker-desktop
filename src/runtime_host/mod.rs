@@ -16,8 +16,8 @@ use thiserror::Error;
 use tokio::{runtime::Runtime, sync::Mutex, task::JoinHandle};
 
 pub use wsl::{
-    same_path, NvidiaGpuStatus, ProxyApplyOutcome, RuntimeHostSnapshot, WslDistribution,
-    MANAGED_DISTRO_NAME, MANAGED_DOCKER_HOST, MANAGED_PIPE, WSL_DOCKER_HOST,
+    same_path, validate_daemon_config, NvidiaGpuStatus, ProxyApplyOutcome, RuntimeHostSnapshot,
+    WslDistribution, MANAGED_DISTRO_NAME, MANAGED_DOCKER_HOST, MANAGED_PIPE, WSL_DOCKER_HOST,
 };
 
 use crate::settings::{DockerProxySettings, ResourceSaverSettings};
@@ -131,18 +131,32 @@ impl RuntimeHostService {
     }
 
     /// Applies saved proxy settings immediately: rewrites `daemon.json` and
-    /// restarts a running engine when the config changed.
+    /// restarts a running engine when the config changed. `daemon_config`
+    /// also replaces the rest of `daemon.json` (the settings editor).
     pub fn apply_proxy(
         &self,
         settings: DockerProxySettings,
+        daemon_config: Option<String>,
         integrations: BTreeMap<String, bool>,
     ) -> JoinHandle<Result<(ProxyApplyOutcome, RuntimeHostSnapshot), RuntimeHostError>> {
         let host = self.host.clone();
         let lock = self.operation_lock.clone();
         self.spawn(async move {
             let _guard = lock.lock().await;
-            let outcome = host.apply_proxy(&settings).await?;
+            let outcome = host
+                .apply_proxy(&settings, daemon_config.as_deref())
+                .await?;
             Ok((outcome, host.snapshot(&integrations).await?))
+        })
+    }
+
+    /// The managed `daemon.json` without `proxies`, for the settings editor.
+    pub fn read_daemon_config(&self) -> JoinHandle<Result<String, RuntimeHostError>> {
+        let host = self.host.clone();
+        let lock = self.operation_lock.clone();
+        self.spawn(async move {
+            let _guard = lock.lock().await;
+            host.read_daemon_config().await
         })
     }
 

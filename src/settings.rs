@@ -30,22 +30,138 @@ impl ThemePreference {
     }
 }
 
+/// Where a proxy setting takes its addresses from (Docker Desktop's
+/// proxy drop-down).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProxyMode {
+    /// Containers only: whatever the Engine (host) proxy resolves to.
+    SameAsHost,
+    /// The operating system's proxy, read when it is applied.
+    System,
+    #[default]
+    None,
+    Manual,
+}
+
+impl ProxyMode {
+    pub const ENGINE: [Self; 3] = [Self::System, Self::None, Self::Manual];
+    pub const CONTAINER: [Self; 4] = [Self::SameAsHost, Self::System, Self::None, Self::Manual];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SameAsHost => "与主机代理相同",
+            Self::System => "系统代理",
+            Self::None => "不使用代理",
+            Self::Manual => "手动配置",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "StoredProxySettings")]
 pub struct DockerProxySettings {
-    pub enabled: bool,
+    pub mode: ProxyMode,
+    /// Manual configuration; kept while another mode is selected.
     pub http_proxy: String,
     pub https_proxy: String,
     pub no_proxy: String,
 }
 
+/// On-disk form; settings written before proxy modes existed only have
+/// `enabled` (true meant a manual configuration).
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct StoredProxySettings {
+    mode: Option<ProxyMode>,
+    enabled: Option<bool>,
+    http_proxy: String,
+    https_proxy: String,
+    no_proxy: String,
+}
+
+impl From<StoredProxySettings> for DockerProxySettings {
+    fn from(stored: StoredProxySettings) -> Self {
+        let mode = stored.mode.unwrap_or(match stored.enabled {
+            Some(true) => ProxyMode::Manual,
+            _ => ProxyMode::None,
+        });
+        Self {
+            mode,
+            http_proxy: stored.http_proxy,
+            https_proxy: stored.https_proxy,
+            no_proxy: stored.no_proxy,
+        }
+    }
+}
+
+/// Proxy addresses after resolving the mode (all empty: no proxy).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResolvedProxy {
+    pub http_proxy: String,
+    pub https_proxy: String,
+    pub no_proxy: String,
+}
+
+impl ResolvedProxy {
+    pub fn is_empty(&self) -> bool {
+        self.http_proxy.is_empty() && self.https_proxy.is_empty()
+    }
+
+    fn fields(&self) -> [(&'static str, &str); 3] {
+        [
+            ("HTTP_PROXY", self.http_proxy.as_str()),
+            ("HTTPS_PROXY", self.https_proxy.as_str()),
+            ("NO_PROXY", self.no_proxy.as_str()),
+        ]
+    }
+
+    fn to_map(&self, keys: [&str; 3]) -> Map<String, Value> {
+        let mut map = Map::new();
+        if !self.is_empty() {
+            for (key, (_, value)) in keys.into_iter().zip(self.fields()) {
+                insert_non_empty(&mut map, key, value);
+            }
+        }
+        map
+    }
+
+    /// The `proxies` object for Docker's `daemon.json`.
+    pub fn engine_proxies(&self) -> Map<String, Value> {
+        self.to_map(["http-proxy", "https-proxy", "no-proxy"])
+    }
+
+    /// The `proxies.default` object of the Docker CLI's `config.json`. The
+    /// CLI injects it into containers it creates and into builds as
+    /// `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`.
+    pub fn client_proxies(&self) -> Map<String, Value> {
+        self.to_map(["httpProxy", "httpsProxy", "noProxy"])
+    }
+
+    /// Environment variables for a new container, upper- and lowercase
+    /// like the Docker CLI sets them.
+    pub fn container_env(&self) -> Vec<String> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let mut env = Vec::new();
+        for (name, value) in self.fields() {
+            if !value.is_empty() {
+                env.push(format!("{name}={value}"));
+                env.push(format!("{}={value}", name.to_ascii_lowercase()));
+            }
+        }
+        env
+    }
+}
+
 impl DockerProxySettings {
     pub fn validate(&self) -> Result<(), String> {
-        if !self.enabled {
+        if self.mode != ProxyMode::Manual {
             return Ok(());
         }
         if self.http_proxy.trim().is_empty() && self.https_proxy.trim().is_empty() {
-            return Err("启用代理时，HTTP 或 HTTPS 代理至少填写一项".into());
+            return Err("手动配置时，HTTP 或 HTTPS 代理至少填写一项".into());
         }
         validate_proxy_url("HTTP", &self.http_proxy)?;
         validate_proxy_url("HTTPS", &self.https_proxy)?;
@@ -53,15 +169,30 @@ impl DockerProxySettings {
         Ok(())
     }
 
-    /// The `proxies` object for Docker's `daemon.json` (empty when disabled).
-    pub fn engine_proxies(&self) -> Map<String, Value> {
-        let mut proxies = Map::new();
-        if self.enabled {
-            insert_non_empty(&mut proxies, "http-proxy", &self.http_proxy);
-            insert_non_empty(&mut proxies, "https-proxy", &self.https_proxy);
-            insert_non_empty(&mut proxies, "no-proxy", &self.no_proxy);
+    /// The addresses this setting stands for right now. `host` is what
+    /// "same as host proxy" refers to; the system proxy is read on each call.
+    pub fn resolve(&self, host: Option<&DockerProxySettings>) -> ResolvedProxy {
+        match self.mode {
+            ProxyMode::None => ResolvedProxy::default(),
+            ProxyMode::Manual => {
+                let manual = self.normalized();
+                ResolvedProxy {
+                    http_proxy: manual.http_proxy,
+                    https_proxy: manual.https_proxy,
+                    no_proxy: manual.no_proxy,
+                }
+            }
+            ProxyMode::System => system_proxy(),
+            ProxyMode::SameAsHost => host
+                .filter(|host| host.mode != ProxyMode::SameAsHost)
+                .map(|host| host.resolve(None))
+                .unwrap_or_default(),
         }
-        proxies
+    }
+
+    /// The Engine's `proxies` object for `daemon.json` (empty for no proxy).
+    pub fn engine_proxies(&self) -> Map<String, Value> {
+        self.resolve(None).engine_proxies()
     }
 
     pub fn engine_config_fragment(&self) -> String {
@@ -73,7 +204,7 @@ impl DockerProxySettings {
 
     fn normalized(&self) -> Self {
         Self {
-            enabled: self.enabled,
+            mode: self.mode,
             http_proxy: self.http_proxy.trim().to_string(),
             https_proxy: self.https_proxy.trim().to_string(),
             no_proxy: self
@@ -172,6 +303,9 @@ impl VmSettings {
 pub struct AppSettings {
     pub theme: ThemePreference,
     pub docker_proxy: DockerProxySettings,
+    /// Proxy for outbound traffic from containers (Docker Desktop's
+    /// "Containers proxy").
+    pub container_proxy: DockerProxySettings,
     pub wsl: WslSettings,
     pub resource_saver: ResourceSaverSettings,
     pub vm: VmSettings,
@@ -179,7 +313,15 @@ pub struct AppSettings {
 
 impl AppSettings {
     pub fn validate(&self) -> Result<(), String> {
-        self.docker_proxy.validate()?;
+        if self.docker_proxy.mode == ProxyMode::SameAsHost {
+            return Err("Engine 代理不能选择“与主机代理相同”".into());
+        }
+        self.docker_proxy
+            .validate()
+            .map_err(|error| format!("Engine 代理：{error}"))?;
+        self.container_proxy
+            .validate()
+            .map_err(|error| format!("容器代理：{error}"))?;
         self.resource_saver.validate()?;
         self.vm.validate()
     }
@@ -188,10 +330,17 @@ impl AppSettings {
         Self {
             theme: self.theme,
             docker_proxy: self.docker_proxy.normalized(),
+            container_proxy: self.container_proxy.normalized(),
             wsl: self.wsl.normalized(),
             resource_saver: self.resource_saver.clone(),
             vm: self.vm.normalized(),
         }
+    }
+
+    /// The container proxy addresses right now ("same as host" follows the
+    /// Engine proxy).
+    pub fn container_proxy_resolved(&self) -> ResolvedProxy {
+        self.container_proxy.resolve(Some(&self.docker_proxy))
     }
 }
 
@@ -286,6 +435,208 @@ impl SettingsStore {
         }
         Ok(())
     }
+}
+
+/// The operating system's proxy: on Windows the WinINet settings (what
+/// "Settings > Network > Proxy" edits), elsewhere the proxy environment
+/// variables. Addresses that Docker could not use are dropped.
+pub fn system_proxy() -> ResolvedProxy {
+    #[cfg(windows)]
+    let proxy = windows_system_proxy().unwrap_or_default();
+    #[cfg(not(windows))]
+    let proxy = {
+        let var = |names: [&str; 2]| {
+            names
+                .iter()
+                .find_map(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                })
+                .unwrap_or_default()
+        };
+        ResolvedProxy {
+            http_proxy: var(["HTTP_PROXY", "http_proxy"]),
+            https_proxy: var(["HTTPS_PROXY", "https_proxy"]),
+            no_proxy: var(["NO_PROXY", "no_proxy"]),
+        }
+    };
+    sanitize_proxy(proxy)
+}
+
+#[cfg(windows)]
+fn windows_system_proxy() -> Option<ResolvedProxy> {
+    let key = windows_registry::CURRENT_USER
+        .open(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        .ok()?;
+    if key.get_u32("ProxyEnable").ok()? == 0 {
+        return None;
+    }
+    let server = key.get_string("ProxyServer").ok()?;
+    let bypass = key.get_string("ProxyOverride").unwrap_or_default();
+    Some(parse_windows_proxy(&server, &bypass))
+}
+
+/// Parses WinINet's `ProxyServer` (`host:port`, or per protocol
+/// `http=host:port;https=host:port`) and `ProxyOverride`
+/// (`localhost;127.*;<local>`).
+fn parse_windows_proxy(server: &str, bypass: &str) -> ResolvedProxy {
+    let with_scheme = |address: &str| {
+        let address = address.trim();
+        if address.is_empty() || address.contains("://") {
+            address.to_string()
+        } else {
+            format!("http://{address}")
+        }
+    };
+    let (http_proxy, https_proxy) = if server.contains('=') {
+        let mut http = String::new();
+        let mut https = String::new();
+        for entry in server.split(';') {
+            match entry.split_once('=') {
+                Some((scheme, address)) if scheme.trim().eq_ignore_ascii_case("http") => {
+                    http = with_scheme(address);
+                }
+                Some((scheme, address)) if scheme.trim().eq_ignore_ascii_case("https") => {
+                    https = with_scheme(address);
+                }
+                _ => {}
+            }
+        }
+        (http, https)
+    } else {
+        let address = with_scheme(server);
+        (address.clone(), address)
+    };
+    let no_proxy = bypass
+        .split(';')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            match entry {
+                "" | "<local>" => None,
+                "127.*" => Some("127.0.0.0/8".into()),
+                "10.*" => Some("10.0.0.0/8".into()),
+                "192.168.*" => Some("192.168.0.0/16".into()),
+                _ if entry.contains('*') && !entry.starts_with("*.") => None,
+                _ => Some(entry.to_string()),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    ResolvedProxy {
+        http_proxy,
+        https_proxy,
+        no_proxy,
+    }
+}
+
+/// Drops addresses Docker would reject instead of failing the whole apply:
+/// system settings are not editable here.
+fn sanitize_proxy(proxy: ResolvedProxy) -> ResolvedProxy {
+    let keep = |label: &str, value: String| {
+        let value = value.trim().to_string();
+        if validate_proxy_url(label, &value).is_ok() {
+            value
+        } else {
+            String::new()
+        }
+    };
+    let proxy = ResolvedProxy {
+        http_proxy: keep("HTTP", proxy.http_proxy),
+        https_proxy: keep("HTTPS", proxy.https_proxy),
+        no_proxy: proxy
+            .no_proxy
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| validate_no_proxy(entry).is_ok() && !entry.is_empty())
+            .collect::<Vec<_>>()
+            .join(","),
+    };
+    if proxy.is_empty() {
+        ResolvedProxy::default()
+    } else {
+        proxy
+    }
+}
+
+/// The Docker CLI's `config.json`: `$DOCKER_CONFIG/config.json`, otherwise
+/// `~/.docker/config.json`.
+pub fn docker_client_config_path() -> Option<PathBuf> {
+    if let Some(directory) = std::env::var_os("DOCKER_CONFIG").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(directory).join("config.json"));
+    }
+    directories::UserDirs::new().map(|dirs| dirs.home_dir().join(".docker").join("config.json"))
+}
+
+/// Writes the container proxy into `proxies.default` of the Docker CLI
+/// config at `path`, leaving every other key untouched (an empty object is
+/// removed when the proxy is disabled). Returns whether the file changed.
+pub fn apply_client_proxy(path: &Path, proxy: &ResolvedProxy) -> Result<bool, SettingsError> {
+    let current = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(source) => return Err(SettingsError::io("读取 Docker 客户端配置", path, source)),
+    };
+    let Some(updated) = merge_client_proxies(&current, &proxy.client_proxies())
+        .map_err(SettingsError::Validation)?
+    else {
+        return Ok(false);
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|source| SettingsError::io("创建 Docker 客户端配置目录", parent, source))?;
+    }
+    fs::write(path, updated)
+        .map_err(|source| SettingsError::io("写入 Docker 客户端配置", path, source))?;
+    Ok(true)
+}
+
+/// Returns the new `config.json` text when `proxies.default` must change.
+fn merge_client_proxies(
+    current: &str,
+    desired: &Map<String, Value>,
+) -> Result<Option<String>, String> {
+    let mut document = if current.trim().is_empty() {
+        Map::new()
+    } else {
+        match serde_json::from_str::<Value>(current) {
+            Ok(Value::Object(map)) => map,
+            Ok(_) => return Err("Docker 客户端 config.json 不是 JSON 对象，未修改".into()),
+            Err(error) => {
+                return Err(format!(
+                    "Docker 客户端 config.json 格式无效，未修改：{error}"
+                ))
+            }
+        }
+    };
+    let existing = document
+        .get("proxies")
+        .and_then(|proxies| proxies.get("default"))
+        .cloned();
+    let wanted = (!desired.is_empty()).then(|| Value::Object(desired.clone()));
+    if existing == wanted {
+        return Ok(None);
+    }
+    let proxies = document
+        .entry("proxies")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Value::Object(proxies) = proxies else {
+        return Err("Docker 客户端 config.json 中的 proxies 不是 JSON 对象，未修改".into());
+    };
+    match wanted {
+        Some(value) => {
+            proxies.insert("default".into(), value);
+        }
+        None => {
+            proxies.remove("default");
+            if proxies.is_empty() {
+                document.remove("proxies");
+            }
+        }
+    }
+    let formatted = serde_json::to_string_pretty(&Value::Object(document))
+        .map_err(|error| error.to_string())?;
+    Ok(Some(format!("{formatted}\n")))
 }
 
 #[derive(Debug, Error)]
@@ -399,7 +750,7 @@ mod tests {
 
     fn proxy() -> DockerProxySettings {
         DockerProxySettings {
-            enabled: true,
+            mode: ProxyMode::Manual,
             http_proxy: " http://127.0.0.1:8080 ".into(),
             https_proxy: "https://proxy.example.com:8443".into(),
             no_proxy: "localhost, 127.0.0.1, ::1".into(),
@@ -415,7 +766,7 @@ mod tests {
             value["proxies"]["https-proxy"],
             "https://proxy.example.com:8443"
         );
-        assert_eq!(value["proxies"]["no-proxy"], "localhost, 127.0.0.1, ::1");
+        assert_eq!(value["proxies"]["no-proxy"], "localhost,127.0.0.1,::1");
         assert_eq!(value.as_object().expect("根对象").len(), 1);
 
         let disabled = DockerProxySettings::default().engine_config_fragment();
@@ -441,10 +792,146 @@ mod tests {
     #[test]
     fn enabled_proxy_requires_at_least_one_address() {
         let settings = DockerProxySettings {
-            enabled: true,
+            mode: ProxyMode::Manual,
             ..DockerProxySettings::default()
         };
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn container_env_sets_upper_and_lowercase_variables() {
+        let env = proxy().resolve(None).container_env();
+        assert!(env.contains(&"HTTP_PROXY=http://127.0.0.1:8080".to_string()));
+        assert!(env.contains(&"http_proxy=http://127.0.0.1:8080".to_string()));
+        assert!(env.contains(&"no_proxy=localhost,127.0.0.1,::1".to_string()));
+        assert!(DockerProxySettings::default()
+            .resolve(None)
+            .container_env()
+            .is_empty());
+    }
+
+    #[test]
+    fn same_as_host_follows_the_engine_proxy() {
+        let container = DockerProxySettings {
+            mode: ProxyMode::SameAsHost,
+            http_proxy: "http://ignored:1".into(),
+            ..DockerProxySettings::default()
+        };
+        assert_eq!(container.resolve(Some(&proxy())), proxy().resolve(None));
+        assert!(container
+            .resolve(Some(&DockerProxySettings::default()))
+            .is_empty());
+        // Manual fields are kept but unused while another mode is selected.
+        let mut none = proxy();
+        none.mode = ProxyMode::None;
+        assert!(none.resolve(None).is_empty());
+        assert!(none.validate().is_ok());
+    }
+
+    #[test]
+    fn legacy_enabled_flag_maps_to_proxy_modes() {
+        let manual: DockerProxySettings =
+            serde_json::from_str(r#"{"enabled":true,"http_proxy":"http://a:1"}"#).expect("旧格式");
+        assert_eq!(manual.mode, ProxyMode::Manual);
+        assert_eq!(manual.http_proxy, "http://a:1");
+        let off: DockerProxySettings =
+            serde_json::from_str(r#"{"enabled":false}"#).expect("旧格式");
+        assert_eq!(off.mode, ProxyMode::None);
+        let system: DockerProxySettings =
+            serde_json::from_str(r#"{"mode":"system"}"#).expect("新格式");
+        assert_eq!(system.mode, ProxyMode::System);
+        let saved = serde_json::to_value(&system).expect("序列化");
+        assert_eq!(saved["mode"], "system");
+        assert!(saved.get("enabled").is_none());
+        let app: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).expect("旧设置");
+        assert_eq!(app.container_proxy.mode, ProxyMode::None);
+    }
+
+    #[test]
+    fn engine_proxy_cannot_be_same_as_host() {
+        let mut settings = AppSettings::default();
+        settings.docker_proxy.mode = ProxyMode::SameAsHost;
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn parses_windows_system_proxy() {
+        let proxy = parse_windows_proxy(
+            "127.0.0.1:7890",
+            "localhost;127.*;10.*;<local>;*.corp.example;192.168.*",
+        );
+        assert_eq!(proxy.http_proxy, "http://127.0.0.1:7890");
+        assert_eq!(proxy.https_proxy, "http://127.0.0.1:7890");
+        assert_eq!(
+            proxy.no_proxy,
+            "localhost,127.0.0.0/8,10.0.0.0/8,*.corp.example,192.168.0.0/16"
+        );
+
+        let per_protocol =
+            parse_windows_proxy("http=proxy:8080;https=secure:8443;socks=s:1080", "");
+        assert_eq!(per_protocol.http_proxy, "http://proxy:8080");
+        assert_eq!(per_protocol.https_proxy, "http://secure:8443");
+        assert!(per_protocol.no_proxy.is_empty());
+
+        // Only a SOCKS proxy: nothing Docker can use.
+        let socks = sanitize_proxy(parse_windows_proxy("socks=s:1080", "localhost"));
+        assert_eq!(socks, ResolvedProxy::default());
+        let scheme = sanitize_proxy(parse_windows_proxy("socks5://s:1080", ""));
+        assert!(scheme.is_empty());
+    }
+
+    #[test]
+    fn merges_client_proxies_without_touching_other_keys() {
+        let current = r#"{"auths":{"x":{}},"proxies":{"other":{"httpProxy":"http://a:1"}}}"#;
+        let desired = proxy().resolve(None).client_proxies();
+        let merged = merge_client_proxies(current, &desired)
+            .expect("合并")
+            .expect("应有变化");
+        let value: Value = serde_json::from_str(&merged).expect("JSON");
+        assert!(value["auths"]["x"].is_object());
+        assert_eq!(value["proxies"]["other"]["httpProxy"], "http://a:1");
+        assert_eq!(
+            value["proxies"]["default"]["httpProxy"],
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            value["proxies"]["default"]["noProxy"],
+            "localhost,127.0.0.1,::1"
+        );
+        assert_eq!(merge_client_proxies(&merged, &desired).expect("合并"), None);
+
+        // Disabling removes only `proxies.default`.
+        let disabled = merge_client_proxies(&merged, &Map::new())
+            .expect("合并")
+            .expect("应有变化");
+        let value: Value = serde_json::from_str(&disabled).expect("JSON");
+        assert!(value["proxies"].get("default").is_none());
+        assert!(value["proxies"]["other"].is_object());
+        let only_default = r#"{"proxies":{"default":{"httpProxy":"http://a:1"}}}"#;
+        let cleared = merge_client_proxies(only_default, &Map::new())
+            .expect("合并")
+            .expect("应有变化");
+        assert_eq!(cleared.trim(), "{}");
+
+        assert_eq!(merge_client_proxies("", &Map::new()).expect("空文件"), None);
+        assert!(merge_client_proxies("{broken", &desired).is_err());
+        assert!(merge_client_proxies("[]", &desired).is_err());
+    }
+
+    #[test]
+    fn apply_client_proxy_creates_and_updates_config_file() {
+        let directory = tempfile::tempdir().expect("临时目录");
+        let path = directory.path().join(".docker").join("config.json");
+        assert!(!apply_client_proxy(&path, &ResolvedProxy::default()).expect("无需写入"));
+        assert!(!path.exists());
+        assert!(apply_client_proxy(&path, &proxy().resolve(None)).expect("写入"));
+        assert!(!apply_client_proxy(&path, &proxy().resolve(None)).expect("无变化"));
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("读取")).expect("JSON");
+        assert_eq!(
+            value["proxies"]["default"]["httpsProxy"],
+            "https://proxy.example.com:8443"
+        );
     }
 
     #[test]
@@ -456,6 +943,7 @@ mod tests {
         let settings = AppSettings {
             theme: ThemePreference::Dark,
             docker_proxy: proxy(),
+            container_proxy: DockerProxySettings::default(),
             wsl: WslSettings {
                 integrations: BTreeMap::from([
                     ("Ubuntu-24.04".into(), true),

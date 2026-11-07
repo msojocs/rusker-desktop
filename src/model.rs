@@ -80,6 +80,8 @@ pub struct CreateContainerRequest {
     pub command: Vec<String>,
     pub ports: Vec<CreatePortBinding>,
     pub nvidia_gpu: bool,
+    /// `NAME=value` environment variables (the container proxy).
+    pub env: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

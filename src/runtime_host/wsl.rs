@@ -108,6 +108,23 @@ chmod 0644 /etc/docker/daemon.json.rusker-new
 mv -f /etc/docker/daemon.json.rusker-new /etc/docker/daemon.json
 "#;
 
+/// Like `WRITE_DAEMON_JSON_SCRIPT`, but first checks the new file with
+/// `dockerd --validate` so a bad user config never replaces a working one.
+/// Older dockerd builds without `--validate` skip the check.
+const VALIDATE_AND_WRITE_DAEMON_JSON_SCRIPT: &str = r#"set -u
+mkdir -p /etc/docker
+NEW=/etc/docker/daemon.json.rusker-new
+cat > "$NEW" || exit 1
+if ! out=$(/usr/bin/dockerd --validate --config-file "$NEW" 2>&1); then
+    case "$out" in
+        *"unknown flag"*) ;;
+        *) rm -f "$NEW"; printf '%s\n' "$out" >&2; exit 1 ;;
+    esac
+fi
+chmod 0644 "$NEW"
+mv -f "$NEW" /etc/docker/daemon.json
+"#;
+
 const STOP_SCRIPT: &str = r#"set -u
 pid=$(cat /var/run/docker.pid 2>/dev/null || true)
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -620,18 +637,33 @@ impl WslHost {
 
     /// Applies new Engine proxy settings directly, like Docker Desktop's
     /// "Apply & restart": merge into `daemon.json` and restart a running
-    /// dockerd if anything changed.
+    /// dockerd if anything changed. With `daemon_config` (the user-edited
+    /// `daemon.json` without `proxies`), the whole file is replaced too.
     pub async fn apply_proxy(
         &self,
         settings: &DockerProxySettings,
+        daemon_config: Option<&str>,
     ) -> Result<ProxyApplyOutcome, RuntimeHostError> {
         settings.validate().map_err(RuntimeHostError::State)?;
+        let user_config = daemon_config
+            .map(parse_editable_daemon_config)
+            .transpose()
+            .map_err(RuntimeHostError::State)?;
         self.set_engine_proxy(settings);
         if !self.session.is_running() {
+            if user_config.is_some() {
+                return Err(RuntimeHostError::State(
+                    "Engine 未运行，无法修改 daemon.json；启动 Engine 后再应用".into(),
+                ));
+            }
             return Ok(ProxyApplyOutcome::Deferred);
         }
         self.ensure_owned().await?;
-        if !self.write_daemon_proxies().await? {
+        let changed = match user_config {
+            Some(user) => self.write_daemon_config(user).await?,
+            None => self.write_daemon_proxies().await?,
+        };
+        if !changed {
             return Ok(ProxyApplyOutcome::Unchanged);
         }
         self.stop_engine().await;
@@ -639,15 +671,68 @@ impl WslHost {
         Ok(ProxyApplyOutcome::Restarted)
     }
 
-    /// Merges the desired `proxies` into the managed `daemon.json`, keeping
-    /// every other key (e.g. the NVIDIA runtime). Returns whether it changed.
-    async fn write_daemon_proxies(&self) -> Result<bool, RuntimeHostError> {
+    /// The managed `daemon.json` for the settings editor, without the
+    /// `proxies` key (that one belongs to the proxy settings).
+    pub async fn read_daemon_config(&self) -> Result<String, RuntimeHostError> {
+        if !self.session.is_running() {
+            return Err(RuntimeHostError::State(
+                "Engine 未运行，启动后才能查看和修改 daemon.json".into(),
+            ));
+        }
+        self.ensure_owned().await?;
+        let current = self.read_daemon_json().await?;
+        editable_daemon_config(&current).map_err(RuntimeHostError::State)
+    }
+
+    async fn read_daemon_json(&self) -> Result<String, RuntimeHostError> {
         let mut read = managed_command("root");
         read.arg("/bin/sh")
             .arg("-c")
             .arg("cat /etc/docker/daemon.json 2>/dev/null || true");
         let current = execute(read, "读取 daemon.json", COMMAND_TIMEOUT).await?;
-        let Some(updated) = merge_daemon_proxies(&decode(&current.stdout), &self.desired_proxies())
+        Ok(decode(&current.stdout))
+    }
+
+    /// Replaces `daemon.json` with the user's config plus the desired
+    /// `proxies`, after `dockerd --validate`. Returns whether it changed.
+    async fn write_daemon_config(
+        &self,
+        user: Map<String, Value>,
+    ) -> Result<bool, RuntimeHostError> {
+        let mut document = user;
+        let proxies = self.desired_proxies();
+        if !proxies.is_empty() {
+            document.insert("proxies".into(), Value::Object(proxies));
+        }
+        let document = Value::Object(document);
+        let current = self.read_daemon_json().await?;
+        if serde_json::from_str::<Value>(&current).ok().as_ref() == Some(&document)
+            || current.trim().is_empty() && document == Value::Object(Map::new())
+        {
+            return Ok(false);
+        }
+        let text = serde_json::to_string_pretty(&document)
+            .map_err(|error| RuntimeHostError::State(error.to_string()))?;
+        let mut write = managed_command("root");
+        write
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(VALIDATE_AND_WRITE_DAEMON_JSON_SCRIPT);
+        execute_with_input(
+            write,
+            format!("{text}\n").as_bytes(),
+            "校验并写入 daemon.json",
+            COMMAND_TIMEOUT,
+        )
+        .await?;
+        Ok(true)
+    }
+
+    /// Merges the desired `proxies` into the managed `daemon.json`, keeping
+    /// every other key (e.g. the NVIDIA runtime). Returns whether it changed.
+    async fn write_daemon_proxies(&self) -> Result<bool, RuntimeHostError> {
+        let current = self.read_daemon_json().await?;
+        let Some(updated) = merge_daemon_proxies(&current, &self.desired_proxies())
             .map_err(RuntimeHostError::State)?
         else {
             return Ok(false);
@@ -1232,6 +1317,47 @@ async fn execute(
     }
 }
 
+/// `daemon.json` as shown in the settings editor: pretty-printed, without
+/// `proxies`. A missing file reads as `{}`.
+fn editable_daemon_config(current: &str) -> Result<String, String> {
+    let mut document = if current.trim().is_empty() {
+        Map::new()
+    } else {
+        match serde_json::from_str::<Value>(current) {
+            Ok(Value::Object(object)) => object,
+            Ok(_) => return Err("/etc/docker/daemon.json 不是 JSON 对象".into()),
+            Err(error) => return Err(format!("/etc/docker/daemon.json 格式无效：{error}")),
+        }
+    };
+    document.remove("proxies");
+    serde_json::to_string_pretty(&Value::Object(document)).map_err(|error| error.to_string())
+}
+
+/// Checks the settings editor's `daemon.json` text before it is applied
+/// (`dockerd --validate` still runs on the engine side).
+pub fn validate_daemon_config(text: &str) -> Result<(), String> {
+    parse_editable_daemon_config(text).map(|_| ())
+}
+
+/// Parses the editor's text. Keys the app sets itself are refused, since
+/// they would conflict at dockerd start.
+fn parse_editable_daemon_config(text: &str) -> Result<Map<String, Value>, String> {
+    let document = match serde_json::from_str::<Value>(text) {
+        Ok(Value::Object(object)) => object,
+        Ok(_) => return Err("daemon.json 必须是 JSON 对象".into()),
+        Err(error) => return Err(format!("daemon.json 不是有效的 JSON：{error}")),
+    };
+    if document.contains_key("proxies") {
+        return Err("请在“代理”设置中配置 Engine 代理，不要在 daemon.json 中填写 proxies".into());
+    }
+    if document.contains_key("hosts") {
+        return Err(
+            "Rusker 通过启动参数设置 dockerd 监听地址，daemon.json 中不能包含 hosts".into(),
+        );
+    }
+    Ok(document)
+}
+
 /// Returns the new `daemon.json` text when the `proxies` key must change.
 /// An empty desired object removes the key. Refuses to touch a file that is
 /// not a JSON object, rather than overwriting a user's broken config.
@@ -1597,6 +1723,7 @@ fn decode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::ProxyMode;
 
     #[test]
     fn compares_windows_paths() {
@@ -1731,10 +1858,29 @@ mod tests {
     }
 
     #[test]
+    fn daemon_config_editor_hides_and_refuses_managed_keys() {
+        let current = r#"{"proxies":{"http-proxy":"http://a:1"},"runtimes":{"nvidia":{"path":"nvidia-container-runtime"}}}"#;
+        let editable = editable_daemon_config(current).expect("读取");
+        assert!(!editable.contains("proxies"));
+        assert!(editable.contains("nvidia-container-runtime"));
+        assert_eq!(editable_daemon_config("").expect("空文件"), "{}");
+        assert!(editable_daemon_config("[]").is_err());
+
+        let parsed = parse_editable_daemon_config(&editable).expect("解析");
+        assert!(parsed.contains_key("runtimes"));
+        assert!(parse_editable_daemon_config(r#"{"experimental":false}"#).is_ok());
+        assert!(parse_editable_daemon_config("{broken").is_err());
+        assert!(parse_editable_daemon_config("[]").is_err());
+        assert!(parse_editable_daemon_config(r#"{"proxies":{}}"#).is_err());
+        assert!(parse_editable_daemon_config(r#"{"hosts":["tcp://0.0.0.0:2375"]}"#).is_err());
+        assert!(VALIDATE_AND_WRITE_DAEMON_JSON_SCRIPT.contains("dockerd --validate"));
+    }
+
+    #[test]
     fn merges_proxies_without_touching_other_daemon_keys() {
         let current = r#"{"runtimes":{"nvidia":{"path":"nvidia-container-runtime","args":[]}}}"#;
         let desired = DockerProxySettings {
-            enabled: true,
+            mode: ProxyMode::Manual,
             http_proxy: "http://127.0.0.1:7890".into(),
             https_proxy: "http://127.0.0.1:7890".into(),
             no_proxy: "localhost,127.0.0.1".into(),

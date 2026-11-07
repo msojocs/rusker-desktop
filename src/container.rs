@@ -21,6 +21,7 @@ impl ContainerDraft {
             command,
             ports: parse_ports(&self.ports)?,
             nvidia_gpu: self.nvidia_gpu,
+            env: Vec::new(),
         };
         request.validate()?;
         Ok(request)

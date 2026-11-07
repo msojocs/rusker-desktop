@@ -5,7 +5,8 @@ use std::{
 
 use gpui_kit::component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
-    input::{Input, InputEvent, InputState},
+    input::{Editor, EditorState, Input, InputEvent, InputState},
+    menu::{DropdownMenu as _, PopupMenuItem},
     skeleton::Skeleton,
     slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
@@ -18,11 +19,11 @@ use gpui_kit::{
     base::{Disableable as _, StyledExt as _},
     div, ease_out_quint, percentage,
     prelude::FluentBuilder as _,
-    pulsating_between, px, rgb, Animation, AnimationExt as _, AnyElement, App, AppContext as _,
-    Context, Div, Entity, Hsla, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Transformation, Window,
-    WindowAppearance, WindowControlArea,
+    pulsating_between, px, rgb, Anchor, Animation, AnimationExt as _, AnyElement, AnyWindowHandle,
+    App, AppContext as _, Context, Div, Entity, Hsla, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, PathPromptOptions, Pixels, Render, ScrollHandle, SharedString,
+    Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Transformation,
+    Window, WindowAppearance, WindowControlArea,
 };
 use rusker_desktop::{
     container::ContainerDraft,
@@ -33,11 +34,12 @@ use rusker_desktop::{
     },
     model::{ContainerAction, ContainerSummary, EngineSnapshot, ImageSummary, Revision},
     runtime_host::{
-        same_path, ProxyApplyOutcome, RuntimeHostError, RuntimeHostService, RuntimeHostSnapshot,
-        MANAGED_DOCKER_HOST, WSL_DOCKER_HOST,
+        same_path, validate_daemon_config, ProxyApplyOutcome, RuntimeHostError, RuntimeHostService,
+        RuntimeHostSnapshot, MANAGED_DOCKER_HOST, WSL_DOCKER_HOST,
     },
     settings::{
-        AppSettings, DockerProxySettings, SettingsStore, ThemePreference, RESOURCE_SAVER_MAX_SECS,
+        apply_client_proxy, docker_client_config_path, AppSettings, DockerProxySettings, ProxyMode,
+        ResolvedProxy, SettingsStore, ThemePreference, RESOURCE_SAVER_MAX_SECS,
         RESOURCE_SAVER_MIN_SECS,
     },
     tray::{TrayCommand, TrayMenu},
@@ -82,6 +84,7 @@ enum SettingsSection {
     ResourceSaver,
     Proxies,
     WslIntegration,
+    DockerEngine,
 }
 
 impl SettingsSection {
@@ -94,6 +97,7 @@ impl SettingsSection {
         ];
         if cfg!(windows) {
             sections.push(Self::WslIntegration);
+            sections.push(Self::DockerEngine);
         }
         sections
     }
@@ -105,12 +109,15 @@ impl SettingsSection {
             Self::ResourceSaver => "资源节省",
             Self::Proxies => "代理",
             Self::WslIntegration => "WSL 集成",
+            Self::DockerEngine => "Docker Engine",
         }
     }
 }
 
 const WSLCONFIG_DOCS_URL: &str =
     "https://learn.microsoft.com/windows/wsl/wsl-config#configuration-settings-for-wslconfig";
+const DAEMON_CONFIG_DOCS_URL: &str =
+    "https://docs.docker.com/reference/cli/dockerd/#daemon-configuration-file";
 
 #[derive(Clone, Copy)]
 enum RuntimeOperation {
@@ -214,6 +221,18 @@ pub struct RuskerApp {
     http_proxy_input: Entity<InputState>,
     https_proxy_input: Entity<InputState>,
     no_proxy_input: Entity<InputState>,
+    container_http_proxy_input: Entity<InputState>,
+    container_https_proxy_input: Entity<InputState>,
+    container_no_proxy_input: Entity<InputState>,
+    /// Docker Engine section: `daemon.json` without `proxies`.
+    daemon_editor: Entity<EditorState>,
+    /// The text last read from the engine (None: not loaded).
+    daemon_loaded: Option<String>,
+    daemon_loading: bool,
+    daemon_error: Option<String>,
+    _daemon_task: Option<Task<()>>,
+    /// For updating the editor from async tasks (setting text needs a window).
+    window_handle: AnyWindowHandle,
     saver_threshold_input: Entity<InputState>,
     saver_slider: Entity<SliderState>,
     /// Last Resource Saver state the UI reacted to.
@@ -276,6 +295,26 @@ impl RuskerApp {
                 .default_value(settings.docker_proxy.no_proxy.clone())
                 .placeholder("localhost,127.0.0.1,::1")
         });
+        let container_http_proxy_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.container_proxy.http_proxy.clone())
+                .placeholder("例如：http://192.168.1.10:7890")
+        });
+        let container_https_proxy_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.container_proxy.https_proxy.clone())
+                .placeholder("通常与 HTTP 代理地址相同")
+        });
+        let container_no_proxy_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.container_proxy.no_proxy.clone())
+                .placeholder("localhost,127.0.0.1,::1")
+        });
+        let daemon_editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language("json")
+                .line_number(true)
+        });
         let threshold = settings.resource_saver.threshold_secs;
         let saver_threshold_input =
             cx.new(|cx| InputState::new(window, cx).default_value(threshold.to_string()));
@@ -287,13 +326,27 @@ impl RuskerApp {
                 .default_value(threshold as f32)
         });
         let mut subscriptions = Vec::new();
-        for input in [&http_proxy_input, &https_proxy_input, &no_proxy_input] {
+        for input in [
+            &http_proxy_input,
+            &https_proxy_input,
+            &no_proxy_input,
+            &container_http_proxy_input,
+            &container_https_proxy_input,
+            &container_no_proxy_input,
+        ] {
             subscriptions.push(cx.subscribe_in(input, window, |_, _, event, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
                 }
             }));
         }
+        subscriptions.push(
+            cx.subscribe_in(&daemon_editor, window, |_, _, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
+        );
         subscriptions.push(cx.subscribe_in(
             &saver_threshold_input,
             window,
@@ -351,6 +404,12 @@ impl RuskerApp {
                 Theme::change(mode, None, app_cx);
             }
         });
+        // The system / Engine proxy may have changed since the last run.
+        if follows_other_proxy(settings.container_proxy.mode) {
+            if let Err(error) = sync_container_proxy(&settings) {
+                settings_warning.get_or_insert(error);
+            }
+        }
         let (engine, error) = match EngineService::new() {
             Ok(engine) => (Some(engine), None),
             Err(error) => (None, Some(error.to_string())),
@@ -438,6 +497,15 @@ impl RuskerApp {
             http_proxy_input,
             https_proxy_input,
             no_proxy_input,
+            container_http_proxy_input,
+            container_https_proxy_input,
+            container_no_proxy_input,
+            daemon_editor,
+            daemon_loaded: None,
+            daemon_loading: false,
+            daemon_error: None,
+            _daemon_task: None,
+            window_handle: window.window_handle(),
             saver_threshold_input,
             saver_slider,
             saver_seen: false,
@@ -554,11 +622,57 @@ impl RuskerApp {
         self.page = page;
         if page == Page::Settings {
             self.refresh_runtime_host(cx);
+            // Keep unsaved edits; otherwise pick up the current file.
+            if self.daemon_pending(cx).is_none() {
+                self.load_daemon_config(cx);
+            }
         }
         if entering_volumes && self.connected {
             self.after_volume_snapshot(cx);
         }
         cx.notify();
+    }
+
+    /// Reads the managed `daemon.json` into the Docker Engine editor.
+    fn load_daemon_config(&mut self, cx: &mut Context<Self>) {
+        if !self.manages_engine() || self.daemon_loading {
+            return;
+        }
+        let Some(host) = self.runtime_host.clone() else {
+            return;
+        };
+        self.daemon_loading = true;
+        self.daemon_error = None;
+        let handle = host.read_daemon_config();
+        let window = self.window_handle;
+        self._daemon_task = Some(cx.spawn(async move |this, cx| {
+            let result = await_runtime_host(handle).await;
+            _ = this.update(cx, |this, cx| {
+                this.daemon_loading = false;
+                match result {
+                    Ok(text) => {
+                        let editor = this.daemon_editor.clone();
+                        let value = text.clone();
+                        _ = cx.update_window(window, |_, window, cx| {
+                            editor.update(cx, |state, cx| state.set_value(value, window, cx));
+                        });
+                        this.daemon_loaded = Some(text);
+                    }
+                    Err(error) => {
+                        this.daemon_loaded = None;
+                        this.daemon_error = Some(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The edited `daemon.json` text when it differs from the loaded file.
+    fn daemon_pending(&self, cx: &App) -> Option<String> {
+        let loaded = self.daemon_loaded.as_ref()?;
+        let value = self.daemon_editor.read(cx).value().to_string();
+        (value.trim() != loaded.trim()).then_some(value)
     }
 
     /// Launch-time hook: refreshes state and starts an installed managed
@@ -1062,7 +1176,7 @@ impl RuskerApp {
             ports: self.create_ports_input.read(cx).value().to_string(),
             nvidia_gpu: self.create_nvidia_gpu,
         };
-        let request = match draft.parse() {
+        let mut request = match draft.parse() {
             Ok(request) => request,
             Err(error) => {
                 self.create_error = Some(error);
@@ -1070,6 +1184,7 @@ impl RuskerApp {
                 return;
             }
         };
+        request.env = self.settings.container_proxy_resolved().container_env();
         let Some(engine) = self.engine.clone() else {
             self.create_error = Some("容器引擎不可用".into());
             cx.notify();
@@ -1083,10 +1198,23 @@ impl RuskerApp {
 
     fn proxy_draft(&self, cx: &App) -> DockerProxySettings {
         DockerProxySettings {
-            enabled: self.settings_draft.docker_proxy.enabled,
+            mode: self.settings_draft.docker_proxy.mode,
             http_proxy: self.http_proxy_input.read(cx).value().to_string(),
             https_proxy: self.https_proxy_input.read(cx).value().to_string(),
             no_proxy: self.no_proxy_input.read(cx).value().to_string(),
+        }
+    }
+
+    fn container_proxy_draft(&self, cx: &App) -> DockerProxySettings {
+        DockerProxySettings {
+            mode: self.settings_draft.container_proxy.mode,
+            http_proxy: self.container_http_proxy_input.read(cx).value().to_string(),
+            https_proxy: self
+                .container_https_proxy_input
+                .read(cx)
+                .value()
+                .to_string(),
+            no_proxy: self.container_no_proxy_input.read(cx).value().to_string(),
         }
     }
 
@@ -1101,6 +1229,7 @@ impl RuskerApp {
             .map_err(|_| "资源节省阈值必须是整数秒".to_string())?;
         let mut candidate = self.settings_draft.clone();
         candidate.docker_proxy = self.proxy_draft(cx);
+        candidate.container_proxy = self.container_proxy_draft(cx);
         candidate.resource_saver.threshold_secs = threshold;
         // Integrations are applied and saved immediately, never drafted.
         candidate.wsl = self.settings.wsl.clone();
@@ -1108,8 +1237,10 @@ impl RuskerApp {
     }
 
     fn settings_dirty(&self, cx: &App) -> bool {
-        self.collect_settings(cx)
-            .map_or(true, |candidate| candidate != self.settings)
+        self.daemon_pending(cx).is_some()
+            || self
+                .collect_settings(cx)
+                .map_or(true, |candidate| candidate != self.settings)
     }
 
     /// Target of a disk move the candidate settings ask for, if any.
@@ -1178,6 +1309,18 @@ impl RuskerApp {
             ),
             (&self.no_proxy_input, saved.docker_proxy.no_proxy.clone()),
             (
+                &self.container_http_proxy_input,
+                saved.container_proxy.http_proxy.clone(),
+            ),
+            (
+                &self.container_https_proxy_input,
+                saved.container_proxy.https_proxy.clone(),
+            ),
+            (
+                &self.container_no_proxy_input,
+                saved.container_proxy.no_proxy.clone(),
+            ),
+            (
                 &self.saver_threshold_input,
                 saved.resource_saver.threshold_secs.to_string(),
             ),
@@ -1187,6 +1330,10 @@ impl RuskerApp {
         self.saver_slider.update(cx, |slider, cx| {
             slider.set_value(saved.resource_saver.threshold_secs as f32, window, cx);
         });
+        if let Some(loaded) = self.daemon_loaded.clone() {
+            self.daemon_editor
+                .update(cx, |state, cx| state.set_value(loaded, window, cx));
+        }
         apply_theme(saved.theme, cx);
         self.settings_error = None;
         self.settings_notice = None;
@@ -1200,7 +1347,10 @@ impl RuskerApp {
         let candidate = match self
             .collect_settings(cx)
             .and_then(|candidate| candidate.validate().map(|()| candidate))
-        {
+            .and_then(|candidate| match self.daemon_pending(cx) {
+                Some(text) => validate_daemon_config(&text).map(|()| candidate),
+                None => Ok(candidate),
+            }) {
             Ok(candidate) => candidate,
             Err(error) => {
                 self.settings_error = Some(error);
@@ -1268,11 +1418,21 @@ impl RuskerApp {
                     host.set_resource_saver(&candidate.resource_saver);
                     host.set_data_location(disk_location_setting(&candidate));
                 }
+                // Modes that follow other sources are re-resolved on every
+                // apply; the write is skipped when nothing changed.
+                let container_proxy_changed = candidate.container_proxy
+                    != self.settings.container_proxy
+                    || follows_other_proxy(candidate.container_proxy.mode);
                 self.settings = candidate.clone();
                 self.settings_draft = candidate;
                 self.settings_warning = None;
                 self.settings_error = None;
                 self.settings_notice = Some("设置已保存".into());
+                if container_proxy_changed {
+                    if let Err(error) = sync_container_proxy(&self.settings) {
+                        self.settings_error = Some(format!("设置已保存，但{error}"));
+                    }
+                }
                 // Idempotent: dockerd is only restarted if daemon.json changes.
                 self.apply_engine_proxy(cx);
             }
@@ -1300,11 +1460,14 @@ impl RuskerApp {
         let Some(host) = self.runtime_host.clone() else {
             return;
         };
-        self.runtime_busy = Some("正在应用 Engine 代理…".into());
+        let daemon_config = self.daemon_pending(cx);
+        let with_daemon = daemon_config.is_some();
+        self.runtime_busy = Some("正在应用 Engine 配置…".into());
         self.runtime_error = None;
-        self.settings_notice = Some("设置已保存，正在应用 Engine 代理…".into());
+        self.settings_notice = Some("设置已保存，正在应用 Engine 配置…".into());
         let handle = host.apply_proxy(
             self.settings.docker_proxy.clone(),
+            daemon_config,
             self.settings.wsl.integrations.clone(),
         );
         self._runtime_task = Some(cx.spawn(async move |this, cx| {
@@ -1317,8 +1480,8 @@ impl RuskerApp {
                         this.runtime_snapshot = snapshot;
                         this.settings_notice = Some(
                             match outcome {
-                                ProxyApplyOutcome::Restarted => "代理已生效：Engine 已按新配置重启",
-                                ProxyApplyOutcome::Unchanged => "代理已生效（Engine 配置无变化）",
+                                ProxyApplyOutcome::Restarted => "已生效：Engine 已按新配置重启",
+                                ProxyApplyOutcome::Unchanged => "已生效（Engine 配置无变化）",
                                 ProxyApplyOutcome::Deferred => {
                                     "设置已保存，代理将在 Engine 启动时自动生效"
                                 }
@@ -1328,10 +1491,15 @@ impl RuskerApp {
                         if outcome == ProxyApplyOutcome::Restarted && ready {
                             this.refresh(cx);
                         }
+                        if with_daemon {
+                            // Show the file as written (formatting, key order).
+                            this.load_daemon_config(cx);
+                        }
                     }
                     Err(error) => {
                         this.settings_notice = None;
-                        this.settings_error = Some(format!("设置已保存，但应用代理失败：{error}"));
+                        this.settings_error =
+                            Some(format!("设置已保存，但应用 Engine 配置失败：{error}"));
                     }
                 }
                 cx.notify();
@@ -2248,6 +2416,90 @@ impl RuskerApp {
             ))
     }
 
+    /// Docker Desktop's "Docker engine" page: edit `daemon.json` directly.
+    fn render_docker_engine_settings(&self, cx: &mut Context<Self>) -> Div {
+        let managed = self.manages_engine();
+        let loaded = self.daemon_loaded.is_some();
+        let busy = self.runtime_busy.is_some();
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("通过编辑 JSON 格式的 Docker daemon")
+                    .child(
+                        div()
+                            .id("open-daemon-docs")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_color(cx.theme().link)
+                            .underline()
+                            .cursor_pointer()
+                            .child("配置文件")
+                            .child(Icon::new(AssetIcon::ExternalLink).xsmall())
+                            .on_click(|_, _, cx| cx.open_url(DAEMON_CONFIG_DOCS_URL)),
+                    )
+                    .child("来配置 Engine。"),
+            )
+            .child(callout(
+                CalloutKind::Warning,
+                "高级设置",
+                muted(
+                    "错误的配置可能导致 Docker 无法启动，请谨慎修改。应用前会用 dockerd --validate 校验，应用后 Engine 会重启，运行中的容器会被停止。proxies 由“代理”设置管理，不在此显示。",
+                    cx,
+                ),
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().child(settings_label("Daemon 配置文件", cx)))
+                    .child(
+                        Button::new("reload-daemon-config")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Redo)
+                            .label(if self.daemon_loading { "读取中…" } else { "重新读取" })
+                            .disabled(!managed || self.daemon_loading || busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.load_daemon_config(cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(!managed, |this| {
+                this.child(muted(
+                    "当前 Engine 不由 Rusker 管理（设置了 DOCKER_HOST），请直接编辑该 Engine 的 daemon.json。",
+                    cx,
+                ))
+            })
+            .when_some(self.daemon_error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(error),
+                )
+            })
+            .when(managed, |this| {
+                this.child(
+                    Editor::new(&self.daemon_editor)
+                        .h(px(320.))
+                        .disabled(!loaded || busy),
+                )
+            })
+    }
+
     fn render_wsl_integration(&self, cx: &mut Context<Self>) -> Div {
         let snapshot = &self.runtime_snapshot;
         let busy = self.runtime_busy.is_some();
@@ -2316,6 +2568,7 @@ impl RuskerApp {
                     SettingsSection::ResourceSaver => self.render_resource_saver_settings(cx),
                     SettingsSection::Proxies => self.render_proxy_settings(cx),
                     SettingsSection::WslIntegration => self.render_wsl_integration(cx),
+                    SettingsSection::DockerEngine => self.render_docker_engine_settings(cx),
                 };
                 div()
                     .py_6()
@@ -2740,61 +2993,54 @@ impl RuskerApp {
             .as_ref()
             .map(|store| store.proxy_export_path().display().to_string())
             .unwrap_or_else(|| "不可用".into());
+        let mode = self.settings_draft.docker_proxy.mode;
         div()
             .flex()
             .flex_col()
             .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_4()
-                    .child(div().flex_1().child(settings_label("Docker Engine 拉取代理", cx)))
-                    .child(
-                        Switch::new("docker-proxy-enabled")
-                            .checked(self.settings_draft.docker_proxy.enabled)
-                            .on_change(cx.listener(|this, enabled, _, cx| {
-                                this.settings_draft.docker_proxy.enabled = *enabled;
-                                this.settings_notice = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(muted(
-                "Engine 拉取镜像等出站请求使用的代理。应用后直接写入受管 Engine 的 daemon.json 并生效。",
-                cx,
-            ))
-            .child(form_field(
-                "HTTP_PROXY",
-                &self.http_proxy_input,
-                "支持 http:// 或 https://，不保存内嵌用户名或密码。",
-                cx,
-            ))
-            .child(form_field(
-                "HTTPS_PROXY",
-                &self.https_proxy_input,
-                "HTTPS 请求使用的代理地址，也可以填写 http:// 代理。",
-                cx,
-            ))
-            .child(form_field(
-                "NO_PROXY",
-                &self.no_proxy_input,
-                "逗号分隔的主机、域名、IP 或 CIDR，例如 localhost,127.0.0.1,::1。",
-                cx,
-            ))
-            .child(callout(
-                CalloutKind::Warning,
-                if manages_engine { "会重启 Engine" } else { "需要手动应用" },
-                muted(
-                    if manages_engine {
-                        "代理配置变化时会重启 Engine，运行中的容器会被停止（设置了重启策略的容器会自动恢复）。WSL2 使用 NAT 网络时，127.0.0.1 指向 WSL 自身而非 Windows，请填写 Windows 主机地址。"
-                    } else {
-                        "当前 Engine 不由 Rusker 管理，无法直接修改其配置。请导出后手动合并 proxies 到 daemon.json 并重启 Engine；不要覆盖 daemon.json 中的其他配置。"
-                    },
+            .child(proxy_heading(
+                "Docker Engine 代理",
+                self.proxy_mode_select(
+                    "engine-proxy-mode",
+                    mode,
+                    &ProxyMode::ENGINE,
+                    |settings| &mut settings.docker_proxy.mode,
                     cx,
                 ),
                 cx,
             ))
+            .child(muted(
+                "Engine 拉取或推送镜像等出站请求使用的代理。应用后直接写入受管 Engine 的 daemon.json 并生效。",
+                cx,
+            ))
+            .when(mode == ProxyMode::Manual, |this| {
+                this.child(proxy_fields(
+                    [
+                        &self.http_proxy_input,
+                        &self.https_proxy_input,
+                        &self.no_proxy_input,
+                    ],
+                    cx,
+                ))
+            })
+            .when(mode == ProxyMode::System, |this| {
+                this.child(proxy_summary(&self.settings_draft.docker_proxy.resolve(None), cx))
+            })
+            .when(mode != ProxyMode::None || self.settings.docker_proxy.mode != ProxyMode::None, |this| {
+                this.child(callout(
+                    CalloutKind::Warning,
+                    if manages_engine { "会重启 Engine" } else { "需要手动应用" },
+                    muted(
+                        if manages_engine {
+                            "代理配置变化时会重启 Engine，运行中的容器会被停止（设置了重启策略的容器会自动恢复）。系统代理在应用设置和 Engine 启动时读取。WSL2 使用 NAT 网络时，127.0.0.1 指向 WSL 自身而非 Windows，请填写 Windows 主机地址。"
+                        } else {
+                            "当前 Engine 不由 Rusker 管理，无法直接修改其配置。请导出后手动合并 proxies 到 daemon.json 并重启 Engine；不要覆盖 daemon.json 中的其他配置。"
+                        },
+                        cx,
+                    ),
+                    cx,
+                ))
+            })
             .when(!manages_engine, |this| {
                 this.child(
                     div()
@@ -2813,6 +3059,100 @@ impl RuskerApp {
                         )
                         .child(muted(format!("导出到：{export_path}"), cx)),
                 )
+            })
+            .child(div().my_2().h(px(1.)).bg(cx.theme().border))
+            .child(self.render_container_proxy_settings(cx))
+    }
+
+    /// Docker Desktop's "Containers proxy": outbound traffic from containers.
+    fn render_container_proxy_settings(&self, cx: &mut Context<Self>) -> Div {
+        let config_path = docker_client_config_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "不可用".into());
+        let mode = self.settings_draft.container_proxy.mode;
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(proxy_heading(
+                "容器代理",
+                self.proxy_mode_select(
+                    "container-proxy-mode",
+                    mode,
+                    &ProxyMode::CONTAINER,
+                    |settings| &mut settings.container_proxy.mode,
+                    cx,
+                ),
+                cx,
+            ))
+            .child(muted(
+                "运行中容器的出站流量使用的代理，新建容器时以 HTTP_PROXY / HTTPS_PROXY / NO_PROXY 环境变量传入。",
+                cx,
+            ))
+            .when(mode == ProxyMode::Manual, |this| {
+                this.child(proxy_fields(
+                    [
+                        &self.container_http_proxy_input,
+                        &self.container_https_proxy_input,
+                        &self.container_no_proxy_input,
+                    ],
+                    cx,
+                ))
+            })
+            .when(follows_other_proxy(mode), |this| {
+                // Resolved against the edited Engine proxy, so "same as host"
+                // previews what applying would give.
+                let engine = DockerProxySettings {
+                    mode: self.settings_draft.docker_proxy.mode,
+                    ..self.proxy_draft(cx)
+                };
+                let resolved = self.settings_draft.container_proxy.resolve(Some(&engine));
+                this.child(proxy_summary(&resolved, cx))
+            })
+            .child(callout(
+                CalloutKind::Info,
+                "仅对新建容器生效",
+                muted(
+                    format!(
+                        "应用后写入 Docker 客户端配置 {config_path} 的 proxies.default（保留其他配置），docker run / docker build 会自动传入代理；已有容器需重新创建。容器内的 127.0.0.1 指向容器自身，请使用宿主机的局域网地址。"
+                    ),
+                    cx,
+                ),
+                cx,
+            ))
+    }
+
+    /// Docker Desktop-style proxy mode drop-down.
+    fn proxy_mode_select(
+        &self,
+        id: &'static str,
+        current: ProxyMode,
+        options: &'static [ProxyMode],
+        field: fn(&mut AppSettings) -> &mut ProxyMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let weak = cx.weak_entity();
+        Button::new(id)
+            .outline()
+            .label(current.label())
+            .dropdown_caret(true)
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+                for &mode in options {
+                    let weak = weak.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(mode.label())
+                            .checked(mode == current)
+                            .on_click(move |_, _, cx| {
+                                _ = weak.update(cx, |this, cx| {
+                                    *field(&mut this.settings_draft) = mode;
+                                    this.settings_notice = None;
+                                    this.settings_error = None;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu.min_w(px(180.))
             })
     }
 
@@ -3277,6 +3617,92 @@ pub fn apply_theme(preference: ThemePreference, cx: &mut App) {
 fn disk_location_setting(settings: &AppSettings) -> Option<PathBuf> {
     let location = settings.vm.disk_image_location.trim();
     (!location.is_empty()).then(|| PathBuf::from(location))
+}
+
+/// Section title with its mode drop-down on the right.
+fn proxy_heading(title: &'static str, select: impl IntoElement, cx: &App) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_4()
+        .child(div().flex_1().child(settings_label(title, cx)))
+        .child(select)
+}
+
+/// Manual configuration fields, indented under the heading like Docker
+/// Desktop.
+fn proxy_fields(inputs: [&Entity<InputState>; 3], cx: &App) -> Div {
+    let [http, https, no_proxy] = inputs;
+    div()
+        .ml_2()
+        .pl_4()
+        .border_l_2()
+        .border_color(cx.theme().border)
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(form_field(
+            "Web 服务器（HTTP）",
+            http,
+            "支持 http:// 或 https://，不保存内嵌用户名或密码。",
+            cx,
+        ))
+        .child(form_field(
+            "安全 Web 服务器（HTTPS）",
+            https,
+            "HTTPS 请求使用的代理地址，也可以填写 http:// 代理。",
+            cx,
+        ))
+        .child(form_field(
+            "对以下主机和域名不使用代理",
+            no_proxy,
+            "逗号分隔，例如 registry-1.docker.com,*.docker.com,10.0.0.0/8",
+            cx,
+        ))
+}
+
+/// The addresses a non-manual mode currently resolves to.
+fn proxy_summary(proxy: &ResolvedProxy, cx: &App) -> Div {
+    let text = if proxy.is_empty() {
+        "当前未检测到可用的 HTTP/HTTPS 代理，将直接连接。".to_string()
+    } else {
+        let or_none = |value: &str| {
+            if value.is_empty() {
+                "（无）".to_string()
+            } else {
+                value.to_string()
+            }
+        };
+        format!(
+            "当前生效：HTTP {} · HTTPS {} · 不使用代理 {}",
+            or_none(&proxy.http_proxy),
+            or_none(&proxy.https_proxy),
+            or_none(&proxy.no_proxy)
+        )
+    };
+    div()
+        .ml_2()
+        .pl_4()
+        .border_l_2()
+        .border_color(cx.theme().border)
+        .child(muted(text, cx))
+}
+
+/// Proxy modes whose addresses come from somewhere else and can change
+/// without the setting itself changing.
+fn follows_other_proxy(mode: ProxyMode) -> bool {
+    matches!(mode, ProxyMode::System | ProxyMode::SameAsHost)
+}
+
+/// Writes the container proxy into the Docker CLI's `config.json`
+/// (`proxies.default`), so `docker run` / `docker build` pass it on.
+/// Containers created from Rusker get the variables directly.
+fn sync_container_proxy(settings: &AppSettings) -> Result<(), String> {
+    let path = docker_client_config_path()
+        .ok_or("无法确定 Docker 客户端配置目录，容器代理仅对 Rusker 创建的容器生效")?;
+    apply_client_proxy(&path, &settings.container_proxy_resolved())
+        .map(|_| ())
+        .map_err(|error| format!("写入容器代理到 {} 失败：{error}", path.display()))
 }
 
 fn settings_label(text: &'static str, cx: &App) -> Div {

@@ -207,6 +207,7 @@ impl DockerEngine {
         let body = ContainerCreateBody {
             image: Some(request.image),
             cmd: (!request.command.is_empty()).then_some(request.command),
+            env: (!request.env.is_empty()).then_some(request.env),
             exposed_ports: (!exposed_ports.is_empty()).then_some(exposed_ports),
             host_config,
             ..Default::default()
