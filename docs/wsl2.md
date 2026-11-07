@@ -12,6 +12,7 @@ Windows 默认使用 Rusker 自己创建和管理的 WSL2 环境，不自动复�
 | `docker-desktop` 发行版 | `rusker` 发行版 | 运行 `dockerd`；系统盘只含 Ubuntu 与 Docker 软件 |
 | `docker_data.vhdx` | `docker-data.vhdx` | 独立数据磁盘，`wsl --mount --bare` 挂载到 `/var/lib/docker`、`/var/lib/containerd`，可单独移动 |
 | `\\.\pipe\docker_engine` | `\\.\pipe\rusker_engine` | Windows 侧 Docker API 端点 |
+| `http.docker.internal:3128` | `http://127.0.0.1:23128`（`rusker` 内） | Engine 拉取代理入口，连接转到 Windows 后再连上游代理 |
 | `/mnt/wsl/docker-desktop/...` | `/mnt/wsl/rusker/docker.sock` | WSL2 发行版之间共享的 tmpfs，供已集成发行版访问 |
 | `cli-tools` + `cli-plugins` 链接 | `/usr/local/lib/rusker` + `cli-plugins` 链接 | 集成发行版内的 CLI 与 Compose/Buildx |
 
@@ -35,6 +36,7 @@ Windows                                   WSL2 utility VM
 4. 应用通过一个长期运行的 `wsl.exe` 会话在前台运行 `dockerd`，不依赖发行版内的 systemd。WSL2 会在最后一个会话结束约 10 秒后终止发行版，后台 `nohup` 进程无法保活，因此会话必须由应用持有。如果发行版中已有上一次留下的 `dockerd`，supervisor 会接管它，而不会再启动第二个。
 5. Engine **不监听 TCP 端口**。Windows 侧由应用内代理提供 `\\.\pipe\rusker_engine`，每个连接转发到发行版内的 `docker system dial-stdio`；该路径与 WSL 网络模式（NAT/mirrored）无关，并正确传递 `docker run -i`/`exec -i` 的 stdin EOF。只有 Engine 会话存活时代理才转发，不会因零散连接而唤醒发行版。
 6. **绑定挂载与 Docker Desktop 的 WSL2 后端一致，不需要配置文件共享**：WSL 自动把所有盘符挂到 `rusker` 发行版的 `/mnt/<盘符>`，因此任意 Windows 目录都能挂载。管道代理会改写 `containers/create` 请求中 `-v`（`HostConfig.Binds`）与 `--mount type=bind`（`HostConfig.Mounts`）的 Windows 源路径，例如 `docker run -v C:\Users\me\src:/src` 中的 `C:\Users\me\src`（或 `C:/Users/me/src`）会变为 `/mnt/c/Users/me/src`；命名卷、Linux 路径和 UNC 路径保持不变。attach/exec 等升级后的连接及其他请求原样转发。已集成的 WSL 发行版直连 socket，应直接使用 `/mnt/c/...` 形式。
+7. **Engine 代理与 Docker Desktop 一致，在 Windows 上逐请求解析**：dockerd 的代理固定为 `rusker` 内的 `http://127.0.0.1:23128`（对应 `http.docker.internal:3128`）；Engine 会话存活期间，应用另持有一个 `wsl.exe` 会话运行转发程序 `rusker-vm-proxy`（随应用嵌入的静态 Linux 程序，首次运行时安装到 `/usr/local/libexec/rusker/<内容哈希>/`，升级后自动替换），把每个连接以多路复用帧经该会话的 stdio 交给 Windows 上的内置 HTTP 代理，由它按当前设置与 `NO_PROXY` 决定走上游代理还是直连。因此 NAT 模式下填写 `127.0.0.1:7890` 也指 Windows 本机，修改代理不重启 Engine，也不需要开放端口或防火墙规则。详见[设置文档](settings.md#受管-engine与-docker-desktop-相同的代理结构)。
 
 生命周期与 Docker Desktop 一致：
 

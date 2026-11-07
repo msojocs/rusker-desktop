@@ -3238,11 +3238,11 @@ impl RuskerApp {
             })
             .when(mode != ProxyMode::None || self.settings.docker_proxy.mode != ProxyMode::None, |this| {
                 this.child(callout(
-                    CalloutKind::Warning,
-                    if manages_engine { "会重启 Engine" } else { "需要手动应用" },
+                    if manages_engine { CalloutKind::Info } else { CalloutKind::Warning },
+                    if manages_engine { "不会重启 Engine" } else { "需要手动应用" },
                     muted(
                         if manages_engine {
-                            "代理配置变化时会重启 Engine，运行中的容器会被停止（设置了重启策略的容器会自动恢复）。系统代理在应用设置和 Engine 启动时读取。WSL2 使用 NAT 网络时，127.0.0.1 指向 WSL 自身而非 Windows，请填写 Windows 主机地址。"
+                            "与 Docker Desktop 相同，Engine 始终经 Rusker 内置代理出网，代理设置在 Windows 上逐个请求生效：127.0.0.1 指 Windows 本机，与 WSL 网络模式（NAT/mirrored）无关；修改后无需重启 Engine，系统代理的变化也会自动跟随。"
                         } else {
                             "当前 Engine 不由 Rusker 管理，无法直接修改其配置。请导出后手动合并 proxies 到 daemon.json 并重启 Engine；不要覆盖 daemon.json 中的其他配置。"
                         },

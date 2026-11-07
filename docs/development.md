@@ -36,11 +36,21 @@ Linux socket 权限不足时，应正确配置用户组或 rootless socket，不
 - Visual Studio 2022 Build Tools/Community，安装 **Desktop development with C++**、MSVC 和 Windows SDK
 - CMake 加入 `PATH`
 - 使用 Rust MSVC toolchain，而不是 GNU toolchain
+- Linux musl 目标：`rustup target add x86_64-unknown-linux-musl`（ARM64 Windows 为 `aarch64-unknown-linux-musl`）
 
 ```powershell
 rustup show active-toolchain
+rustup target add x86_64-unknown-linux-musl
 cmake --version
 cargo run
+```
+
+`build.rs` 会把 `helpers/vm-proxy`（WSL2 VM 内的 Engine 代理转发程序，见[设置文档](settings.md#受管-engine与-docker-desktop-相同的代理结构)）构建为静态 Linux musl 程序并嵌入 exe，用 Rust 自带的 `rust-lld` 链接，不需要额外的交叉编译工具链。缺少目标时构建会报错并提示安装命令；也可设置 `RUSKER_VM_PROXY=<路径>` 嵌入预先构建好的程序。该辅助程序是独立的 Cargo workspace，单独检查：
+
+```powershell
+cargo fmt --manifest-path helpers/vm-proxy/Cargo.toml --check
+$env:CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER='rust-lld'
+cargo clippy --manifest-path helpers/vm-proxy/Cargo.toml --target x86_64-unknown-linux-musl -- -D warnings
 ```
 
 未设置 `DOCKER_HOST` 时，Windows 版连接 Rusker 受管 WSL2 Engine 的 named pipe `//./pipe/rusker_engine`（由应用进程内的代理提供），不会使用 Docker Desktop 的 `//./pipe/docker_engine`。设置 `DOCKER_HOST` 可改连其他引擎。受管环境的安装、生命周期与集成见 [WSL2 运行环境文档](wsl2.md)。
@@ -78,7 +88,7 @@ export HTTP_PROXY="$HTTPS_PROXY"
 cargo fetch
 ```
 
-不要把个人代理地址、凭据或内部镜像源提交到仓库。若使用 Cargo registry mirror，请在用户级 Cargo 配置中设置。
+不要把个人代理地址、凭据或内部镜像源提交到仓库。若使用 Cargo registry mirror，请在用户级 Cargo 配置中设置。`rustup target add` 同样遵循 `HTTPS_PROXY`。
 
 ## 日常检查
 

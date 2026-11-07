@@ -1,0 +1,21 @@
+[package]
+name = "rusker-vm-proxy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "VM side of the Rusker Desktop Engine proxy relay"
+license = "Apache-2.0"
+publish = false
+
+# Built by the main crate's build.rs for the WSL2 VM (Linux musl, static),
+# never as part of the desktop app's own dependency graph.
+[workspace]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

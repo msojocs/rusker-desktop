@@ -244,9 +244,11 @@ fn integrates_distribution_and_relays_stdin_eof() {
     drop(service);
 }
 
-/// Opt-in: saving proxy settings takes effect in the managed dockerd directly
-/// (daemon.json merge + restart), keeps the NVIDIA runtime config, and an
-/// unchanged config does not restart the engine. Restores "no proxy" at the end.
+/// Opt-in: like Docker Desktop, dockerd always uses the in-VM relay and the
+/// Windows side applies the proxy settings per request, so a proxy on the
+/// Windows loopback works in NAT mode too and changing proxy settings never
+/// restarts dockerd. Keeps the NVIDIA runtime config; with `RUSKER_TEST_PULL`
+/// an image is pulled through it. Restores "no proxy" at the end.
 #[cfg(windows)]
 #[test]
 fn applies_engine_proxy_directly() {
@@ -255,7 +257,7 @@ fn applies_engine_proxy_directly() {
         return;
     }
     use rusker_desktop::{
-        runtime_host::{ProxyApplyOutcome, MANAGED_PIPE},
+        runtime_host::{ProxyApplyOutcome, ENGINE_PROXY_URL, MANAGED_PIPE},
         settings::{DockerProxySettings, NetworkSettings, ProxyMode},
     };
 
@@ -306,21 +308,218 @@ fn applies_engine_proxy_directly() {
     let first = apply(enabled.clone());
     let (http_proxy, nvidia) = engine_proxy(&client_runtime);
     eprintln!("首次应用：{first:?}；Engine HTTPProxy={http_proxy}；nvidia runtime={nvidia}");
-    assert!(http_proxy.starts_with(proxy_url.trim_end_matches('/')));
-    assert_eq!(apply(enabled), ProxyApplyOutcome::Unchanged);
+    assert_eq!(http_proxy, ENGINE_PROXY_URL, "dockerd 应使用 VM 内转发地址");
+    assert_eq!(apply(enabled.clone()), ProxyApplyOutcome::Unchanged);
 
     if let Ok(image) = std::env::var("RUSKER_TEST_PULL") {
-        let (ok, text) = wsl_output("rusker", &format!("docker pull -q {image}"), None);
+        let (ok, text) = wsl_output(
+            "rusker",
+            &format!("docker rmi -f {image} >/dev/null 2>&1; docker pull -q {image}"),
+            None,
+        );
         eprintln!("经代理拉取 {image}：{ok} {}", text.trim());
+        assert!(ok, "经 Engine 代理转发拉取 {image} 失败：{text}");
+
+        // Only the Windows-side upstream changes: no restart, and the pull
+        // now fails inside the relay, proving dockerd goes through it.
+        let dead = DockerProxySettings {
+            http_proxy: "http://127.0.0.1:1".into(),
+            https_proxy: "http://127.0.0.1:1".into(),
+            ..enabled.clone()
+        };
+        assert_eq!(apply(dead), ProxyApplyOutcome::Unchanged);
+        let (ok, text) = wsl_output(
+            "rusker",
+            &format!("docker rmi -f {image} >/dev/null 2>&1; docker pull -q {image}"),
+            None,
+        );
+        eprintln!("上游不可用时拉取：{ok} {}", text.trim());
+        assert!(!ok && text.contains("Bad Gateway"), "{text}");
+        assert_eq!(apply(enabled.clone()), ProxyApplyOutcome::Unchanged);
     }
 
+    // Plain HTTP through the relay: the Windows side parses the request and
+    // sends it to the HTTP upstream.
+    let (ok, text) = wsl_output(
+        "rusker",
+        &format!(
+            "curl -sS -o /dev/null -w '%{{http_code}}' --max-time 30 -x {ENGINE_PROXY_URL} http://example.com/"
+        ),
+        None,
+    );
+    eprintln!("经转发访问 http://example.com/：{ok} {}", text.trim());
+    assert!(ok && text.trim() == "200", "{text}");
+
+    // Like Docker Desktop, turning the proxy off only changes the Windows
+    // side: dockerd keeps the relay and is not restarted.
     assert_eq!(
         apply(DockerProxySettings::default()),
-        ProxyApplyOutcome::Restarted
+        ProxyApplyOutcome::Unchanged
     );
     let (http_proxy, nvidia_after) = engine_proxy(&client_runtime);
-    assert!(http_proxy.is_empty(), "关闭后仍有代理：{http_proxy}");
+    assert_eq!(http_proxy, ENGINE_PROXY_URL);
     assert_eq!(nvidia, nvidia_after, "合并 daemon.json 不应影响 runtimes");
+
+    service.shutdown_blocking(Duration::from_secs(50));
+    drop(service);
+}
+
+/// Opt-in benchmark of the Engine proxy relay. A Windows HTTP server sends
+/// `RUSKER_BENCH_MIB` (default 1024) MiB from memory; `curl` in `rusker`
+/// downloads it through the relay (plain HTTP, a CONNECT tunnel, three
+/// tunnels in parallel like a layer pull) and, as baselines, over the raw
+/// `wsl.exe` stdio pipe and directly (mirrored networking only).
+#[cfg(windows)]
+#[test]
+fn benchmarks_engine_proxy_relay() {
+    if std::env::var("RUSKER_WSL_PROXY_BENCH").as_deref() != Ok("1") {
+        eprintln!("跳过：设置 RUSKER_WSL_PROXY_BENCH=1 后测量 Engine 代理转发吞吐");
+        return;
+    }
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        time::Instant,
+    };
+
+    use rusker_desktop::runtime_host::ENGINE_PROXY_URL;
+
+    let mib: u64 = std::env::var("RUSKER_BENCH_MIB")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1024);
+    let size = mib * 1024 * 1024;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("监听");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if stream.read(&mut byte).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let length = if head.starts_with(b"GET /small") {
+                    2
+                } else {
+                    size
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+                );
+                let chunk = vec![0u8; 1024 * 1024];
+                let mut left = length;
+                while left > 0 {
+                    let part = left.min(chunk.len() as u64) as usize;
+                    if stream.write_all(&chunk[..part]).is_err() {
+                        return;
+                    }
+                    left -= part as u64;
+                }
+            });
+        }
+    });
+
+    let client_runtime = tokio::runtime::Runtime::new().expect("测试运行时");
+    let service = RuntimeHostService::new().expect("创建 runtime-host");
+    let snapshot = client_runtime
+        .block_on(service.startup(BTreeMap::new()))
+        .expect("Tokio startup task")
+        .expect("启动专用 WSL2 环境");
+    assert!(snapshot.engine_ready, "warnings: {:?}", snapshot.warnings);
+
+    // The relay starts within a poll interval of the engine session.
+    let probe = format!(
+        "curl -sS -o /dev/null -w '%{{http_code}}' --max-time 5 -x {ENGINE_PROXY_URL} http://127.0.0.1:{port}/small"
+    );
+    let ready = (0..30).any(|_| {
+        let (ok, text) = wsl_output("rusker", &probe, None);
+        ok && text.trim() == "200" || {
+            std::thread::sleep(Duration::from_secs(1));
+            false
+        }
+    });
+    assert!(ready, "Engine 代理转发未就绪");
+
+    let report = |label: &str, bytes: u64, seconds: f64| {
+        eprintln!(
+            "{label:<28} {:>8.1} MiB/s（{:.2} 秒）",
+            bytes as f64 / 1024.0 / 1024.0 / seconds,
+            seconds
+        );
+    };
+    let timed = |label: &str, script: &str, bytes: u64| {
+        let started = Instant::now();
+        let (ok, text) = wsl_output("rusker", script, None);
+        let seconds = started.elapsed().as_secs_f64();
+        if ok {
+            report(label, bytes, seconds);
+        } else {
+            eprintln!("{label:<28} 失败：{}", text.trim());
+        }
+    };
+    let url = format!("http://127.0.0.1:{port}/big");
+    let curl = "curl -sS -o /dev/null --max-time 600";
+
+    // Baseline: the wsl.exe stdio pipe the relay rides on.
+    {
+        let started = Instant::now();
+        let mut child = std::process::Command::new("wsl.exe")
+            .args(["--distribution", "rusker", "--exec", "head", "-c"])
+            .arg(size.to_string())
+            .arg("/dev/zero")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("wsl.exe");
+        let mut stdout = child.stdout.take().unwrap();
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let mut total = 0u64;
+        loop {
+            let read = stdout.read(&mut buffer).expect("读取");
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+        }
+        let _ = child.wait();
+        assert_eq!(total, size);
+        report(
+            "基线：wsl.exe stdio 管道",
+            size,
+            started.elapsed().as_secs_f64(),
+        );
+    }
+    timed(
+        "基线：直连（仅 mirrored）",
+        &format!("{curl} --noproxy '*' {url}"),
+        size,
+    );
+    timed(
+        "转发：纯 HTTP",
+        &format!("{curl} -x {ENGINE_PROXY_URL} {url}"),
+        size,
+    );
+    timed(
+        "转发：CONNECT 隧道",
+        &format!("{curl} -p -x {ENGINE_PROXY_URL} {url}"),
+        size,
+    );
+    timed(
+        "转发：3 条隧道并发（合计）",
+        &format!("for i in 1 2 3; do {curl} -p -x {ENGINE_PROXY_URL} {url} & done; wait"),
+        size * 3,
+    );
+    let (_, cpu) = wsl_output(
+        "rusker",
+        "ps -o pid,etime,time,rss,args -C rusker-vm-proxy | cut -c1-100",
+        None,
+    );
+    eprintln!("VM 内转发进程累计 CPU：\n{}", cpu.trim_end());
 
     service.shutdown_blocking(Duration::from_secs(50));
     drop(service);

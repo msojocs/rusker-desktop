@@ -38,19 +38,39 @@ Docker 数据磁盘 `docker-data.vhdx` 所在目录，存放镜像、容器和�
 
 Unix 下新写入的设置文件权限为 `0600`。代理地址不支持内嵌用户名或密码，避免在明文凭据配置中保存秘密。
 
-## 受管 Engine：保存即生效
+## 受管 Engine：与 Docker Desktop 相同的代理结构
 
-Windows 上未设置 `DOCKER_HOST` 时，Engine 是 Rusker 自己的 WSL2 Engine（见 [WSL2 文档](wsl2.md)），代理行为与 Docker Desktop 的 “Apply & restart” 一致：
+Windows 上未设置 `DOCKER_HOST` 时，Engine 是 Rusker 自己的 WSL2 Engine（见 [WSL2 文档](wsl2.md)）。Docker Desktop 不会把用户填写的代理地址交给 VM 内的 dockerd：`docker info` 始终显示 `HTTP/HTTPS Proxy: http.docker.internal:3128`，这是 VM 内的入口，连接到达 Windows 上的 `com.docker.backend`，由它内置的 HTTP 代理按设置逐个请求决定走上游代理还是直连。Rusker 采用同样的结构：
 
-1. 点击“应用”后，Rusker 把 `proxies` 合并进 `rusker` 发行版的 `/etc/docker/daemon.json`。只替换 `proxies` 键，保留 NVIDIA runtime 等其他配置；关闭代理时删除该键。文件不是合法 JSON 对象时拒绝修改并报错。
-2. 配置有变化且 Engine 正在运行时，优雅重启 `dockerd`（运行中的容器会停止，设置了重启策略的容器会自动恢复）。配置无变化时不重启。
-3. Engine 未运行时，配置在下次启动 Engine 前写入；应用启动时也会按已保存的设置校正 `daemon.json`。
+```text
+dockerd（rusker 发行版）
+  → http://127.0.0.1:23128           VM 内转发入口（rusker-vm-proxy，仅监听 VM 回环）
+  → 长期 wsl.exe 会话的 stdin/stdout  多路复用帧，不经过网络
+  → RuntimeHostService（Windows）     完整的 HTTP 正向代理，逐请求决定路由
+  → 上游代理（如 Windows 本机 127.0.0.1:7890）或直接连接目标
+```
 
-WSL2 使用 NAT 网络时，`127.0.0.1` 指向 WSL 自身，代理地址应填写 Windows 主机地址；使用 `networkingMode=mirrored` 时可直接使用 `127.0.0.1`。
+### dockerd 一侧
+
+- `daemon.json` 的 `proxies` 固定为 `http-proxy`/`https-proxy` = `http://127.0.0.1:23128`，与代理模式无关（“不使用代理”时也一样，请求由 Windows 直接发出）；`docker info` 中的 HTTP/HTTPS Proxy 显示该地址。
+- 不写 `no-proxy`：与 Docker Desktop 相同，`NO_PROXY` 在 Windows 一侧判断。localhost 与回环地址由 dockerd 自身直连。
+- Rusker 在启动 Engine 前把 `proxies` 合并进 `/etc/docker/daemon.json`，只替换该键，保留 NVIDIA runtime 等其他配置；文件不是合法 JSON 对象时拒绝修改并报错。旧版本写入的原始代理地址会在第一次启动时被替换（此时重启一次 dockerd）。
+- 因此**修改代理设置不会改动 `daemon.json`，也不会重启 Engine**，点击“应用”后下一个请求就使用新设置。
+
+### Windows 一侧（逐请求）
+
+- 每个请求都重新解析当前设置；“系统代理”模式每次重新读取 Windows 系统代理，系统代理的开关和地址变化立即生效。
+- `NO_PROXY` 按 Go 的规则匹配：`*`；IP 与 CIDR；`example.com` 匹配自身和子域名，`.example.com`/`*.example.com` 只匹配子域名；条目可带 `:端口`。
+- `CONNECT host:port`（访问 `https://` 仓库）：有 HTTPS 上游时把 `CONNECT` 交给上游，由上游应答；没有上游或被 `NO_PROXY` 排除时由 Windows 直接建立隧道并回复 `200`。
+- 纯 HTTP 请求（`GET http://host/...`）：有 HTTP 上游时原样转给上游；否则改写为普通路径形式、去掉 `Proxy-*` 与逐跳头后直接连接目标。客户端连接保持长连接，同一连接上的请求可以发往不同主机；连续发往同一目的地时复用出站连接。
+- 上游代理支持 `http://` 与 `https://`（与代理之间使用 TLS，按 Windows 证书存储校验，企业根证书可用）。
+- 转发与 WSL 网络模式（NAT/mirrored）无关，不开放 Windows 端口，不需要代理软件开启“允许局域网连接”，也不需要防火墙规则或管理员权限（Docker Desktop 使用 Hyper-V socket，Rusker 改用 `wsl.exe` 标准输入输出）。
+- 上游或目标不可达时，dockerd 收到 `502 Bad Gateway`（拉取报错中可见）；转发进程异常退出时，设置页显示警告并自动重启。
+- 该转发只用于 Engine 自身的出站请求（拉取、推送、登录、构建时拉取基础镜像）。容器内的代理环境变量（“容器代理”）仍原样注入，容器内的 `127.0.0.1` 指容器自身。
 
 ## 外部 Engine：手动应用
 
-Linux、macOS，或 Windows 上设置了 `DOCKER_HOST` 时，Engine 不由 Rusker 管理，Rusker 不会修改系统 daemon 配置或重启服务。此时需要手动完成：
+Linux、macOS，或 Windows 上设置了 `DOCKER_HOST` 时，Engine 不由 Rusker 管理，Rusker 不会修改系统 daemon 配置或重启服务，导出的片段也是填写的原始地址（不经上述转发）；该 Engine 运行在 VM 中时，地址需要从 VM 内可达。此时需要手动完成：
 
 1. 导出 `docker-proxies.json`。
 2. 将其中的 `proxies` 对象合并到 Docker `daemon.json`，保留其他已有配置。
@@ -104,4 +124,4 @@ sudo systemctl restart docker
 - `NO_PROXY`：逗号分隔的主机名、域名、IP 或 CIDR，例如 `localhost,127.0.0.1,::1,.internal.example.com`。
 - 启用代理时，HTTP 和 HTTPS 地址至少填写一个。
 
-这些设置面向 **Docker Engine 的出站请求**，不是 Rusker 应用代理，也不会自动注入已有或新建容器的环境变量。
+这些设置面向 **Docker Engine 的出站请求**，不是 Rusker 应用代理，也不会自动注入已有或新建容器的环境变量。受管 Engine 中，这些地址由 Rusker 在 Windows 上使用（见上文“受管 Engine”）。

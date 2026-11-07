@@ -36,6 +36,9 @@
 - `runtime_host/mod.rs`：WSL2 运行环境服务、操作串行锁、启动与退出钩子。
 - `runtime_host/wsl.rs`：专用发行版安装、所有权校验、Engine 会话（supervisor）、发行版集成与 GPU 检测。
 - `runtime_host/proxy.rs`：`//./pipe/rusker_engine` → `docker system dial-stdio` 的逐连接转发。
+- `runtime_host/engine_proxy.rs`：Engine 代理转发（对应 Docker Desktop 的 `http.docker.internal:3128`）：dockerd 固定使用 VM 内 `127.0.0.1:23128`，连接经一个长期 `wsl.exe` 会话的 stdio 多路复用到 Windows。
+- `helpers/vm-proxy`（独立 Cargo workspace）：上述转发的 VM 一侧，纯 std 的静态 Linux musl 程序；`build.rs` 为 VM 架构构建并嵌入 Windows exe，运行时按内容哈希安装到 `rusker` 发行版。
+- `runtime_host/http_proxy.rs`：Windows 侧 HTTP 正向代理（对应 `com.docker.backend` 内置代理）：逐请求解析代理设置、在 Windows 侧应用 `NO_PROXY`，`CONNECT` 与纯 HTTP 请求走上游代理（`http://`/`https://`）或直连。
 - `format.rs`：不含 I/O 的格式化、过滤和展示逻辑。
 - `app.rs`：页面、选择、忙碌状态、请求序号、通知和 GPUI Task；`app/volumes.rs` 为卷页面与卷详情。
 - `main.rs`：只负责应用、资源、主题初始化和窗口创建。

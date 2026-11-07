@@ -1,4 +1,6 @@
 mod data_disk;
+mod engine_proxy;
+mod http_proxy;
 mod lan_forward;
 mod path_translation;
 #[cfg(windows)]
@@ -16,6 +18,7 @@ use std::{
 use thiserror::Error;
 use tokio::{runtime::Runtime, sync::Mutex, task::JoinHandle};
 
+pub use engine_proxy::{ENGINE_PROXY_PORT, ENGINE_PROXY_URL};
 pub use lan_forward::{LanForwardState, Protocol as ForwardProtocol};
 pub use wsl::{
     same_path, validate_daemon_config, EngineRecovery, NvidiaGpuStatus, ProxyApplyOutcome,
@@ -75,6 +78,7 @@ impl RuntimeHostService {
             runtime.spawn(proxy::serve(host.clone(), operation_lock.clone()));
             runtime.spawn(resource_saver_monitor(host.clone(), operation_lock.clone()));
             runtime.spawn(lan_forward::serve(host.clone()));
+            runtime.spawn(engine_proxy::serve(host.clone()));
             runtime.spawn(engine_watchdog(host.clone(), operation_lock.clone()));
         }
         Ok(Self {

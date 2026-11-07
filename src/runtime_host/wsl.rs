@@ -20,7 +20,12 @@ use tokio::{
     time::timeout,
 };
 
-use super::{data_disk, lan_forward::LanForwardStatus, RuntimeHostError};
+use super::{
+    data_disk,
+    engine_proxy::{self, EngineProxyState},
+    lan_forward::LanForwardStatus,
+    RuntimeHostError,
+};
 use crate::settings::{
     DockerProxySettings, NetworkSettings, ResourceSaverSettings, ENGINE_NETWORK_KEYS,
 };
@@ -37,7 +42,7 @@ pub const WSL_DOCKER_HOST: &str = "unix:///mnt/wsl/rusker/docker.sock";
 const MANAGED_MARKER: &str = "/etc/rusker-managed";
 const MANAGED_RECEIPT: &str = "rusker-wsl2-v1\n";
 const NVIDIA_TOOLKIT_VERSION: &str = "1.20.1-1";
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(3 * 60);
@@ -461,8 +466,9 @@ pub struct WslHost {
     root: PathBuf,
     session: Arc<EngineSession>,
     proxy: Arc<ProxyStatus>,
-    /// Desired `proxies` object for the managed dockerd's `daemon.json`.
-    engine_proxies: Arc<Mutex<Map<String, Value>>>,
+    /// Proxy settings served by the Engine proxy relay (see
+    /// `engine_proxy`); dockerd itself always points at the relay.
+    engine_proxy: Arc<EngineProxyState>,
     /// Desired network keys ([`ENGINE_NETWORK_KEYS`]) of `daemon.json`.
     engine_network: Arc<Mutex<Map<String, Value>>>,
     saver: Arc<ResourceSaver>,
@@ -500,7 +506,7 @@ impl WslHost {
             root,
             session: Arc::default(),
             proxy: Arc::default(),
-            engine_proxies: Arc::default(),
+            engine_proxy: Arc::default(),
             engine_network: Arc::default(),
             saver: Arc::default(),
             lan_forward: Arc::default(),
@@ -709,18 +715,21 @@ impl WslHost {
         self.saver.set_active(true);
     }
 
+    /// Like Docker Desktop, dockerd never sees the configured addresses: it
+    /// always uses the in-VM relay, and the Windows side resolves these
+    /// settings per request (so `127.0.0.1` means the Windows host even in
+    /// NAT mode). Takes effect immediately, without a dockerd restart.
     pub fn set_engine_proxy(&self, settings: &DockerProxySettings) {
-        *self
-            .engine_proxies
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = settings.engine_proxies();
+        self.engine_proxy.configure(settings);
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn engine_proxy_state(&self) -> Arc<EngineProxyState> {
+        self.engine_proxy.clone()
     }
 
     fn desired_proxies(&self) -> Map<String, Value> {
-        self.engine_proxies
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        engine_proxy::daemon_proxies()
     }
 
     pub fn set_engine_network(&self, settings: &NetworkSettings) {
@@ -903,6 +912,9 @@ impl WslHost {
         };
         let mut warnings = Vec::new();
         if let Some(error) = self.proxy.error() {
+            warnings.push(error);
+        }
+        if let Some(error) = self.engine_proxy.error().filter(|_| session_alive) {
             warnings.push(error);
         }
         if installed && running && !engine_ready {
@@ -1424,7 +1436,7 @@ fn strip_verbatim(path: &str) -> &str {
     path.strip_prefix(r"\\?\").unwrap_or(path)
 }
 
-async fn execute(
+pub(super) async fn execute(
     mut command: Command,
     action: &str,
     duration: Duration,
@@ -1550,7 +1562,7 @@ fn merge_managed_keys(
     Ok(Some(format!("{text}\n")))
 }
 
-async fn execute_with_input(
+pub(super) async fn execute_with_input(
     mut command: Command,
     input: &[u8],
     action: &str,
