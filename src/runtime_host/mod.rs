@@ -269,6 +269,38 @@ impl RuntimeHostService {
             host.snapshot(&integrations).await
         })
     }
+
+    /// Applies each `(distribution, enabled)` change in order. A failed
+    /// change is reverted in the returned integrations (the state actually in
+    /// effect) and reported as a message instead of aborting the rest.
+    pub fn apply_integrations(
+        &self,
+        changes: Vec<(String, bool)>,
+        integrations: BTreeMap<String, bool>,
+    ) -> JoinHandle<
+        Result<(RuntimeHostSnapshot, BTreeMap<String, bool>, Vec<String>), RuntimeHostError>,
+    > {
+        let host = self.host.clone();
+        let lock = self.operation_lock.clone();
+        self.spawn(async move {
+            let _guard = lock.lock().await;
+            let mut effective = integrations;
+            let mut failures = Vec::new();
+            for (distribution, enabled) in changes {
+                if let Err(error) = host.set_integration(&distribution, enabled).await {
+                    let action = if enabled { "启用" } else { "停用" };
+                    failures.push(format!("{action} {distribution} 集成失败：{error}"));
+                    if enabled {
+                        effective.remove(&distribution);
+                    } else {
+                        effective.insert(distribution, true);
+                    }
+                }
+            }
+            let snapshot = host.snapshot(&effective).await?;
+            Ok((snapshot, effective, failures))
+        })
+    }
 }
 
 /// How often the idle monitor samples the engine.

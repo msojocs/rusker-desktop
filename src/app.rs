@@ -215,6 +215,9 @@ pub struct RuskerApp {
     settings_store: Option<SettingsStore>,
     settings_warning: Option<String>,
     settings_notice: Option<String>,
+    /// "Apply" is still running one of its background steps (WSL
+    /// integrations, disk move, Engine config).
+    settings_applying: bool,
     settings_error: Option<String>,
     settings_scroll: ScrollHandle,
     settings_nav_target: Option<usize>,
@@ -491,6 +494,7 @@ impl RuskerApp {
             settings_store,
             settings_warning,
             settings_notice: None,
+            settings_applying: false,
             settings_error: None,
             settings_scroll: ScrollHandle::new(),
             settings_nav_target: None,
@@ -830,55 +834,16 @@ impl RuskerApp {
         enabled: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.runtime_busy.is_some() {
-            return;
-        }
-        if self.settings_store.is_none() {
-            self.runtime_error = Some("无法确定配置目录，发行版集成未修改".into());
-            cx.notify();
-            return;
-        }
-        let Some(host) = self.runtime_host.clone() else {
-            self.runtime_error = Some("WSL2 后台运行时不可用".into());
-            cx.notify();
-            return;
-        };
-        let mut integrations = self.settings.wsl.integrations.clone();
+        // Only drafted; takes effect when the settings are applied.
+        let integrations = &mut self.settings_draft.wsl.integrations;
         if enabled {
-            integrations.insert(distribution.clone(), true);
+            integrations.insert(distribution, true);
         } else {
             integrations.remove(&distribution);
         }
-        self.runtime_busy = Some(format!(
-            "{} {distribution} 集成…",
-            if enabled { "启用" } else { "停用" }
-        ));
-        self.runtime_error = None;
-        self.runtime_notice = None;
+        self.settings_notice = None;
+        self.settings_error = None;
         cx.notify();
-        let handle = host.set_integration(distribution.clone(), enabled, integrations.clone());
-        self._runtime_task = Some(cx.spawn(async move |this, cx| {
-            let result = await_runtime_host(handle).await;
-            _ = this.update(cx, |this, cx| {
-                this.runtime_busy = None;
-                match result {
-                    Ok(snapshot) => {
-                        this.runtime_snapshot = snapshot;
-                        this.settings.wsl.integrations = integrations;
-                        let action = if enabled { "启用" } else { "停用" };
-                        this.runtime_notice = Some(format!("已{action} {distribution} 集成"));
-                        if let Some(store) = &this.settings_store {
-                            if let Err(error) = store.save(&this.settings) {
-                                this.runtime_error =
-                                    Some(format!("集成已生效，但设置保存失败：{error}"));
-                            }
-                        }
-                    }
-                    Err(error) => this.runtime_error = Some(error.to_string()),
-                }
-                cx.notify();
-            });
-        }));
     }
 
     fn nvidia_gpu_available(&self) -> bool {
@@ -1231,8 +1196,6 @@ impl RuskerApp {
         candidate.docker_proxy = self.proxy_draft(cx);
         candidate.container_proxy = self.container_proxy_draft(cx);
         candidate.resource_saver.threshold_secs = threshold;
-        // Integrations are applied and saved immediately, never drafted.
-        candidate.wsl = self.settings.wsl.clone();
         Ok(candidate.normalized())
     }
 
@@ -1344,6 +1307,24 @@ impl RuskerApp {
     /// location changed (settings are only saved if that succeeds), then
     /// saves and applies everything else.
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        if self.settings_applying {
+            return;
+        }
+        let was_busy = self.runtime_busy.is_some();
+        self.start_apply_settings(cx);
+        // Every background step of "Apply" holds `runtime_busy` until it
+        // hands over to the next one, so that marks the whole chain.
+        self.settings_applying = !was_busy && self.runtime_busy.is_some();
+        cx.notify();
+    }
+
+    /// Ends the apply animation once a step finished without starting
+    /// another one.
+    fn settle_settings_applying(&mut self) {
+        self.settings_applying &= self.runtime_busy.is_some();
+    }
+
+    fn start_apply_settings(&mut self, cx: &mut Context<Self>) {
         let candidate = match self
             .collect_settings(cx)
             .and_then(|candidate| candidate.validate().map(|()| candidate))
@@ -1364,8 +1345,65 @@ impl RuskerApp {
             cx.notify();
             return;
         }
+        let changes = integration_changes(
+            &self.settings.wsl.integrations,
+            &candidate.wsl.integrations,
+        );
+        if changes.is_empty() {
+            self.apply_validated_settings(candidate, None, cx);
+            return;
+        }
+        let Some(host) = self.runtime_host.clone() else {
+            self.settings_error = Some("WSL2 后台运行时不可用，设置未保存".into());
+            cx.notify();
+            return;
+        };
+        if self.runtime_busy.is_some() {
+            self.settings_error = Some("运行环境正忙，请稍后再应用".into());
+            cx.notify();
+            return;
+        }
+        self.runtime_busy = Some("正在应用 WSL 集成…".into());
+        self.runtime_error = None;
+        self.settings_error = None;
+        self.settings_notice = Some("正在应用 WSL 集成…".into());
+        cx.notify();
+        let handle = host.apply_integrations(changes, candidate.wsl.integrations.clone());
+        self._runtime_task = Some(cx.spawn(async move |this, cx| {
+            let result = await_runtime_host(handle).await;
+            _ = this.update(cx, |this, cx| {
+                this.runtime_busy = None;
+                match result {
+                    Ok((snapshot, effective, failures)) => {
+                        this.runtime_snapshot = snapshot;
+                        let mut candidate = candidate;
+                        candidate.wsl.integrations = effective;
+                        let warning = (!failures.is_empty())
+                            .then(|| format!("部分 WSL 集成未生效：{}", failures.join("；")));
+                        this.apply_validated_settings(candidate, warning, cx);
+                    }
+                    Err(error) => {
+                        this.settings_notice = None;
+                        this.settings_error =
+                            Some(format!("应用 WSL 集成失败，设置未保存：{error}"));
+                    }
+                }
+                this.settle_settings_applying();
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Second half of "Apply", once WSL integrations are in effect: moves the
+    /// virtual disk when needed, then saves and applies the rest.
+    fn apply_validated_settings(
+        &mut self,
+        candidate: AppSettings,
+        warning: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self.pending_disk_move(&candidate) else {
-            self.commit_settings(candidate, cx);
+            self.commit_settings(candidate, warning, cx);
             cx.notify();
             return;
         };
@@ -1392,7 +1430,7 @@ impl RuskerApp {
                     Ok(snapshot) => {
                         let ready = snapshot.engine_ready;
                         this.runtime_snapshot = snapshot;
-                        this.commit_settings(candidate, cx);
+                        this.commit_settings(candidate, warning, cx);
                         if ready {
                             this.refresh(cx);
                         }
@@ -1403,12 +1441,18 @@ impl RuskerApp {
                             Some(format!("移动磁盘镜像失败，设置未保存：{error}"));
                     }
                 }
+                this.settle_settings_applying();
                 cx.notify();
             });
         }));
     }
 
-    fn commit_settings(&mut self, candidate: AppSettings, cx: &mut Context<Self>) {
+    fn commit_settings(
+        &mut self,
+        candidate: AppSettings,
+        warning: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(store) = &self.settings_store else {
             return;
         };
@@ -1425,7 +1469,7 @@ impl RuskerApp {
                     || follows_other_proxy(candidate.container_proxy.mode);
                 self.settings = candidate.clone();
                 self.settings_draft = candidate;
-                self.settings_warning = None;
+                self.settings_warning = warning;
                 self.settings_error = None;
                 self.settings_notice = Some("设置已保存".into());
                 if container_proxy_changed {
@@ -1502,6 +1546,7 @@ impl RuskerApp {
                             Some(format!("设置已保存，但应用 Engine 配置失败：{error}"));
                     }
                 }
+                this.settle_settings_applying();
                 cx.notify();
             });
         }));
@@ -1541,6 +1586,7 @@ impl RuskerApp {
         let selected = self.settings_draft.theme == preference;
         let button = Button::new(preference.label())
             .label(preference.label())
+            .pointer(true)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.settings_draft.theme = preference;
                 this.settings_notice = None;
@@ -2366,6 +2412,7 @@ impl RuskerApp {
                             .icon(IconName::HardDrive)
                             .label(if snapshot.installed { "修复环境" } else { "安装环境" })
                             .disabled(busy)
+                            .pointer(!busy)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.run_runtime_operation(RuntimeOperation::Install, cx);
                             })),
@@ -2376,6 +2423,7 @@ impl RuskerApp {
                             .icon(IconName::Play)
                             .label("启动")
                             .disabled(busy || !snapshot.installed || snapshot.engine_ready)
+                            .pointer(!(busy || !snapshot.installed || snapshot.engine_ready))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.run_runtime_operation(RuntimeOperation::Start, cx);
                             })),
@@ -2386,6 +2434,7 @@ impl RuskerApp {
                             .icon(IconName::Square)
                             .label("停止")
                             .disabled(busy || !snapshot.running)
+                            .pointer(!(busy || !snapshot.running))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.run_runtime_operation(RuntimeOperation::Stop, cx);
                             })),
@@ -2396,6 +2445,7 @@ impl RuskerApp {
                             .icon(IconName::RefreshCw)
                             .label("刷新状态")
                             .disabled(busy)
+                            .pointer(!busy)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.refresh_runtime_host(cx);
                             })),
@@ -2471,6 +2521,7 @@ impl RuskerApp {
                             .icon(IconName::Redo)
                             .label(if self.daemon_loading { "读取中…" } else { "重新读取" })
                             .disabled(!managed || self.daemon_loading || busy)
+                            .pointer(!(!managed || self.daemon_loading || busy))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.load_daemon_config(cx);
                                 cx.notify();
@@ -2516,6 +2567,19 @@ impl RuskerApp {
             })
             .children(snapshot.distributions.iter().map(|distribution| {
                 let name = distribution.name.clone();
+                let saved = self
+                    .settings
+                    .wsl
+                    .integrations
+                    .contains_key(&distribution.name);
+                let drafted = self
+                    .settings_draft
+                    .wsl
+                    .integrations
+                    .contains_key(&distribution.name);
+                let switch_disabled = busy
+                    || self.settings_store.is_none()
+                    || (!drafted && !saved && !snapshot.engine_ready);
                 let title = if distribution.is_default {
                     format!("{}（默认）", distribution.name)
                 } else {
@@ -2538,19 +2602,16 @@ impl RuskerApp {
                             "wsl-integration-{}",
                             distribution.name
                         )))
-                        .checked(distribution.integration_enabled)
-                        .disabled(
-                            busy
-                                || self.settings_store.is_none()
-                                || (!distribution.integration_enabled && !snapshot.engine_ready),
-                        )
+                        .checked(drafted)
+                        .disabled(switch_disabled)
+                        .pointer(!switch_disabled)
                         .on_change(cx.listener(move |this, enabled, _, cx| {
                             this.set_runtime_integration(name.clone(), *enabled, cx);
                         })),
                     )
             }))
             .child(muted(
-                "集成会立即生效，无需点击“应用”。资源节省模式下 WSL 发行版内的 docker 命令无法唤醒 Engine，请通过 Windows 端点或 Rusker 恢复。",
+                "点击“应用”后集成才会生效。资源节省模式下 WSL 发行版内的 docker 命令无法唤醒 Engine，请通过 Windows 端点或 Rusker 恢复。",
                 cx,
             ))
     }
@@ -2600,6 +2661,7 @@ impl RuskerApp {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .flex()
                     .child(
                         div()
@@ -2625,9 +2687,49 @@ impl RuskerApp {
                             .children(sections.iter().enumerate().map(|(index, section)| {
                                 self.settings_nav_item(index, *section, index == active, cx)
                             })),
-                    ),
+                    )
+                    .when(self.settings_applying, |this| {
+                        this.child(self.render_settings_applying(cx))
+                    }),
             )
             .child(self.render_settings_footer(cx))
+    }
+
+    /// Docker Desktop-style "Applying settings" veil over the settings
+    /// content; it also swallows clicks so nothing is edited mid-apply.
+    fn render_settings_applying(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("settings-applying")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(cx.theme().background.opacity(0.85))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(self.loading_ring(px(40.), Some(brand_color(cx))))
+            .child(
+                div()
+                    .text_base()
+                    .font_semibold()
+                    .text_color(cx.theme().foreground)
+                    .child("正在应用设置"),
+            )
+            .when_some(self.settings_notice.clone(), |this, notice| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(notice),
+                )
+            })
+            .with_animation(
+                "settings-applying-enter",
+                Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
+                |this, delta| this.opacity(delta),
+            )
     }
 
     /// The section whose heading is at the top of the scroll view, or the
@@ -2685,8 +2787,16 @@ impl RuskerApp {
 
     fn render_settings_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let dirty = self.settings_dirty(cx);
+        let applying = self.settings_applying;
         let (message, color) = if let Some(error) = self.settings_error.clone() {
             (error, cx.theme().danger)
+        } else if applying {
+            (
+                self.settings_notice
+                    .clone()
+                    .unwrap_or_else(|| "正在应用设置…".into()),
+                cx.theme().muted_foreground,
+            )
         } else if dirty {
             ("有未保存的更改".to_string(), cx.theme().warning)
         } else if let Some(notice) = self.settings_notice.clone() {
@@ -2718,7 +2828,8 @@ impl RuskerApp {
                 Button::new("discard-settings")
                     .outline()
                     .label("放弃更改")
-                    .disabled(!dirty)
+                    .disabled(!dirty || applying)
+                    .pointer(dirty && !applying)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.discard_settings(window, cx);
                     })),
@@ -2727,7 +2838,8 @@ impl RuskerApp {
                 Button::new("apply-settings")
                     .primary()
                     .label("应用")
-                    .disabled(!dirty || apply_blocked)
+                    .disabled(applying || !dirty || apply_blocked)
+                    .pointer(!applying && dirty && !apply_blocked)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.apply_settings(cx);
                     })),
@@ -2855,6 +2967,7 @@ impl RuskerApp {
                                     .outline()
                                     .label("浏览…")
                                     .disabled(busy)
+                                    .pointer(!busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.browse_disk_location(cx);
                                     })),
@@ -2906,6 +3019,7 @@ impl RuskerApp {
                         Switch::new("resource-saver-enabled")
                             .checked(enabled)
                             .disabled(!managed)
+                            .pointer(managed)
                             .on_change(cx.listener(|this, enabled, _, cx| {
                                 this.settings_draft.resource_saver.enabled = *enabled;
                                 this.settings_notice = None;
@@ -2967,7 +3081,8 @@ impl RuskerApp {
                                     .gap_2()
                                     .child(
                                         Slider::new(&self.saver_slider)
-                                            .disabled(!enabled || !managed),
+                                            .disabled(!enabled || !managed)
+                                            .pointer(enabled && managed),
                                     )
                                     .child(
                                         div()
@@ -3053,6 +3168,7 @@ impl RuskerApp {
                                 .icon(IconName::FileText)
                                 .label("导出 Engine JSON")
                                 .disabled(self.settings_store.is_none())
+                                .pointer(self.settings_store.is_some())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.export_proxy_settings(cx);
                                 })),
@@ -3136,6 +3252,7 @@ impl RuskerApp {
             .outline()
             .label(current.label())
             .dropdown_caret(true)
+            .pointer(true)
             .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
                 for &mode in options {
                     let weak = weak.clone();
@@ -3614,6 +3731,38 @@ pub fn apply_theme(preference: ThemePreference, cx: &mut App) {
 }
 
 /// The saved disk location, `None` for the default.
+/// Pointing-hand cursor for enabled controls; gpui-component buttons and
+/// switches otherwise show the arrow.
+trait PointerCursor: gpui_kit::Styled + Sized {
+    fn pointer(self, enabled: bool) -> Self {
+        if enabled {
+            self.cursor_pointer()
+        } else {
+            self
+        }
+    }
+}
+
+impl<T: gpui_kit::Styled> PointerCursor for T {}
+
+/// `(distribution, enabled)` changes needed to go from `saved` to `draft`.
+fn integration_changes(
+    saved: &std::collections::BTreeMap<String, bool>,
+    draft: &std::collections::BTreeMap<String, bool>,
+) -> Vec<(String, bool)> {
+    let enabled = |map: &std::collections::BTreeMap<String, bool>, name: &String| {
+        map.get(name).copied().unwrap_or(false)
+    };
+    saved
+        .keys()
+        .chain(draft.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|name| enabled(saved, name) != enabled(draft, name))
+        .map(|name| (name.clone(), enabled(draft, name)))
+        .collect()
+}
+
 fn disk_location_setting(settings: &AppSettings) -> Option<PathBuf> {
     let location = settings.vm.disk_image_location.trim();
     (!location.is_empty()).then(|| PathBuf::from(location))
