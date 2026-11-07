@@ -10,6 +10,7 @@ use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    rootfs_version();
     println!("cargo:rerun-if-changed=helpers/vm-proxy/src");
     println!("cargo:rerun-if-changed=helpers/vm-proxy/Cargo.toml");
     println!("cargo:rerun-if-changed=helpers/vm-proxy/Cargo.lock");
@@ -82,4 +83,19 @@ fn build_helper(out_dir: &std::path::Path, embedded: &std::path::Path) {
         .join("rusker-vm-proxy");
     fs::copy(&built, embedded)
         .unwrap_or_else(|error| panic!("无法复制 {}：{error}", built.display()));
+}
+
+/// Exposes the WSL2 system image version (`images/wsl-rootfs/VERSION`) as
+/// `RUSKER_ROOTFS_VERSION`. The Windows installer bundles the image built
+/// from the same tree, and the app checks the imported image carries it.
+fn rootfs_version() {
+    const VERSION: &str = "images/wsl-rootfs/VERSION";
+    println!("cargo:rerun-if-changed={VERSION}");
+    let version =
+        fs::read_to_string(VERSION).unwrap_or_else(|error| panic!("无法读取 {VERSION}：{error}"));
+    let version = version.trim();
+    if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_digit()) {
+        panic!("{VERSION} 必须是正整数，实际为“{version}”");
+    }
+    println!("cargo:rustc-env=RUSKER_ROOTFS_VERSION={version}");
 }

@@ -9,7 +9,7 @@ Windows 默认使用 Rusker 自己创建和管理的 WSL2 环境，不自动复�
 | Docker Desktop | Rusker | 说明 |
 | --- | --- | --- |
 | `com.docker.backend` | 应用内 `RuntimeHostService` | 持有 Engine 会话、named pipe 代理和安装/集成逻辑 |
-| `docker-desktop` 发行版 | `rusker` 发行版 | 运行 `dockerd`；系统盘只含 Ubuntu 与 Docker 软件 |
+| `docker-desktop` 发行版（`docker-desktop.iso`） | `rusker` 发行版（Rusker 系统镜像） | 运行 `dockerd`；系统盘是预装 Docker 与 NVIDIA 运行时的精简镜像，可整体替换 |
 | `docker_data.vhdx` | `docker-data.vhdx` | 独立数据磁盘，`wsl --mount --bare` 挂载到 `/var/lib/docker`、`/var/lib/containerd`，可单独移动 |
 | `\\.\pipe\docker_engine` | `\\.\pipe\rusker_engine` | Windows 侧 Docker API 端点 |
 | `http.docker.internal:3128` | `http://127.0.0.1:23128`（`rusker` 内） | Engine 拉取代理入口，连接转到 Windows 后再连上游代理 |
@@ -30,9 +30,9 @@ Windows                                   WSL2 utility VM
 
 设置页的“WSL2 运行环境”提供安装/修复、启动、停止和状态刷新：
 
-1. 下载固定版本的 Ubuntu 24.04 rootfs，并使用官方 SHA-256 校验。当前支持 `x86_64` 和 `aarch64`，安装源与校验值固定在代码中。
-2. 通过 `wsl.exe --import` 创建名为 `rusker` 的 WSL2 专用发行版。
-3. 在专用发行版内通过 Ubuntu 官方仓库安装 Docker Engine、Compose v2 与 Buildx，通过 NVIDIA 官方签名 APT 仓库安装固定版本的 NVIDIA Container Toolkit。
+1. 使用安装包自带的 **Rusker 系统镜像**（`<安装目录>\resources\wsl\rusker-rootfs-v<N>-amd64.tar.xz`，对应 Docker Desktop 的 `resources\docker-desktop.iso`），不联网下载；找不到时提示重新安装。镜像基于 Debian 12，预装官方 Docker Engine、Compose、Buildx 与 NVIDIA Container Toolkit，构建方式见 [WSL2 系统镜像](wsl2-rootfs.md)。
+2. 通过 `wsl.exe --import` 创建名为 `rusker` 的 WSL2 专用发行版，并校验镜像版本与组件。安装过程不在发行版内联网安装任何软件。
+3. **修复环境 / 升级**与 Docker Desktop 一样整体替换系统盘：先确认 Docker 数据已在数据磁盘上（旧版本会先迁移），保存 `/etc/docker/daemon.json`，然后注销旧系统盘、导入当前镜像，再恢复 `daemon.json`（缺少的 `nvidia` runtime 会从新镜像补上）。容器、镜像和卷保留；在 `rusker` 发行版里手动安装的软件不保留。镜像版本与应用要求不一致时，设置页会提示点击“修复环境”。
 4. 应用通过一个长期运行的 `wsl.exe` 会话在前台运行 `dockerd`，不依赖发行版内的 systemd。WSL2 会在最后一个会话结束约 10 秒后终止发行版，后台 `nohup` 进程无法保活，因此会话必须由应用持有。如果发行版中已有上一次留下的 `dockerd`，supervisor 会接管它，而不会再启动第二个。
 5. Engine **不监听 TCP 端口**。Windows 侧由应用内代理提供 `\\.\pipe\rusker_engine`，每个连接转发到发行版内的 `docker system dial-stdio`；该路径与 WSL 网络模式（NAT/mirrored）无关，并正确传递 `docker run -i`/`exec -i` 的 stdin EOF。只有 Engine 会话存活时代理才转发，不会因零散连接而唤醒发行版。
 6. **绑定挂载与 Docker Desktop 的 WSL2 后端一致，不需要配置文件共享**：WSL 自动把所有盘符挂到 `rusker` 发行版的 `/mnt/<盘符>`，因此任意 Windows 目录都能挂载。管道代理会改写 `containers/create` 请求中 `-v`（`HostConfig.Binds`）与 `--mount type=bind`（`HostConfig.Mounts`）的 Windows 源路径，例如 `docker run -v C:\Users\me\src:/src` 中的 `C:\Users\me\src`（或 `C:/Users/me/src`）会变为 `/mnt/c/Users/me/src`；命名卷、Linux 路径和 UNC 路径保持不变。attach/exec 等升级后的连接及其他请求原样转发。已集成的 WSL 发行版直连 socket，应直接使用 `/mnt/c/...` 形式。
@@ -43,7 +43,7 @@ Windows                                   WSL2 utility VM
 - 应用启动时，若受管环境已安装，会自动启动 Engine 并恢复已保存的发行版集成；设置了 `DOCKER_HOST` 时不自动启动。
 - “停止”先向 `dockerd` 发送 SIGTERM（容器按 Docker 的关闭超时停止），再终止 `rusker` 发行版。随后卸载 Docker 数据磁盘。容器和镜像保存在数据磁盘中，下次启动不会重建环境。
 - 退出应用（托盘“退出 Rusker”，或无托盘时关闭窗口）会以同样方式优雅停止本应用持有的 Engine 并终止 `rusker` 发行版，期间界面显示停止动画；Windows 侧 named pipe 也随之消失。应用异常退出时 `wsl.exe` 会话可能残留；下次启动会接管仍在运行的 `dockerd`。
-- “修复环境”会先优雅停止 Engine，再重跑安装脚本。
+- “修复环境”会先优雅停止 Engine，再用当前系统镜像替换系统盘（见上文第 3 步），数据磁盘不受影响。
 
 Windows 下的 `docker.exe` 可以这样使用受管 Engine：
 
@@ -55,13 +55,13 @@ docker context use rusker
 
 每个新连接都要启动一次 `wsl.exe`，因此单条 CLI 命令会多出约 0.3–0.8 秒；应用内的 Bollard 客户端会复用连接。同一 Windows 用户只能有一个 Rusker 实例持有该 named pipe，冲突时会在设置页显示警告。
 
-安装需要可用的 WSL2、Windows 自带 `curl.exe` 和互联网连接。WSL 功能本身的启用及 Windows 重启不由应用自动执行。
+安装环境需要可用的 WSL2，不需要网络：系统镜像随安装包分发。WSL 功能本身的启用及 Windows 重启不由应用自动执行。
 
 ### 所有权与数据保护
 
 - 专用发行版必须同时具有 Rusker 本地所有权记录和发行版内 `/etc/rusker-managed` 标记。
 - 如果检测到同名 `rusker` 发行版但没有所有权记录，所有管理操作都会停止，避免误接管或覆盖用户环境。
-- rootfs、系统盘（`distro/ext4.vhdx`）、数据磁盘记录（`data-disk.json`）和所有权记录位于应用数据目录的 `runtime-host` 下，数据磁盘默认位于 `runtime-host/disk`，可在设置中移动（见[设置文档](settings.md#磁盘镜像位置)）；开发/测试可用 `RUSKER_DATA_DIR` 覆盖数据根目录。
+- 保存中的 `daemon.json.preserved`、系统盘（`distro/ext4.vhdx`）、数据磁盘记录（`data-disk.json`）和所有权记录位于应用数据目录的 `runtime-host` 下，数据磁盘默认位于 `runtime-host/disk`，可在设置中移动（见[设置文档](settings.md#磁盘镜像位置)）；开发/测试可用 `RUSKER_DATA_DIR` 覆盖数据根目录。
 - 当前没有界面卸载功能。不要仅删除数据目录来卸载，否则会丢失所有权记录；也不要手动把其他发行版重命名为 `rusker`。
 
 ## 各发行版集成开关
@@ -95,7 +95,7 @@ docker context use rusker
 
 - NVIDIA GeForce/RTX GPU 和支持 WSL2 GPU-PV 的当前 Windows 驱动；
 - 最新 WSL2 内核；
-- 受管环境安装成功，NVIDIA Container Toolkit 已注册为 Docker runtime。
+- 受管环境安装成功（系统镜像已预装 NVIDIA Container Toolkit 并注册 `nvidia` runtime）。
 
 安装器不会安装 `nvidia-driver`、`cuda-drivers` 或 `nvidia-open`，这些 Linux 驱动可能破坏 Windows 驱动提供的 WSL 映射。
 
@@ -121,5 +121,5 @@ wsl.exe --distribution rusker --exec /usr/bin/docker run --rm --gpus all nvcr.io
 - 检查 GPU：`wsl.exe --distribution rusker --exec /usr/lib/wsl/lib/nvidia-smi`。
 - 检查 Docker runtime：`wsl.exe --distribution rusker --exec /usr/bin/docker info`。
 - 设置页提示“没有由本应用持有的 Engine 会话”：通常是上一次异常退出遗留的 `dockerd`，点击“启动”即可接管。
-- 安装中断后使用“修复环境”；不要通过导入其他 rootfs 覆盖现有虚拟磁盘。
+- 安装中断后使用“修复环境”；不要手动用 `wsl --import` 导入其他 rootfs 覆盖现有虚拟磁盘。
 - 当前不包含资源限制、自动更新、界面卸载、文件共享和防火墙管理。

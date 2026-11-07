@@ -5,8 +5,14 @@
 ; SOURCE_EXE/OUTFILE paths:
 ;   makensis /DVERSION=0.1.0 /DVERSION_NUMERIC=0.1.0.0 ^
 ;            /DSOURCE_EXE=%CD%\target\release\rusker-desktop.exe ^
+;            /DROOTFS=%CD%\dist\rootfs\rusker-rootfs-v1-amd64.tar.xz ^
 ;            /DOUTFILE=%CD%\dist\rusker-desktop-0.1.0-windows-x64-setup.exe ^
 ;            packaging\windows\installer.nsi
+;
+; ROOTFS is the WSL2 system image built from the same tree
+; (images/wsl-rootfs/build.sh, version in images/wsl-rootfs/VERSION). It is
+; installed to resources\wsl\, the only place the app imports it from, like
+; Docker Desktop's resources\docker-desktop.iso; it is never downloaded.
 ;
 ; Install modes:
 ;   - Current user (default): %LOCALAPPDATA%\Programs\Rusker Desktop, HKCU.
@@ -37,6 +43,9 @@ RequestExecutionLevel user
 !endif
 !ifndef OUTFILE
   !define OUTFILE "rusker-desktop-${VERSION}-windows-x64-setup.exe"
+!endif
+!ifndef ROOTFS
+  !error "ROOTFS must point at the WSL2 system image, e.g. /DROOTFS=%CD%\dist\rootfs\rusker-rootfs-v1-amd64.tar.xz"
 !endif
 
 !define APP_NAME "Rusker Desktop"
@@ -415,6 +424,11 @@ Section "Install"
   File "/oname=${APP_EXE}" "${SOURCE_EXE}"
   File "/oname=LICENSE.txt" "..\..\LICENSE"
   File "/oname=${APP_ICON}" "..\..\assets\icons\${APP_ICON}"
+  ; Only the image this version expects; drop those of older versions.
+  Delete "$INSTDIR\resources\wsl\rusker-rootfs-*.tar.xz"
+  SetOutPath "$INSTDIR\resources\wsl"
+  File "${ROOTFS}"
+  SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; SetShellVarContext (set by ApplyMode) points these at the current user's
@@ -449,6 +463,9 @@ Section "Uninstall"
   Delete "$INSTDIR\${APP_EXE}"
   Delete "$INSTDIR\LICENSE.txt"
   Delete "$INSTDIR\${APP_ICON}"
+  Delete "$INSTDIR\resources\wsl\rusker-rootfs-*.tar.xz"
+  RMDir "$INSTDIR\resources\wsl"
+  RMDir "$INSTDIR\resources"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 

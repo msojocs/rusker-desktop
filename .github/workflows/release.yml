@@ -60,9 +60,30 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Channel: $channel, version: $version"
 
+  rootfs:
+    name: WSL2 system image
+    # Built from images/wsl-rootfs and bundled into the Windows installer,
+    # like Docker Desktop ships docker-desktop.iso; the app never downloads it.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        env:
+          ARCHES: amd64
+          OUT: dist
+        run: sh images/wsl-rootfs/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rootfs
+          path: dist/rusker-rootfs-v*-amd64.tar.xz
+          if-no-files-found: error
+          # Already xz-compressed.
+          compression-level: 0
+
   windows:
     name: Windows installer
-    needs: meta
+    needs: [meta, rootfs]
     runs-on: windows-latest
     env:
       VERSION: ${{ needs.meta.outputs.version }}
@@ -79,6 +100,10 @@ jobs:
           shared-key: release
       - name: Build
         run: cargo build --release --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: rootfs
+          path: rootfs
       - name: Install NSIS
         shell: pwsh
         run: |
@@ -95,9 +120,12 @@ jobs:
           $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
           New-Item -ItemType Directory -Force $dist | Out-Null
           $exe = Join-Path $env:GITHUB_WORKSPACE 'target\release\rusker-desktop.exe'
+          $version = (Get-Content images\wsl-rootfs\VERSION -Raw).Trim()
+          $rootfs = Join-Path $env:GITHUB_WORKSPACE "rootfs\rusker-rootfs-v$version-amd64.tar.xz"
+          if (-not (Test-Path $rootfs)) { throw "WSL2 system image $rootfs not found" }
           $out = Join-Path $dist "rusker-desktop-$env:VERSION-windows-x64-setup.exe"
           makensis /V3 "/DVERSION=$env:VERSION" "/DVERSION_NUMERIC=$env:VERSION_NUMERIC" `
-            "/DSOURCE_EXE=$exe" "/DOUTFILE=$out" packaging\windows\installer.nsi
+            "/DSOURCE_EXE=$exe" "/DROOTFS=$rootfs" "/DOUTFILE=$out" packaging\windows\installer.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:

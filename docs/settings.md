@@ -12,7 +12,7 @@
 
 ### 磁盘镜像位置
 
-Docker 数据磁盘 `docker-data.vhdx` 所在目录，存放镜像、容器和卷，与 Docker Desktop 的 `docker_data.vhdx` 相同。`rusker` 发行版自身的系统盘（`ext4.vhdx`）只包含 Ubuntu 与 Docker 软件，固定位于应用数据目录。
+Docker 数据磁盘 `docker-data.vhdx` 所在目录，存放镜像、容器和卷，与 Docker Desktop 的 `docker_data.vhdx` 相同。`rusker` 发行版自身的系统盘（`ext4.vhdx`）由 Rusker 系统镜像导入（见 [WSL2 系统镜像](wsl2-rootfs.md)），只包含 Docker 与 NVIDIA 运行时，固定位于应用数据目录；升级或修复时整体替换。
 
 - 数据磁盘在首次启动 Engine 时创建（动态扩展，上限 1 TiB），位置与磁盘 ID 记录在 `runtime-host/data-disk.json`。
 - 每次启动 Engine 时，Rusker 用 `wsl --mount --vhd <文件> --bare` 把数据磁盘挂到 WSL2 虚拟机，在 `rusker` 内按磁盘 WWID 找到设备，首次使用时格式化为 ext4，再绑定挂载到 `/var/lib/docker` 和 `/var/lib/containerd`。旧版本保存在系统盘上的数据会在首次挂载时自动迁移。

@@ -106,7 +106,7 @@ Windows 版参照 Docker Desktop 的 WSL2 后端：`RuntimeHostService` 相当�
 
 ## 可测试性
 
-纯函数测试覆盖格式化、过滤、日志截断、revision 判定，以及 WSL 列表 UTF-16 解码、rootfs 校验、受管脚本约束（不监听 TCP、不安装 Linux 显卡驱动、只移除带标记的集成文件）。Docker 与 WSL2 实机测试作为独立、默认禁用的测试目标存在（见开发文档）。UI 后续使用 GPUI test window 验证选择、确认框和异步状态；原生渲染、键盘导航与可访问性仍需 Windows/Linux/macOS 实机检查。
+纯函数测试覆盖格式化、过滤、日志截断、revision 判定，以及 WSL 列表 UTF-16 解码、系统镜像校验与 daemon.json 恢复、受管脚本约束（不监听 TCP、不安装 Linux 显卡驱动、只移除带标记的集成文件）。Docker 与 WSL2 实机测试作为独立、默认禁用的测试目标存在（见开发文档）。UI 后续使用 GPUI test window 验证选择、确认框和异步状态；原生渲染、键盘导航与可访问性仍需 Windows/Linux/macOS 实机检查。
 
 ## 后续演进
 

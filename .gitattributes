@@ -1,0 +1,2 @@
+# Built into the Linux system image; must keep LF line endings on Windows.
+images/wsl-rootfs/** text eol=lf

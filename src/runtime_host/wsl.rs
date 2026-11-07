@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
     path::{Path, PathBuf},
     process::{Output, Stdio},
     sync::{
@@ -13,7 +12,6 @@ use std::{
 
 use directories::ProjectDirs;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use tokio::{
     io::AsyncWriteExt,
     process::{Child, Command},
@@ -41,30 +39,51 @@ pub const MANAGED_DOCKER_HOST: &str = "npipe:////./pipe/rusker_engine";
 pub const WSL_DOCKER_HOST: &str = "unix:///mnt/wsl/rusker/docker.sock";
 const MANAGED_MARKER: &str = "/etc/rusker-managed";
 const MANAGED_RECEIPT: &str = "rusker-wsl2-v1\n";
-const NVIDIA_TOOLKIT_VERSION: &str = "1.20.1-1";
+/// Version of the Rusker system image (`images/wsl-rootfs/VERSION`, via
+/// build.rs) this build expects, as recorded in the image's
+/// `/etc/rusker-image`.
+const ROOTFS_IMAGE: &str = concat!("rusker-rootfs-v", env!("RUSKER_ROOTFS_VERSION"));
+/// Where the Windows installer puts the system image, relative to the exe,
+/// like Docker Desktop's `resources\docker-desktop.iso`.
+const BUNDLED_ROOTFS_DIR: &str = "resources/wsl";
 pub(super) const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 const READY_TIMEOUT: Duration = Duration::from_secs(90);
 const DOCKERD_STOP_TIMEOUT: Duration = Duration::from_secs(45);
 
-const SETUP_SCRIPT: &str = r#"set -eu
-export DEBIAN_FRONTEND=noninteractive
-printf 'rusker-wsl2-v1\n' > /etc/rusker-managed
-printf 'rusker\n' > /etc/hostname
-printf '[boot]\nsystemd=false\n\n[network]\nhostname = rusker\n' > /etc/wsl.conf
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg docker.io docker-compose-v2 docker-buildx
-install -m 0755 -d /usr/share/keyrings
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list -o /tmp/rusker-nvidia-container-toolkit.list
-sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' /tmp/rusker-nvidia-container-toolkit.list > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-rm -f /tmp/rusker-nvidia-container-toolkit.list
-apt-get update
-apt-get install -y --no-install-recommends nvidia-container-toolkit=$NVIDIA_CONTAINER_TOOLKIT_VERSION nvidia-container-toolkit-base=$NVIDIA_CONTAINER_TOOLKIT_VERSION libnvidia-container-tools=$NVIDIA_CONTAINER_TOOLKIT_VERSION libnvidia-container1=$NVIDIA_CONTAINER_TOOLKIT_VERSION
-mkdir -p /etc/docker
-nvidia-ctk runtime configure --runtime=docker
+/// Checks a freshly imported system image. Everything (Docker Engine,
+/// Compose/Buildx, NVIDIA Container Toolkit, `wsl.conf`, the ownership
+/// marker) is baked into the image, so installing needs no network inside
+/// the distribution. `$1` is the expected image version.
+const VERIFY_IMAGE_SCRIPT: &str = r#"set -eu
+if ! grep -qx "RUSKER_IMAGE=$1" /etc/rusker-image 2>/dev/null; then
+    echo "专用发行版不是 Rusker 系统镜像 $1" >&2
+    exit 1
+fi
+for file in /usr/bin/dockerd /usr/bin/docker /usr/bin/containerd /usr/bin/runc \
+    /usr/bin/nvidia-ctk /usr/bin/nvidia-container-runtime; do
+    if [ ! -x "$file" ]; then
+        echo "系统镜像缺少 $file" >&2
+        exit 1
+    fi
+done
+grep -q '"nvidia"' /etc/docker/daemon.json
+"#;
+
+/// Prints the system image version of the managed distribution; empty for
+/// an install from before the Rusker image (plain Ubuntu plus apt).
+const IMAGE_VERSION_SCRIPT: &str =
+    "sed -n 's/^RUSKER_IMAGE=//p' /etc/rusker-image 2>/dev/null || true";
+
+/// Before the system disk is replaced: succeeds only when Docker's state is
+/// on the data disk (mounted and migrated), so nothing on the old system
+/// disk is lost.
+const DATA_ON_DATA_DISK_SCRIPT: &str = r#"set -eu
+for name in docker containerd; do
+    mountpoint -q "/var/lib/$name"
+    [ -e "/mnt/rusker-data/.migrated-$name" ]
+done
 "#;
 
 /// Long-lived supervisor, run through a `wsl.exe` session that the backend
@@ -924,6 +943,16 @@ impl WslHost {
                 "专用发行版正在运行，但没有由本应用持有的 Engine 会话；点击“启动”接管".into()
             });
         }
+        // Only asked while running: any `wsl.exe -d` would boot the VM.
+        if installed && running {
+            if let Some(version) = image_version().await.filter(|v| v != ROOTFS_IMAGE) {
+                warnings.push(if version.is_empty() {
+                    format!("专用发行版仍是旧的 Ubuntu 运行环境；点击“修复环境”换用 Rusker 系统镜像 {ROOTFS_IMAGE}（容器、镜像和卷保留在数据磁盘中）")
+                } else {
+                    format!("专用发行版的系统镜像为 {version}，当前版本需要 {ROOTFS_IMAGE}；点击“修复环境”升级（容器、镜像和卷保留在数据磁盘中）")
+                });
+            }
+        }
         let distributions = distros
             .into_iter()
             .filter(|distribution| {
@@ -962,6 +991,10 @@ impl WslHost {
         })
     }
 
+    /// Installs, repairs or upgrades the managed environment, like Docker
+    /// Desktop: the system disk is always (re)created from the pinned Rusker
+    /// system image, while containers, images and volumes stay on the data
+    /// disk and the user's `daemon.json` is carried over.
     pub async fn install(&self) -> Result<(), RuntimeHostError> {
         ensure_windows()?;
         let exists = list_distributions()
@@ -970,46 +1003,139 @@ impl WslHost {
             .any(|distribution| distribution.name == MANAGED_DISTRO_NAME);
         if exists {
             self.ensure_owned().await?;
-            // Repair upgrades packages; never do that under a live daemon.
-            self.stop_engine().await;
-        } else {
-            let rootfs = self.ensure_rootfs().await?;
-            let install_dir = self.distro_location();
-            prepare_empty_directory(&install_dir)?;
-            let mut command = wsl_command();
-            command
-                .arg("--import")
-                .arg(MANAGED_DISTRO_NAME)
-                .arg(&install_dir)
-                .arg(&rootfs)
-                .args(["--version", "2"]);
-            if let Err(error) = execute(command, "导入 Rusker WSL2 发行版", INSTALL_TIMEOUT).await
-            {
-                let _ = fs::remove_dir_all(&install_dir);
-                return Err(error);
-            }
-            if let Err(error) = self.write_receipt() {
-                let mut unregister = wsl_command();
-                unregister.args(["--unregister", MANAGED_DISTRO_NAME]);
-                let _ = execute(unregister, "回滚未登记的发行版", COMMAND_TIMEOUT).await;
-                return Err(error);
-            }
+        }
+        // Find the bundled image before touching the existing environment.
+        let rootfs = self.bundled_rootfs()?;
+        if exists {
+            self.retire_system_disk().await?;
         }
 
-        let setup_script = rendered_setup_script();
-        let mut setup = managed_command("root");
-        setup.arg("/bin/sh").arg("-c").arg(setup_script);
-        execute(
-            setup,
-            "安装 Docker 与 NVIDIA Container Toolkit",
-            INSTALL_TIMEOUT,
-        )
-        .await?;
+        let install_dir = self.distro_location();
+        prepare_empty_directory(&install_dir)?;
+        let mut command = wsl_command();
+        command
+            .arg("--import")
+            .arg(MANAGED_DISTRO_NAME)
+            .arg(&install_dir)
+            .arg(&rootfs)
+            .args(["--version", "2"]);
+        if let Err(error) = execute(command, "导入 Rusker WSL2 发行版", INSTALL_TIMEOUT).await
+        {
+            let _ = fs::remove_dir_all(&install_dir);
+            return Err(error);
+        }
+        if let Err(error) = self.write_receipt() {
+            let mut unregister = wsl_command();
+            unregister.args(["--unregister", MANAGED_DISTRO_NAME]);
+            let _ = execute(unregister, "回滚未登记的发行版", COMMAND_TIMEOUT).await;
+            return Err(error);
+        }
+
+        let mut verify = managed_command("root");
+        verify
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(VERIFY_IMAGE_SCRIPT)
+            .arg("rusker-verify")
+            .arg(ROOTFS_IMAGE);
+        execute(verify, "校验 Rusker 系统镜像", COMMAND_TIMEOUT).await?;
         self.ensure_owned().await?;
+        let restore_problem = self.restore_daemon_config().await?;
         let mut terminate = wsl_command();
         terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
         execute(terminate, "应用专用发行版配置", COMMAND_TIMEOUT).await?;
-        self.start_engine().await
+        self.start_engine().await?;
+        match restore_problem {
+            Some(message) => Err(RuntimeHostError::State(message)),
+            None => Ok(()),
+        }
+    }
+
+    /// Unregisters the current system disk after making sure Docker's state
+    /// is on the data disk and saving `daemon.json` next to the receipt.
+    async fn retire_system_disk(&self) -> Result<(), RuntimeHostError> {
+        self.engine_wanted.store(false, Ordering::Relaxed);
+        self.saver.set_active(false);
+        self.stop_engine().await;
+        // Also migrates an older install that still kept /var/lib/docker on
+        // the system disk.
+        self.attach_data_disk().await?;
+        let mut check = managed_command("root");
+        check.arg("/bin/sh").arg("-c").arg(DATA_ON_DATA_DISK_SCRIPT);
+        execute(check, "确认 Docker 数据位于数据磁盘", COMMAND_TIMEOUT)
+            .await
+            .map_err(|error| {
+                RuntimeHostError::State(format!(
+                    "Docker 数据尚未迁移到数据磁盘，为避免丢失数据，已停止替换系统盘：{error}"
+                ))
+            })?;
+        let config = self.read_daemon_json().await?;
+        // A file still pending from an interrupted install is the user's
+        // config; the current one may already be the image default.
+        let preserved = self.preserved_config_path();
+        if !config.trim().is_empty() && !preserved.exists() {
+            fs::write(&preserved, config).map_err(|source| RuntimeHostError::Io {
+                action: "保存 daemon.json",
+                source,
+            })?;
+        }
+        let mut terminate = wsl_command();
+        terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
+        execute(terminate, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await?;
+        self.detach_data_disk().await;
+        let mut unregister = wsl_command();
+        unregister.args(["--unregister", MANAGED_DISTRO_NAME]);
+        execute(unregister, "移除旧系统盘", INSTALL_TIMEOUT).await?;
+        Ok(())
+    }
+
+    /// Puts back the `daemon.json` saved by [`Self::retire_system_disk`],
+    /// keeping the image's runtimes (the NVIDIA runtime) when the saved file
+    /// lacks them. A file the new dockerd rejects is set aside instead of
+    /// blocking the install; the message describing that is returned.
+    async fn restore_daemon_config(&self) -> Result<Option<String>, RuntimeHostError> {
+        let path = self.preserved_config_path();
+        let Ok(saved) = fs::read_to_string(&path) else {
+            return Ok(None);
+        };
+        let image = self.read_daemon_json().await?;
+        let result = match restored_daemon_config(&saved, &image) {
+            Ok(merged) => {
+                let mut write = managed_command("root");
+                write
+                    .arg("/bin/sh")
+                    .arg("-c")
+                    .arg(VALIDATE_AND_WRITE_DAEMON_JSON_SCRIPT);
+                execute_with_input(
+                    write,
+                    merged.as_bytes(),
+                    "恢复 daemon.json",
+                    COMMAND_TIMEOUT,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            }
+            Err(message) => Err(message),
+        };
+        match result {
+            Ok(()) => {
+                let _ = fs::remove_file(&path);
+                Ok(None)
+            }
+            Err(message) => {
+                let rejected = self.root.join("daemon.json.rejected");
+                let _ = fs::rename(&path, &rejected);
+                Ok(Some(format!(
+                    "环境已安装，但原 daemon.json 无法用于新版 dockerd，已改用默认配置；原文件保存在 {}：{message}",
+                    rejected.display()
+                )))
+            }
+        }
+    }
+
+    fn preserved_config_path(&self) -> PathBuf {
+        self.root.join("daemon.json.preserved")
     }
 
     pub async fn start(&self) -> Result<(), RuntimeHostError> {
@@ -1287,61 +1413,29 @@ impl WslHost {
         })
     }
 
-    async fn ensure_rootfs(&self) -> Result<PathBuf, RuntimeHostError> {
-        let spec = rootfs_spec(std::env::consts::ARCH)?;
-        let directory = self.root.join("rootfs");
-        fs::create_dir_all(&directory).map_err(|source| RuntimeHostError::Io {
-            action: "创建 rootfs 下载目录",
+    /// The system image the Windows installer put next to the executable.
+    /// It is never downloaded: without it the installation is incomplete.
+    fn bundled_rootfs(&self) -> Result<PathBuf, RuntimeHostError> {
+        // Older versions downloaded an Ubuntu cloud image into this cache.
+        let _ = fs::remove_dir_all(self.root.join("rootfs"));
+        let filename = rootfs_filename(std::env::consts::ARCH)?;
+        let exe = std::env::current_exe().map_err(|source| RuntimeHostError::Io {
+            action: "定位应用程序目录",
             source,
         })?;
-        let destination = directory.join(spec.filename);
-        if destination.exists() {
-            if sha256_file(&destination)? == spec.sha256 {
-                return Ok(destination);
-            }
-            fs::remove_file(&destination).map_err(|source| RuntimeHostError::Io {
-                action: "移除校验失败的旧 rootfs",
-                source,
-            })?;
+        let path = exe
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(BUNDLED_ROOTFS_DIR)
+            .join(filename);
+        if path.is_file() {
+            Ok(path)
+        } else {
+            Err(RuntimeHostError::State(format!(
+                "找不到 WSL2 系统镜像 {}；请重新安装 Rusker Desktop",
+                path.display()
+            )))
         }
-
-        let temporary = directory.join(format!("{}.{}.partial", spec.filename, std::process::id()));
-        let mut curl = Command::new("curl.exe");
-        curl.kill_on_drop(true);
-        #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            curl.creation_flags(CREATE_NO_WINDOW);
-        }
-        curl.args([
-            "--fail",
-            "--location",
-            "--retry",
-            "3",
-            "--proto",
-            "=https",
-            "--tlsv1.2",
-            "--output",
-        ])
-        .arg(&temporary)
-        .arg(spec.url);
-        if let Err(error) = execute(curl, "下载 Ubuntu WSL2 rootfs", DOWNLOAD_TIMEOUT).await {
-            let _ = fs::remove_file(&temporary);
-            return Err(error);
-        }
-        let checksum = sha256_file(&temporary)?;
-        if checksum != spec.sha256 {
-            let _ = fs::remove_file(&temporary);
-            return Err(RuntimeHostError::State(format!(
-                "Ubuntu rootfs SHA-256 校验失败：期望 {}，实际 {checksum}",
-                spec.sha256
-            )));
-        }
-        fs::rename(&temporary, &destination).map_err(|source| RuntimeHostError::Io {
-            action: "保存已校验的 rootfs",
-            source,
-        })?;
-        Ok(destination)
     }
 }
 
@@ -1772,8 +1866,15 @@ async fn probe_gpu() -> NvidiaGpuStatus {
     }
 }
 
-fn rendered_setup_script() -> String {
-    SETUP_SCRIPT.replace("$NVIDIA_CONTAINER_TOOLKIT_VERSION", NVIDIA_TOOLKIT_VERSION)
+/// The managed distribution's system image version (empty for an install
+/// from before the Rusker image), or None when it cannot be asked.
+async fn image_version() -> Option<String> {
+    let mut command = managed_command("root");
+    command.arg("/bin/sh").arg("-c").arg(IMAGE_VERSION_SCRIPT);
+    execute(command, "读取系统镜像版本", COMMAND_TIMEOUT)
+        .await
+        .ok()
+        .map(|output| decode(&output.stdout).trim().to_string())
 }
 
 /// The supervisor with the data disk mount script inlined; `$1` is the WWID.
@@ -1805,50 +1906,47 @@ fn prepare_empty_directory(path: &Path) -> Result<(), RuntimeHostError> {
     })
 }
 
-fn sha256_file(path: &Path) -> Result<String, RuntimeHostError> {
-    let mut file = fs::File::open(path).map_err(|source| RuntimeHostError::Io {
-        action: "打开 rootfs 进行校验",
-        source,
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|source| RuntimeHostError::Io {
-                action: "读取 rootfs 进行校验",
-                source,
-            })?;
-        if read == 0 {
-            break;
+/// File name of the system image for the WSL2 VM's architecture (the
+/// host's), as built by `images/wsl-rootfs/build.sh`.
+fn rootfs_filename(architecture: &str) -> Result<String, RuntimeHostError> {
+    let arch = match architecture {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => {
+            return Err(RuntimeHostError::State(format!(
+                "暂不支持 {other} 架构的 Rusker 系统镜像"
+            )))
         }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    };
+    Ok(format!("{ROOTFS_IMAGE}-{arch}.tar.xz"))
 }
 
-struct RootfsSpec {
-    filename: &'static str,
-    url: &'static str,
-    sha256: &'static str,
-}
-
-fn rootfs_spec(architecture: &str) -> Result<RootfsSpec, RuntimeHostError> {
-    match architecture {
-        "x86_64" => Ok(RootfsSpec {
-            filename: "ubuntu-24.04-server-cloudimg-amd64-root.tar.xz",
-            url: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64-root.tar.xz",
-            sha256: "ec6972af8ea2bd05c55299d204e5ae3f91769b84cfaec7395639d236a39f9a03",
-        }),
-        "aarch64" => Ok(RootfsSpec {
-            filename: "ubuntu-24.04-server-cloudimg-arm64-root.tar.xz",
-            url: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64-root.tar.xz",
-            sha256: "b68ef0444ca56ce4f00ae7e8ccfb0c553ffbc92e4a1b14ed7dd8aa18c6d68652",
-        }),
-        other => Err(RuntimeHostError::State(format!(
-            "暂不支持 {other} 架构的 Rusker WSL2 rootfs"
-        ))),
+/// `daemon.json` to restore after replacing the system disk: the saved
+/// file, plus any runtime from the new image's file (the NVIDIA runtime)
+/// that the saved one lacks.
+fn restored_daemon_config(saved: &str, image: &str) -> Result<String, String> {
+    let Value::Object(mut saved) =
+        serde_json::from_str::<Value>(saved).map_err(|error| error.to_string())?
+    else {
+        return Err("daemon.json 必须是 JSON 对象".into());
+    };
+    if let Ok(Value::Object(image)) = serde_json::from_str::<Value>(image) {
+        if let Some(Value::Object(image_runtimes)) = image.get("runtimes") {
+            let runtimes = saved
+                .entry("runtimes")
+                .or_insert_with(|| Value::Object(Map::new()));
+            if let Value::Object(runtimes) = runtimes {
+                for (name, runtime) in image_runtimes {
+                    runtimes
+                        .entry(name.clone())
+                        .or_insert_with(|| runtime.clone());
+                }
+            }
+        }
     }
+    serde_json::to_string_pretty(&Value::Object(saved))
+        .map(|text| format!("{text}\n"))
+        .map_err(|error| error.to_string())
 }
 
 fn ensure_windows() -> Result<(), RuntimeHostError> {
@@ -1936,52 +2034,84 @@ mod tests {
         assert_eq!(distros[1].version, 1);
     }
 
-    #[test]
-    fn pins_rootfs_urls_and_official_checksums() {
-        for architecture in ["x86_64", "aarch64"] {
-            let spec = rootfs_spec(architecture).expect("支持的架构");
-            assert!(spec.url.starts_with("https://cloud-images.ubuntu.com/"));
-            assert!(spec.url.ends_with(spec.filename));
-            assert_eq!(spec.sha256.len(), 64);
-            assert!(spec
-                .sha256
-                .chars()
-                .all(|character| character.is_ascii_hexdigit()));
-        }
-        assert!(rootfs_spec("unsupported").is_err());
-    }
+    const INSTALL_SH: &str = include_str!("../../images/wsl-rootfs/install.sh");
 
     #[test]
-    fn renders_pinned_nvidia_toolkit_version_into_wsl_script() {
-        let script = rendered_setup_script();
-        assert!(!script.contains("$NVIDIA_CONTAINER_TOOLKIT_VERSION"));
-        assert!(script.contains(&format!(
-            "nvidia-container-toolkit={NVIDIA_TOOLKIT_VERSION}"
-        )));
-        assert!(
-            script.contains("signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg")
-        );
-    }
-
-    #[test]
-    fn verifies_file_sha256() {
-        let directory = tempfile::tempdir().expect("临时目录");
-        let path = directory.path().join("rootfs");
-        fs::write(&path, b"abc").expect("测试文件");
+    fn names_the_bundled_system_image_per_architecture() {
         assert_eq!(
-            sha256_file(&path).expect("SHA-256"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            ROOTFS_IMAGE,
+            format!(
+                "rusker-rootfs-v{}",
+                include_str!("../../images/wsl-rootfs/VERSION").trim()
+            )
         );
+        for (architecture, arch) in [("x86_64", "amd64"), ("aarch64", "arm64")] {
+            assert_eq!(
+                rootfs_filename(architecture).expect("支持的架构"),
+                format!("{ROOTFS_IMAGE}-{arch}.tar.xz")
+            );
+        }
+        assert!(rootfs_filename("unsupported").is_err());
+        // The installer puts the image where the app looks for it.
+        let installer = include_str!("../../packaging/windows/installer.nsi");
+        assert!(installer.contains(&format!(
+            "$INSTDIR\\{}",
+            BUNDLED_ROOTFS_DIR.replace('/', "\\")
+        )));
     }
 
     #[test]
-    fn managed_scripts_do_not_install_a_linux_display_driver() {
-        assert!(SETUP_SCRIPT.contains("nvidia-container-toolkit"));
-        assert!(SETUP_SCRIPT.contains("nvidia-ctk runtime configure --runtime=docker"));
-        for forbidden in ["cuda-drivers", "nvidia-open", "nvidia-driver"] {
-            assert!(!SETUP_SCRIPT.contains(forbidden));
+    fn image_build_matches_expected_version_and_marker() {
+        let dockerfile = include_str!("../../images/wsl-rootfs/Dockerfile");
+        let build = include_str!("../../images/wsl-rootfs/build.sh");
+        assert!(INSTALL_SH.contains("RUSKER_IMAGE=rusker-rootfs-v$IMAGE_VERSION"));
+        assert!(build.contains("rusker-rootfs-v${IMAGE_VERSION}-${arch}.tar.xz"));
+        assert!(dockerfile.contains("IMAGE_VERSION:?"));
+        assert!(VERIFY_IMAGE_SCRIPT.contains("RUSKER_IMAGE=$1"));
+        // The baked marker must match the receipt, or ensure_owned refuses
+        // the freshly imported distribution.
+        let marker = format!(
+            "printf '{}' > {MANAGED_MARKER}",
+            MANAGED_RECEIPT.replace('\n', "\\n")
+        );
+        assert!(INSTALL_SH.contains(&marker), "{marker}");
+    }
+
+    #[test]
+    fn restores_saved_daemon_config_and_keeps_image_runtimes() {
+        let saved = r#"{"debug":true,"runtimes":{"custom":{"path":"crun"}}}"#;
+        let image = r#"{"runtimes":{"nvidia":{"args":[],"path":"nvidia-container-runtime"}}}"#;
+        let merged: Value =
+            serde_json::from_str(&restored_daemon_config(saved, image).expect("合并"))
+                .expect("JSON");
+        assert_eq!(merged["debug"], true);
+        assert_eq!(merged["runtimes"]["custom"]["path"], "crun");
+        assert_eq!(
+            merged["runtimes"]["nvidia"]["path"],
+            "nvidia-container-runtime"
+        );
+        assert!(restored_daemon_config("[]", image).is_err());
+    }
+
+    #[test]
+    fn system_image_does_not_install_a_linux_display_driver() {
+        assert!(INSTALL_SH.contains("\"nvidia-container-toolkit=$NVIDIA_TOOLKIT_VERSION\""));
+        assert!(INSTALL_SH.contains("nvidia-ctk runtime configure --runtime=docker"));
+        for forbidden in [
+            "cuda-drivers",
+            "nvidia-open",
+            "nvidia-driver",
+            "nvidia-kernel",
+        ] {
+            assert!(!INSTALL_SH.contains(forbidden));
         }
-        assert!(SETUP_SCRIPT.contains("docker-compose-v2"));
+        for package in [
+            "docker-compose-plugin",
+            "docker-buildx-plugin",
+            "containerd.io",
+        ] {
+            assert!(INSTALL_SH.contains(package));
+        }
     }
 
     #[test]
