@@ -51,10 +51,11 @@ async fn operates_only_on_dedicated_test_resources() {
             command: "sh -c \"echo rusker-engine-ok; sleep 120\"".into(),
             ports: format!("{host_port}:80"),
             nvidia_gpu: false,
+            ..ContainerDraft::default()
         }
         .parse()
         .map_err(|error| error.to_string())?;
-        let snapshot = service
+        let (created_id, snapshot) = service
             .create_container(request)
             .await
             .map_err(|error| error.to_string())?
@@ -64,6 +65,7 @@ async fn operates_only_on_dedicated_test_resources() {
             .iter()
             .find(|container| container.name == name)
             .expect("创建后快照应包含专用容器");
+        assert_eq!(created.id, created_id);
         assert!(created.is_running());
         assert!(created.ports.iter().any(|port| {
             port.host_ip.as_deref() == Some("127.0.0.1")

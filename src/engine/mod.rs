@@ -65,14 +65,15 @@ impl EngineService {
         })
     }
 
+    /// Creates and starts the container; returns its ID with a fresh snapshot.
     pub fn create_container(
         &self,
         request: CreateContainerRequest,
-    ) -> JoinHandle<Result<EngineSnapshot, EngineError>> {
+    ) -> JoinHandle<Result<(String, EngineSnapshot), EngineError>> {
         self.spawn(async move {
             let engine = docker::DockerEngine::connect().await?;
-            engine.create_and_run(request).await?;
-            engine.snapshot().await
+            let id = engine.create_and_run(request).await?;
+            Ok((id, engine.snapshot().await?))
         })
     }
 
@@ -100,6 +101,19 @@ impl EngineService {
             let engine = docker::DockerEngine::connect().await?;
             engine.remove_image(&id).await?;
             engine.snapshot().await
+        })
+    }
+
+    /// Removes each reference (`repo:tag` or ID) independently and returns
+    /// the fresh snapshot with one error message per failed reference.
+    pub fn remove_images(
+        &self,
+        references: Vec<String>,
+    ) -> JoinHandle<Result<(EngineSnapshot, Vec<String>), EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            let failures = engine.remove_images(&references).await;
+            Ok((engine.snapshot().await?, failures))
         })
     }
 

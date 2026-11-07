@@ -9,6 +9,11 @@ pub struct ContainerDraft {
     pub command: String,
     pub ports: String,
     pub nvidia_gpu: bool,
+    /// `(host path or volume name, container path)` rows; blank rows are ignored.
+    pub mounts: Vec<(String, String)>,
+    /// `(variable, value)` rows; rows without a variable name are ignored
+    /// unless they carry a value.
+    pub env: Vec<(String, String)>,
 }
 
 impl ContainerDraft {
@@ -21,11 +26,73 @@ impl ContainerDraft {
             command,
             ports: parse_ports(&self.ports)?,
             nvidia_gpu: self.nvidia_gpu,
-            env: Vec::new(),
+            env: parse_env(&self.env)?,
+            binds: parse_mounts(&self.mounts)?,
         };
         request.validate()?;
         Ok(request)
     }
+}
+
+/// Adds `defaults` (`NAME=value`) for every variable `env` does not set.
+pub fn merge_env(env: &mut Vec<String>, defaults: Vec<String>) {
+    let keys: HashSet<String> = env
+        .iter()
+        .map(|entry| entry.split('=').next().unwrap_or_default().to_string())
+        .collect();
+    let mut merged: Vec<String> = defaults
+        .into_iter()
+        .filter(|entry| !keys.contains(entry.split('=').next().unwrap_or_default()))
+        .collect();
+    merged.append(env);
+    *env = merged;
+}
+
+fn parse_env(rows: &[(String, String)]) -> Result<Vec<String>, String> {
+    let mut seen = HashSet::new();
+    let mut env = Vec::new();
+    for (name, value) in rows {
+        let name = name.trim();
+        if name.is_empty() {
+            if value.trim().is_empty() {
+                continue;
+            }
+            return Err(format!("环境变量值“{value}”缺少变量名"));
+        }
+        if name.contains('=') || name.chars().any(char::is_whitespace) {
+            return Err(format!("环境变量名“{name}”不能包含等号或空白字符"));
+        }
+        if !seen.insert(name.to_string()) {
+            return Err(format!("环境变量 {name} 重复"));
+        }
+        env.push(format!("{name}={value}"));
+    }
+    Ok(env)
+}
+
+fn parse_mounts(rows: &[(String, String)]) -> Result<Vec<String>, String> {
+    let mut targets = HashSet::new();
+    let mut binds = Vec::new();
+    for (source, target) in rows {
+        let (source, target) = (source.trim(), target.trim());
+        match (source.is_empty(), target.is_empty()) {
+            (true, true) => continue,
+            (true, false) => return Err(format!("挂载到 {target} 的宿主机路径不能为空")),
+            (false, true) => return Err(format!("宿主机路径 {source} 缺少容器路径")),
+            _ => {}
+        }
+        if !target.starts_with('/') {
+            return Err(format!("容器路径“{target}”必须是以 / 开头的绝对路径"));
+        }
+        if target.contains(':') {
+            return Err(format!("容器路径“{target}”不能包含冒号"));
+        }
+        if !targets.insert(target.to_string()) {
+            return Err(format!("容器路径 {target} 被重复挂载"));
+        }
+        binds.push(format!("{source}:{target}"));
+    }
+    Ok(binds)
 }
 
 impl CreateContainerRequest {
@@ -230,6 +297,66 @@ mod tests {
         .parse()
         .expect_err("重复宿主机端口");
         assert!(error.contains("重复绑定"));
+    }
+
+    #[test]
+    fn parses_mounts_and_skips_blank_rows() {
+        let request = ContainerDraft {
+            mounts: vec![
+                (r"C:\src".into(), "/src".into()),
+                ("".into(), " ".into()),
+                ("data".into(), "/var/lib/data".into()),
+            ],
+            ..draft()
+        }
+        .parse()
+        .expect("合法挂载");
+        assert_eq!(request.binds, [r"C:\src:/src", "data:/var/lib/data"]);
+    }
+
+    #[test]
+    fn rejects_incomplete_relative_or_duplicate_mounts() {
+        for mounts in [
+            vec![("/a".to_string(), "".to_string())],
+            vec![("".into(), "/a".into())],
+            vec![("/a".into(), "a".into())],
+            vec![("/a".into(), "/x".into()), ("/b".into(), "/x".into())],
+        ] {
+            assert!(ContainerDraft { mounts, ..draft() }.parse().is_err());
+        }
+    }
+
+    #[test]
+    fn parses_env_rows() {
+        let request = ContainerDraft {
+            env: vec![
+                ("TZ".into(), "Asia/Shanghai".into()),
+                ("".into(), "".into()),
+                ("EMPTY".into(), "".into()),
+                ("EQ".into(), "a=b".into()),
+            ],
+            ..draft()
+        }
+        .parse()
+        .expect("合法环境变量");
+        assert_eq!(request.env, ["TZ=Asia/Shanghai", "EMPTY=", "EQ=a=b"]);
+        for env in [
+            vec![("".to_string(), "x".to_string())],
+            vec![("A=B".into(), "x".into())],
+            vec![("A".into(), "1".into()), ("A".into(), "2".into())],
+        ] {
+            assert!(ContainerDraft { env, ..draft() }.parse().is_err());
+        }
+    }
+
+    #[test]
+    fn user_env_overrides_defaults() {
+        let mut env = vec!["HTTP_PROXY=http://user".to_string()];
+        merge_env(
+            &mut env,
+            vec!["HTTP_PROXY=http://default".into(), "NO_PROXY=local".into()],
+        );
+        assert_eq!(env, ["NO_PROXY=local", "HTTP_PROXY=http://user"]);
     }
 
     #[test]

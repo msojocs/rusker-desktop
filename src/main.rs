@@ -28,6 +28,10 @@ gpui_kit::assets::icon_assets!(
         Eraser,
         BrushCleaning,
         Info,
+        ListFilter,
+        Package,
+        ArrowUp,
+        ArrowDown,
         Folder,
         ExternalLink,
         TriangleAlert

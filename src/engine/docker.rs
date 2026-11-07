@@ -104,7 +104,9 @@ impl DockerEngine {
 
     pub async fn snapshot(&self) -> Result<EngineSnapshot, EngineError> {
         let containers_options = ListContainersOptionsBuilder::default().all(true).build();
-        let images_options = ListImagesOptionsBuilder::default().all(true).build();
+        // Top-level images only (like `docker images`), without
+        // intermediate build layers.
+        let images_options = ListImagesOptionsBuilder::default().all(false).build();
         let (version, info, containers, images, volumes) = tokio::try_join!(
             with_timeout("读取引擎版本", REQUEST_TIMEOUT, self.client.version()),
             with_timeout("读取引擎信息", REQUEST_TIMEOUT, self.client.info()),
@@ -172,7 +174,10 @@ impl DockerEngine {
         })
     }
 
-    pub async fn create_and_run(&self, request: CreateContainerRequest) -> Result<(), EngineError> {
+    pub async fn create_and_run(
+        &self,
+        request: CreateContainerRequest,
+    ) -> Result<String, EngineError> {
         request
             .validate()
             .map_err(|error| EngineError::operation("校验容器配置", error))?;
@@ -195,15 +200,17 @@ impl DockerEngine {
         let mut exposed_ports: Vec<String> = port_bindings.keys().cloned().collect();
         exposed_ports.sort();
         let device_requests = nvidia_device_requests(request.nvidia_gpu);
-        let host_config = if port_bindings.is_empty() && device_requests.is_none() {
-            None
-        } else {
-            Some(HostConfig {
-                port_bindings: (!port_bindings.is_empty()).then_some(port_bindings),
-                device_requests,
-                ..Default::default()
-            })
-        };
+        let host_config =
+            if port_bindings.is_empty() && device_requests.is_none() && request.binds.is_empty() {
+                None
+            } else {
+                Some(HostConfig {
+                    port_bindings: (!port_bindings.is_empty()).then_some(port_bindings),
+                    device_requests,
+                    binds: (!request.binds.is_empty()).then_some(request.binds),
+                    ..Default::default()
+                })
+            };
         let body = ContainerCreateBody {
             image: Some(request.image),
             cmd: (!request.command.is_empty()).then_some(request.command),
@@ -246,7 +253,7 @@ impl DockerEngine {
                 format!("{start_error}；{cleanup_message}"),
             ));
         }
-        Ok(())
+        Ok(id)
     }
 
     pub async fn container_action(
@@ -561,6 +568,18 @@ impl DockerEngine {
 
     /// Removes several volumes one by one (never forced). Returns one
     /// message per volume that could not be removed.
+    /// Removes each image reference (`repo:tag` or ID) independently and
+    /// returns one error message per reference that was not removed.
+    pub async fn remove_images(&self, references: &[String]) -> Vec<String> {
+        let mut failures = Vec::new();
+        for reference in references {
+            if let Err(error) = self.remove_image(reference).await {
+                failures.push(error.to_string());
+            }
+        }
+        failures
+    }
+
     pub async fn remove_volumes(&self, names: &[String]) -> Vec<String> {
         let mut failures = Vec::new();
         for name in names {
@@ -928,6 +947,7 @@ fn container_dto(container: ContainerSummary) -> ContainerDto {
         id,
         name,
         image: container.image.unwrap_or_else(|| "未知镜像".into()),
+        image_id: container.image_id.unwrap_or_default(),
         state: container
             .state
             .map(|state| state.to_string())
@@ -943,6 +963,7 @@ fn image_dto(image: ImageSummary) -> ImageDto {
     ImageDto {
         id: image.id,
         tags: image.repo_tags,
+        digests: image.repo_digests,
         created: image.created,
         size: u64::try_from(image.size).unwrap_or(0),
     }

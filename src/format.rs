@@ -36,6 +36,25 @@ pub fn format_timestamp(timestamp: i64) -> String {
         .unwrap_or_else(|| timestamp.to_string())
 }
 
+/// "3 天前" style age of `timestamp` relative to `now` (both Unix seconds).
+pub fn format_relative(timestamp: i64, now: i64) -> String {
+    if timestamp <= 0 {
+        return "—".into();
+    }
+    let seconds = now.saturating_sub(timestamp).max(0);
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    match seconds {
+        s if s < MINUTE => "刚刚".into(),
+        s if s < HOUR => format!("{} 分钟前", s / MINUTE),
+        s if s < DAY => format!("{} 小时前", s / HOUR),
+        s if s < 30 * DAY => format!("{} 天前", s / DAY),
+        s if s < 365 * DAY => format!("{} 个月前", s / (30 * DAY)),
+        s => format!("{} 年前", s / (365 * DAY)),
+    }
+}
+
 pub fn format_ports(ports: &[PortMapping]) -> String {
     let mut mappings: Vec<String> = ports
         .iter()
@@ -183,6 +202,19 @@ mod tests {
         assert!(bounded.starts_with("… 较早日志已截断 …\n"));
         assert!(bounded.len() <= MAX_LOG_BYTES + 64);
         assert_eq!(bound_logs("a\0b"), "a�b");
+    }
+
+    #[test]
+    fn formats_relative_ages() {
+        let now = 1_000_000_000;
+        assert_eq!(format_relative(0, now), "—");
+        assert_eq!(format_relative(now - 5, now), "刚刚");
+        assert_eq!(format_relative(now + 100, now), "刚刚");
+        assert_eq!(format_relative(now - 3 * 60, now), "3 分钟前");
+        assert_eq!(format_relative(now - 3 * 3600, now), "3 小时前");
+        assert_eq!(format_relative(now - 3 * 86400, now), "3 天前");
+        assert_eq!(format_relative(now - 65 * 86400, now), "2 个月前");
+        assert_eq!(format_relative(now - 800 * 86400, now), "2 年前");
     }
 
     #[test]

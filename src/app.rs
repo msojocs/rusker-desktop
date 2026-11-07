@@ -26,13 +26,9 @@ use gpui_kit::{
     Window, WindowAppearance, WindowControlArea,
 };
 use rusker_desktop::{
-    container::ContainerDraft,
     engine::{EngineError, EngineService},
-    format::{
-        container_matches, format_bytes, format_ports, format_timestamp, image_matches, image_tags,
-        short_id,
-    },
-    model::{ContainerAction, ContainerSummary, EngineSnapshot, ImageSummary, Revision},
+    format::{container_matches, format_bytes, format_ports, format_timestamp, short_id},
+    model::{ContainerAction, ContainerSummary, EngineSnapshot, Revision},
     runtime_host::{
         same_path, validate_daemon_config, EngineRecovery, LanForwardState, ProxyApplyOutcome,
         RuntimeHostError, RuntimeHostService, RuntimeHostSnapshot, MANAGED_DOCKER_HOST,
@@ -51,8 +47,12 @@ use crate::ui::{
     detail_row, empty_state, message_banner, muted, page_header, section_panel, stat_card,
 };
 
+mod images;
+mod run;
 mod volumes;
 
+use images::ImageState;
+use run::RunForm;
 use volumes::VolumeState;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -219,6 +219,8 @@ pub struct RuskerApp {
     create_ports_input: Entity<InputState>,
     create_nvidia_gpu: bool,
     create_error: Option<String>,
+    images: ImageState,
+    run: RunForm,
     volumes: VolumeState,
     volume_name_input: Entity<InputState>,
     settings: AppSettings,
@@ -520,6 +522,8 @@ impl RuskerApp {
             create_ports_input,
             create_nvidia_gpu: false,
             create_error: None,
+            images: ImageState::default(),
+            run: RunForm::default(),
             volumes: VolumeState::default(),
             volume_name_input,
             settings_draft: settings.clone(),
@@ -994,6 +998,7 @@ impl RuskerApp {
         }
         self.snapshot = snapshot;
         self.prune_volume_selection();
+        self.after_image_snapshot();
     }
 
     fn select_container(&mut self, id: String, cx: &mut Context<Self>) {
@@ -1058,19 +1063,9 @@ impl RuskerApp {
         self.run_snapshot_operation("删除镜像".into(), handle, cx);
     }
 
-    fn pull_image(&mut self, cx: &mut Context<Self>) {
+    /// `reference` must already be validated (non-empty, no whitespace).
+    fn pull_image(&mut self, reference: String, cx: &mut Context<Self>) {
         if self.busy.is_some() {
-            return;
-        }
-        let reference = self.pull_input.read(cx).value().trim().to_string();
-        if reference.is_empty() {
-            self.error = Some("请输入要拉取的镜像引用".into());
-            cx.notify();
-            return;
-        }
-        if reference.chars().any(char::is_whitespace) {
-            self.error = Some("镜像引用不能包含空白字符".into());
-            cx.notify();
             return;
         }
         let Some(engine) = self.engine.clone() else {
@@ -1080,169 +1075,6 @@ impl RuskerApp {
         };
         let handle = engine.pull_image(reference.clone());
         self.run_snapshot_operation(format!("拉取镜像 {reference}"), handle, cx);
-    }
-
-    fn open_create_container_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
-            return;
-        }
-        self.create_error = None;
-        self.create_nvidia_gpu = false;
-        for input in [
-            &self.create_image_input,
-            &self.create_name_input,
-            &self.create_command_input,
-            &self.create_ports_input,
-        ] {
-            input.update(cx, |state, cx| state.set_value("", window, cx));
-        }
-
-        let image = self.create_image_input.clone();
-        let name = self.create_name_input.clone();
-        let command = self.create_command_input.clone();
-        let ports = self.create_ports_input.clone();
-        let weak = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
-            let error = weak
-                .upgrade()
-                .and_then(|this| this.read(cx).create_error.clone());
-            let (gpu_available, gpu_selected) = weak
-                .upgrade()
-                .map(|this| {
-                    let this = this.read(cx);
-                    (this.nvidia_gpu_available(), this.create_nvidia_gpu)
-                })
-                .unwrap_or((false, false));
-            let gpu_weak = weak.clone();
-            let submit_weak = weak.clone();
-            let mut form = div()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(form_field(
-                    "镜像引用 *",
-                    &image,
-                    "仅使用本地已有镜像；本步骤不会自动拉取。",
-                    cx,
-                ))
-                .child(form_field(
-                    "容器名称",
-                    &name,
-                    "可包含字母、数字、下划线、点和连字符。",
-                    cx,
-                ))
-                .child(form_field(
-                    "启动命令",
-                    &command,
-                    "覆盖镜像 CMD，支持引号；不会自动经过 shell 执行。",
-                    cx,
-                ))
-                .child(form_field(
-                    "TCP 端口映射",
-                    &ports,
-                    "多个映射用逗号分隔，仅绑定到 127.0.0.1。",
-                    cx,
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            Switch::new("create-nvidia-gpu")
-                                .label("使用全部 NVIDIA GPU")
-                                .checked(gpu_selected)
-                                .disabled(!gpu_available)
-                                .on_change(move |enabled, _, cx| {
-                                    _ = gpu_weak.update(cx, |this, cx| {
-                                        this.create_nvidia_gpu = *enabled;
-                                        cx.notify();
-                                    });
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(if gpu_available {
-                                    "映射为 --gpus all；需要受管环境的 NVIDIA runtime。"
-                                } else {
-                                    "未检测到可用的 NVIDIA GPU/runtime，请先在设置中检查 WSL2 环境。"
-                                }),
-                        ),
-                );
-            if let Some(error) = error {
-                form = form.child(
-                    div()
-                        .p_3()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(cx.theme().danger)
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(error),
-                );
-            }
-
-            dialog
-                .title("创建并运行容器")
-                .w(px(560.))
-                .child(form)
-                .footer(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("cancel-create")
-                                .outline()
-                                .label("取消")
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("submit-create")
-                                .primary()
-                                .icon(IconName::Play)
-                                .label("创建并运行")
-                                .on_click(move |_, window, cx| {
-                                    _ = submit_weak.update(cx, |this, cx| {
-                                        this.submit_create_container(window, cx);
-                                    });
-                                }),
-                        ),
-                )
-        });
-    }
-
-    fn submit_create_container(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
-            return;
-        }
-        let draft = ContainerDraft {
-            image: self.create_image_input.read(cx).value().to_string(),
-            name: self.create_name_input.read(cx).value().to_string(),
-            command: self.create_command_input.read(cx).value().to_string(),
-            ports: self.create_ports_input.read(cx).value().to_string(),
-            nvidia_gpu: self.create_nvidia_gpu,
-        };
-        let mut request = match draft.parse() {
-            Ok(request) => request,
-            Err(error) => {
-                self.create_error = Some(error);
-                cx.notify();
-                return;
-            }
-        };
-        request.env = self.settings.container_proxy_resolved().container_env();
-        let Some(engine) = self.engine.clone() else {
-            self.create_error = Some("容器引擎不可用".into());
-            cx.notify();
-            return;
-        };
-
-        window.close_dialog(cx);
-        let handle = engine.create_container(request);
-        self.run_snapshot_operation("创建并运行容器".into(), handle, cx);
     }
 
     fn proxy_draft(&self, cx: &App) -> DockerProxySettings {
@@ -1751,33 +1583,6 @@ impl RuskerApp {
         });
     }
 
-    fn confirm_remove_image(
-        &mut self,
-        image: &ImageSummary,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let id = image.id.clone();
-        let title = format!("删除镜像 {}？", image_tags(image));
-        let weak = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
-            let id = id.clone();
-            let weak = weak.clone();
-            dialog
-                .title(title.clone())
-                .description("此操作不可撤销。仍被容器使用的镜像不会被强制删除。")
-                .confirm()
-                .ok_text("删除")
-                .cancel_text("取消")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
-                    let id = id.clone();
-                    _ = weak.update(cx, |this, cx| this.remove_image(id, cx));
-                    true
-                })
-        });
-    }
-
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
         // While the engine starts or stops, the whole menu is placeholders
         // (Docker Desktop-style); the app bar gear still opens settings.
@@ -1891,7 +1696,7 @@ impl RuskerApp {
 
     /// Whether a loading indicator is visible and needs animation frames.
     fn wants_motion(&self) -> bool {
-        self.engine_phase().is_some() || self.runtime_busy.is_some()
+        self.engine_phase().is_some() || self.runtime_busy.is_some() || self.run.submitting
     }
 
     /// Centered spinner with a title, faded and slid in when the phase
@@ -2123,7 +1928,7 @@ impl RuskerApp {
                             .label("创建容器")
                             .disabled(self.busy.is_some())
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_create_container_dialog(window, cx);
+                                this.open_create_container_dialog(None, window, cx);
                             })),
                     ),
             )
@@ -2399,57 +2204,6 @@ impl RuskerApp {
                         ),
                 ),
         )
-    }
-
-    fn render_images(&self, cx: &mut Context<Self>) -> Div {
-        let query = self.search_input.read(cx).value().to_string();
-        let images: Vec<ImageSummary> = self
-            .snapshot
-            .images
-            .iter()
-            .filter(|image| image_matches(image, &query))
-            .cloned()
-            .collect();
-        div()
-            .flex_1()
-            .min_h_0()
-            .p_6()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(page_header(
-                "镜像",
-                format!(
-                    "共 {} 个，当前显示 {} 个",
-                    self.snapshot.images.len(),
-                    images.len()
-                ),
-                cx,
-            ))
-            .child(
-                section_panel(cx)
-                    .p_4()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(div().flex_1().child(Input::new(&self.pull_input)))
-                    .child(
-                        Button::new("pull-image")
-                            .primary()
-                            .icon(IconName::ArrowDown)
-                            .label("拉取镜像")
-                            .disabled(self.busy.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.pull_image(cx))),
-                    ),
-            )
-            .child(
-                div().w(px(420.)).child(
-                    Input::new(&self.search_input)
-                        .prefix(Icon::new(IconName::Search).small())
-                        .cleanable(true),
-                ),
-            )
-            .child(self.render_image_list(&images, cx))
     }
 
     /// Engine runtime controls shown at the top of "VM 资源": state of the
@@ -3557,89 +3311,6 @@ impl RuskerApp {
                     ),
                 cx,
             ))
-    }
-
-    fn render_image_list(&self, images: &[ImageSummary], cx: &mut Context<Self>) -> Div {
-        let list = section_panel(cx)
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(div().flex_1().child("标签"))
-                    .child(div().w(px(150.)).child("镜像 ID"))
-                    .child(div().w(px(100.)).child("大小"))
-                    .child(div().w(px(180.)).child("创建时间"))
-                    .child(div().w(px(76.)).child("操作")),
-            );
-        if images.is_empty() {
-            return list.child(empty_state(
-                "没有匹配的镜像",
-                "调整搜索条件，或在上方拉取一个镜像。",
-                cx,
-            ));
-        }
-
-        let rows = images.iter().enumerate().map(|(index, image)| {
-            let remove_image = image.clone();
-            div()
-                .px_4()
-                .py_3()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .flex()
-                .items_center()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .pr_3()
-                        .text_sm()
-                        .child(image_tags(image)),
-                )
-                .child(
-                    div()
-                        .w(px(150.))
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_xs()
-                        .child(short_id(&image.id)),
-                )
-                .child(div().w(px(100.)).text_sm().child(format_bytes(image.size)))
-                .child(
-                    div()
-                        .w(px(180.))
-                        .text_xs()
-                        .child(format_timestamp(image.created)),
-                )
-                .child(
-                    div().w(px(76.)).child(
-                        Button::new(("remove-image", index))
-                            .danger()
-                            .small()
-                            .icon(IconName::Delete)
-                            .disabled(self.busy.is_some())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.confirm_remove_image(&remove_image, window, cx);
-                            })),
-                    ),
-                )
-        });
-        list.child(
-            div()
-                .id("image-rows")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .children(rows),
-        )
     }
 }
 

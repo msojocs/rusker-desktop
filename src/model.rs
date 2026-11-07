@@ -51,6 +51,8 @@ pub struct ContainerSummary {
     pub id: String,
     pub name: String,
     pub image: String,
+    /// Full ID (`sha256:…`) of the image the container was created from.
+    pub image_id: String,
     pub state: String,
     pub status: String,
     pub created: i64,
@@ -80,8 +82,11 @@ pub struct CreateContainerRequest {
     pub command: Vec<String>,
     pub ports: Vec<CreatePortBinding>,
     pub nvidia_gpu: bool,
-    /// `NAME=value` environment variables (the container proxy).
+    /// `NAME=value` environment variables.
     pub env: Vec<String>,
+    /// `source:/container/path` bind mounts; the source is a host path
+    /// (Windows paths are translated by the engine proxy) or a volume name.
+    pub binds: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -95,6 +100,8 @@ pub struct CreatePortBinding {
 pub struct ImageSummary {
     pub id: String,
     pub tags: Vec<String>,
+    /// `repo@sha256:…` references; name source for untagged pulled images.
+    pub digests: Vec<String>,
     pub created: i64,
     pub size: u64,
 }
