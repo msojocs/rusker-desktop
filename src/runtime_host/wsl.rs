@@ -21,7 +21,9 @@ use tokio::{
 };
 
 use super::{data_disk, RuntimeHostError};
-use crate::settings::{DockerProxySettings, ResourceSaverSettings};
+use crate::settings::{
+    DockerProxySettings, NetworkSettings, ResourceSaverSettings, ENGINE_NETWORK_KEYS,
+};
 
 pub const MANAGED_DISTRO_NAME: &str = "rusker";
 /// Windows-side endpoint, served by the in-app proxy (like Docker Desktop's
@@ -100,16 +102,8 @@ fi
 exec /usr/bin/dockerd --host=unix:///var/run/docker.sock --host="unix://$SHARED/docker.sock"
 "#;
 
-/// Atomically replaces the managed `daemon.json` with stdin.
-const WRITE_DAEMON_JSON_SCRIPT: &str = r#"set -eu
-mkdir -p /etc/docker
-cat > /etc/docker/daemon.json.rusker-new
-chmod 0644 /etc/docker/daemon.json.rusker-new
-mv -f /etc/docker/daemon.json.rusker-new /etc/docker/daemon.json
-"#;
-
-/// Like `WRITE_DAEMON_JSON_SCRIPT`, but first checks the new file with
-/// `dockerd --validate` so a bad user config never replaces a working one.
+/// Atomically replaces the managed `daemon.json` with stdin, after checking
+/// it with `dockerd --validate` so a bad config never replaces a working one.
 /// Older dockerd builds without `--validate` skip the check.
 const VALIDATE_AND_WRITE_DAEMON_JSON_SCRIPT: &str = r#"set -u
 mkdir -p /etc/docker
@@ -420,6 +414,8 @@ pub struct WslHost {
     proxy: Arc<ProxyStatus>,
     /// Desired `proxies` object for the managed dockerd's `daemon.json`.
     engine_proxies: Arc<Mutex<Map<String, Value>>>,
+    /// Desired network keys ([`ENGINE_NETWORK_KEYS`]) of `daemon.json`.
+    engine_network: Arc<Mutex<Map<String, Value>>>,
     saver: Arc<ResourceSaver>,
     /// Where a new Docker data disk is created (None = default).
     data_location: Arc<Mutex<Option<PathBuf>>>,
@@ -451,6 +447,7 @@ impl WslHost {
             session: Arc::default(),
             proxy: Arc::default(),
             engine_proxies: Arc::default(),
+            engine_network: Arc::default(),
             saver: Arc::default(),
             data_location: Arc::default(),
         })
@@ -635,21 +632,47 @@ impl WslHost {
             .clone()
     }
 
-    /// Applies new Engine proxy settings directly, like Docker Desktop's
-    /// "Apply & restart": merge into `daemon.json` and restart a running
-    /// dockerd if anything changed. With `daemon_config` (the user-edited
-    /// `daemon.json` without `proxies`), the whole file is replaced too.
-    pub async fn apply_proxy(
+    pub fn set_engine_network(&self, settings: &NetworkSettings) {
+        *self
+            .engine_network
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = settings.engine_config();
+    }
+
+    /// Values for every [`MANAGED_DAEMON_KEYS`] entry the settings set; the
+    /// managed keys missing here are removed from `daemon.json`.
+    fn desired_managed(&self) -> Map<String, Value> {
+        let mut managed = self
+            .engine_network
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let proxies = self.desired_proxies();
+        if !proxies.is_empty() {
+            managed.insert("proxies".into(), Value::Object(proxies));
+        }
+        managed
+    }
+
+    /// Applies saved Engine settings (proxy and network) directly, like
+    /// Docker Desktop's "Apply & restart": merge into `daemon.json` and
+    /// restart a running dockerd if anything changed. With `daemon_config`
+    /// (the user-edited `daemon.json` without the managed keys), the whole
+    /// file is replaced too.
+    pub async fn apply_engine_config(
         &self,
-        settings: &DockerProxySettings,
+        proxy: &DockerProxySettings,
+        network: &NetworkSettings,
         daemon_config: Option<&str>,
     ) -> Result<ProxyApplyOutcome, RuntimeHostError> {
-        settings.validate().map_err(RuntimeHostError::State)?;
+        proxy.validate().map_err(RuntimeHostError::State)?;
+        network.validate().map_err(RuntimeHostError::State)?;
         let user_config = daemon_config
             .map(parse_editable_daemon_config)
             .transpose()
             .map_err(RuntimeHostError::State)?;
-        self.set_engine_proxy(settings);
+        self.set_engine_proxy(proxy);
+        self.set_engine_network(network);
         if !self.session.is_running() {
             if user_config.is_some() {
                 return Err(RuntimeHostError::State(
@@ -661,7 +684,7 @@ impl WslHost {
         self.ensure_owned().await?;
         let changed = match user_config {
             Some(user) => self.write_daemon_config(user).await?,
-            None => self.write_daemon_proxies().await?,
+            None => self.write_managed_keys().await?,
         };
         if !changed {
             return Ok(ProxyApplyOutcome::Unchanged);
@@ -671,8 +694,8 @@ impl WslHost {
         Ok(ProxyApplyOutcome::Restarted)
     }
 
-    /// The managed `daemon.json` for the settings editor, without the
-    /// `proxies` key (that one belongs to the proxy settings).
+    /// The managed `daemon.json` for the settings editor, without the keys
+    /// owned by the proxy and network settings.
     pub async fn read_daemon_config(&self) -> Result<String, RuntimeHostError> {
         if !self.session.is_running() {
             return Err(RuntimeHostError::State(
@@ -694,16 +717,13 @@ impl WslHost {
     }
 
     /// Replaces `daemon.json` with the user's config plus the desired
-    /// `proxies`, after `dockerd --validate`. Returns whether it changed.
+    /// managed keys, after `dockerd --validate`. Returns whether it changed.
     async fn write_daemon_config(
         &self,
         user: Map<String, Value>,
     ) -> Result<bool, RuntimeHostError> {
         let mut document = user;
-        let proxies = self.desired_proxies();
-        if !proxies.is_empty() {
-            document.insert("proxies".into(), Value::Object(proxies));
-        }
+        document.extend(self.desired_managed());
         let document = Value::Object(document);
         let current = self.read_daemon_json().await?;
         if serde_json::from_str::<Value>(&current).ok().as_ref() == Some(&document)
@@ -728,21 +748,25 @@ impl WslHost {
         Ok(true)
     }
 
-    /// Merges the desired `proxies` into the managed `daemon.json`, keeping
-    /// every other key (e.g. the NVIDIA runtime). Returns whether it changed.
-    async fn write_daemon_proxies(&self) -> Result<bool, RuntimeHostError> {
+    /// Merges the desired managed keys (proxy, network) into the managed
+    /// `daemon.json`, keeping every other key (e.g. the NVIDIA runtime).
+    /// Returns whether it changed.
+    async fn write_managed_keys(&self) -> Result<bool, RuntimeHostError> {
         let current = self.read_daemon_json().await?;
-        let Some(updated) = merge_daemon_proxies(&current, &self.desired_proxies())
+        let Some(updated) = merge_managed_keys(&current, &self.desired_managed())
             .map_err(RuntimeHostError::State)?
         else {
             return Ok(false);
         };
         let mut write = managed_command("root");
-        write.arg("/bin/sh").arg("-c").arg(WRITE_DAEMON_JSON_SCRIPT);
+        write
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(VALIDATE_AND_WRITE_DAEMON_JSON_SCRIPT);
         execute_with_input(
             write,
             updated.as_bytes(),
-            "写入 daemon.json 代理配置",
+            "写入 daemon.json Engine 配置",
             COMMAND_TIMEOUT,
         )
         .await?;
@@ -1005,11 +1029,11 @@ impl WslHost {
         self.saver.set_active(false);
         if !self.session.is_running() {
             let wwid = self.attach_data_disk().await?;
-            // Write the current proxy config before dockerd reads it. If it
-            // changed while a leftover dockerd is still running, stop that
-            // one so the supervisor starts a fresh daemon instead of
-            // attaching to a stale configuration.
-            if self.write_daemon_proxies().await? {
+            // Write the current proxy and network config before dockerd
+            // reads it. If it changed while a leftover dockerd is still
+            // running, stop that one so the supervisor starts a fresh daemon
+            // instead of attaching to a stale configuration.
+            if self.write_managed_keys().await? {
                 let mut stop = managed_command("root");
                 stop.arg("/bin/sh").arg("-c").arg(STOP_SCRIPT);
                 let _ = execute(stop, "停止旧 dockerd", DOCKERD_STOP_TIMEOUT).await;
@@ -1317,8 +1341,19 @@ async fn execute(
     }
 }
 
+/// `daemon.json` keys the app writes from its settings: hidden from the
+/// settings editor and refused there.
+const MANAGED_DAEMON_KEYS: [&str; 6] = [
+    "proxies",
+    ENGINE_NETWORK_KEYS[0],
+    ENGINE_NETWORK_KEYS[1],
+    ENGINE_NETWORK_KEYS[2],
+    ENGINE_NETWORK_KEYS[3],
+    ENGINE_NETWORK_KEYS[4],
+];
+
 /// `daemon.json` as shown in the settings editor: pretty-printed, without
-/// `proxies`. A missing file reads as `{}`.
+/// the managed keys. A missing file reads as `{}`.
 fn editable_daemon_config(current: &str) -> Result<String, String> {
     let mut document = if current.trim().is_empty() {
         Map::new()
@@ -1329,7 +1364,9 @@ fn editable_daemon_config(current: &str) -> Result<String, String> {
             Err(error) => return Err(format!("/etc/docker/daemon.json 格式无效：{error}")),
         }
     };
-    document.remove("proxies");
+    for key in MANAGED_DAEMON_KEYS {
+        document.remove(key);
+    }
     serde_json::to_string_pretty(&Value::Object(document)).map_err(|error| error.to_string())
 }
 
@@ -1350,6 +1387,14 @@ fn parse_editable_daemon_config(text: &str) -> Result<Map<String, Value>, String
     if document.contains_key("proxies") {
         return Err("请在“代理”设置中配置 Engine 代理，不要在 daemon.json 中填写 proxies".into());
     }
+    if let Some(key) = ENGINE_NETWORK_KEYS
+        .iter()
+        .find(|key| document.contains_key(**key))
+    {
+        return Err(format!(
+            "请在“网络”设置中配置，不要在 daemon.json 中填写 {key}"
+        ));
+    }
     if document.contains_key("hosts") {
         return Err(
             "Rusker 通过启动参数设置 dockerd 监听地址，daemon.json 中不能包含 hosts".into(),
@@ -1358,10 +1403,11 @@ fn parse_editable_daemon_config(text: &str) -> Result<Map<String, Value>, String
     Ok(document)
 }
 
-/// Returns the new `daemon.json` text when the `proxies` key must change.
-/// An empty desired object removes the key. Refuses to touch a file that is
-/// not a JSON object, rather than overwriting a user's broken config.
-fn merge_daemon_proxies(
+/// Returns the new `daemon.json` text when a managed key must change.
+/// Managed keys missing from `desired` are removed (an empty object counts
+/// as missing). Refuses to touch a file that is not a JSON object, rather
+/// than overwriting a user's broken config.
+fn merge_managed_keys(
     current: &str,
     desired: &Map<String, Value>,
 ) -> Result<Option<String>, String> {
@@ -1374,23 +1420,29 @@ fn merge_daemon_proxies(
             Err(error) => return Err(format!("/etc/docker/daemon.json 格式无效，未修改：{error}")),
         }
     };
-    let existing = document.get("proxies").cloned();
-    let wanted = (!desired.is_empty()).then(|| Value::Object(desired.clone()));
-    let unchanged = match (&existing, &wanted) {
-        (None, None) => true,
-        (Some(Value::Object(object)), None) => object.is_empty(),
-        (current, wanted) => current == wanted,
+    let effective = |value: Option<&Value>| {
+        value
+            .filter(|value| !matches!(value, Value::Object(object) if object.is_empty()))
+            .cloned()
     };
-    if unchanged {
-        return Ok(None);
+    let mut changed = false;
+    for key in MANAGED_DAEMON_KEYS {
+        let wanted = effective(desired.get(key));
+        if effective(document.get(key)) == wanted {
+            continue;
+        }
+        changed = true;
+        match wanted {
+            Some(value) => {
+                document.insert(key.into(), value);
+            }
+            None => {
+                document.remove(key);
+            }
+        }
     }
-    match wanted {
-        Some(value) => {
-            document.insert("proxies".into(), value);
-        }
-        None => {
-            document.remove("proxies");
-        }
+    if !changed {
+        return Ok(None);
     }
     let text = serde_json::to_string_pretty(&Value::Object(document))
         .map_err(|error| error.to_string())?;
@@ -1723,7 +1775,7 @@ fn decode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::ProxyMode;
+    use crate::settings::{NetworkingMode, PortBinding, ProxyMode};
 
     #[test]
     fn compares_windows_paths() {
@@ -1886,7 +1938,8 @@ mod tests {
             no_proxy: "localhost,127.0.0.1".into(),
         }
         .engine_proxies();
-        let merged = merge_daemon_proxies(current, &desired)
+        let desired = Map::from_iter([("proxies".to_string(), Value::Object(desired))]);
+        let merged = merge_managed_keys(current, &desired)
             .expect("合并")
             .expect("应有变化");
         let value: Value = serde_json::from_str(&merged).expect("JSON");
@@ -1897,23 +1950,61 @@ mod tests {
         assert_eq!(value["proxies"]["http-proxy"], "http://127.0.0.1:7890");
 
         // Same config again: nothing to write, so no restart.
-        assert_eq!(merge_daemon_proxies(&merged, &desired).expect("合并"), None);
+        assert_eq!(merge_managed_keys(&merged, &desired).expect("合并"), None);
 
         // Disabling removes only the proxies key.
-        let disabled = merge_daemon_proxies(&merged, &Map::new())
+        let disabled = merge_managed_keys(&merged, &Map::new())
             .expect("合并")
             .expect("应有变化");
         let value: Value = serde_json::from_str(&disabled).expect("JSON");
         assert!(value.get("proxies").is_none());
         assert!(value.get("runtimes").is_some());
 
-        assert_eq!(merge_daemon_proxies("", &Map::new()).expect("空文件"), None);
+        assert_eq!(merge_managed_keys("", &Map::new()).expect("空文件"), None);
         assert_eq!(
-            merge_daemon_proxies(r#"{"proxies":{}}"#, &Map::new()).expect("空对象"),
+            merge_managed_keys(r#"{"proxies":{}}"#, &Map::new()).expect("空对象"),
             None
         );
-        assert!(merge_daemon_proxies("{broken", &desired).is_err());
-        assert!(merge_daemon_proxies("[]", &desired).is_err());
+        assert!(merge_managed_keys("{broken", &desired).is_err());
+        assert!(merge_managed_keys("[]", &desired).is_err());
+    }
+
+    #[test]
+    fn merges_network_keys_and_removes_stale_ones() {
+        let current =
+            r#"{"runtimes":{"nvidia":{"path":"nvidia-container-runtime"}},"ip":"0.0.0.0"}"#;
+        let network = NetworkSettings {
+            subnet: "192.168.65.0/24".into(),
+            port_binding: PortBinding::Open,
+            mode: NetworkingMode::DualStack,
+        };
+        let desired = network.engine_config();
+        let merged = merge_managed_keys(current, &desired)
+            .expect("合并")
+            .expect("应有变化");
+        let value: Value = serde_json::from_str(&merged).expect("JSON");
+        assert_eq!(value["bip"], "192.168.65.1/24");
+        assert_eq!(value["ipv6"], true);
+        // Open binding is Docker's default, so a stale `ip` is dropped.
+        assert!(value.get("ip").is_none());
+        assert!(value.get("runtimes").is_some());
+        assert_eq!(merge_managed_keys(&merged, &desired).expect("合并"), None);
+
+        // Back to defaults: every network key goes, the rest stays.
+        let reset = merge_managed_keys(&merged, &NetworkSettings::default().engine_config())
+            .expect("合并")
+            .expect("应有变化");
+        let value: Value = serde_json::from_str(&reset).expect("JSON");
+        for key in ENGINE_NETWORK_KEYS {
+            assert!(value.get(key).is_none(), "{key}");
+        }
+        assert!(value.get("runtimes").is_some());
+
+        let editable = editable_daemon_config(&merged).expect("读取");
+        assert!(!editable.contains("bip"));
+        assert!(!editable.contains("default-network-opts"));
+        assert!(parse_editable_daemon_config(r#"{"bip":"10.0.0.1/24"}"#).is_err());
+        assert!(parse_editable_daemon_config(r#"{"ipv6":true}"#).is_err());
     }
 
     #[test]

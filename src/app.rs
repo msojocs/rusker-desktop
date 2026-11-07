@@ -38,9 +38,9 @@ use rusker_desktop::{
         RuntimeHostSnapshot, MANAGED_DOCKER_HOST, WSL_DOCKER_HOST,
     },
     settings::{
-        apply_client_proxy, docker_client_config_path, AppSettings, DockerProxySettings, ProxyMode,
-        ResolvedProxy, SettingsStore, ThemePreference, RESOURCE_SAVER_MAX_SECS,
-        RESOURCE_SAVER_MIN_SECS,
+        apply_client_proxy, docker_client_config_path, AppSettings, DockerProxySettings,
+        NetworkingMode, PortBinding, ProxyMode, ResolvedProxy, SettingsStore, ThemePreference,
+        DEFAULT_DOCKER_SUBNET, RESOURCE_SAVER_MAX_SECS, RESOURCE_SAVER_MIN_SECS,
     },
     tray::{TrayCommand, TrayMenu},
 };
@@ -83,6 +83,7 @@ enum SettingsSection {
     VmResources,
     ResourceSaver,
     Proxies,
+    Network,
     WslIntegration,
     DockerEngine,
 }
@@ -96,6 +97,7 @@ impl SettingsSection {
             Self::Proxies,
         ];
         if cfg!(windows) {
+            sections.push(Self::Network);
             sections.push(Self::WslIntegration);
             sections.push(Self::DockerEngine);
         }
@@ -108,6 +110,7 @@ impl SettingsSection {
             Self::VmResources => "VM 资源",
             Self::ResourceSaver => "资源节省",
             Self::Proxies => "代理",
+            Self::Network => "网络",
             Self::WslIntegration => "WSL 集成",
             Self::DockerEngine => "Docker Engine",
         }
@@ -118,6 +121,7 @@ const WSLCONFIG_DOCS_URL: &str =
     "https://learn.microsoft.com/windows/wsl/wsl-config#configuration-settings-for-wslconfig";
 const DAEMON_CONFIG_DOCS_URL: &str =
     "https://docs.docker.com/reference/cli/dockerd/#daemon-configuration-file";
+const NETWORKING_DOCS_URL: &str = "https://docs.docker.com/engine/network/";
 
 #[derive(Clone, Copy)]
 enum RuntimeOperation {
@@ -227,6 +231,8 @@ pub struct RuskerApp {
     container_http_proxy_input: Entity<InputState>,
     container_https_proxy_input: Entity<InputState>,
     container_no_proxy_input: Entity<InputState>,
+    /// Network section: IPv4 subnet of the default bridge.
+    network_subnet_input: Entity<InputState>,
     /// Docker Engine section: `daemon.json` without `proxies`.
     daemon_editor: Entity<EditorState>,
     /// The text last read from the engine (None: not loaded).
@@ -313,6 +319,11 @@ impl RuskerApp {
                 .default_value(settings.container_proxy.no_proxy.clone())
                 .placeholder("localhost,127.0.0.1,::1")
         });
+        let network_subnet_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.network.subnet.clone())
+                .placeholder(format!("{DEFAULT_DOCKER_SUBNET}（Docker 默认）"))
+        });
         let daemon_editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("json")
@@ -336,6 +347,7 @@ impl RuskerApp {
             &container_http_proxy_input,
             &container_https_proxy_input,
             &container_no_proxy_input,
+            &network_subnet_input,
         ] {
             subscriptions.push(cx.subscribe_in(input, window, |_, _, event, _, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -420,6 +432,7 @@ impl RuskerApp {
         let (runtime_host, runtime_error) = match RuntimeHostService::new() {
             Ok(host) => {
                 host.set_engine_proxy(&settings.docker_proxy);
+                host.set_engine_network(&settings.network);
                 host.set_resource_saver(&settings.resource_saver);
                 host.set_data_location(disk_location_setting(&settings));
                 (Some(host), None)
@@ -504,6 +517,7 @@ impl RuskerApp {
             container_http_proxy_input,
             container_https_proxy_input,
             container_no_proxy_input,
+            network_subnet_input,
             daemon_editor,
             daemon_loaded: None,
             daemon_loading: false,
@@ -1196,6 +1210,7 @@ impl RuskerApp {
         candidate.docker_proxy = self.proxy_draft(cx);
         candidate.container_proxy = self.container_proxy_draft(cx);
         candidate.resource_saver.threshold_secs = threshold;
+        candidate.network.subnet = self.network_subnet_input.read(cx).value().to_string();
         Ok(candidate.normalized())
     }
 
@@ -1287,6 +1302,7 @@ impl RuskerApp {
                 &self.saver_threshold_input,
                 saved.resource_saver.threshold_secs.to_string(),
             ),
+            (&self.network_subnet_input, saved.network.subnet.clone()),
         ] {
             input.update(cx, |input, cx| input.set_value(value, window, cx));
         }
@@ -1509,8 +1525,9 @@ impl RuskerApp {
         self.runtime_busy = Some("正在应用 Engine 配置…".into());
         self.runtime_error = None;
         self.settings_notice = Some("设置已保存，正在应用 Engine 配置…".into());
-        let handle = host.apply_proxy(
+        let handle = host.apply_engine_config(
             self.settings.docker_proxy.clone(),
+            self.settings.network.clone(),
             daemon_config,
             self.settings.wsl.integrations.clone(),
         );
@@ -1527,7 +1544,7 @@ impl RuskerApp {
                                 ProxyApplyOutcome::Restarted => "已生效：Engine 已按新配置重启",
                                 ProxyApplyOutcome::Unchanged => "已生效（Engine 配置无变化）",
                                 ProxyApplyOutcome::Deferred => {
-                                    "设置已保存，代理将在 Engine 启动时自动生效"
+                                    "设置已保存，Engine 配置将在 Engine 启动时自动生效"
                                 }
                             }
                             .into(),
@@ -2503,7 +2520,7 @@ impl RuskerApp {
                 CalloutKind::Warning,
                 "高级设置",
                 muted(
-                    "错误的配置可能导致 Docker 无法启动，请谨慎修改。应用前会用 dockerd --validate 校验，应用后 Engine 会重启，运行中的容器会被停止。proxies 由“代理”设置管理，不在此显示。",
+                    "错误的配置可能导致 Docker 无法启动，请谨慎修改。应用前会用 dockerd --validate 校验，应用后 Engine 会重启，运行中的容器会被停止。proxies 由“代理”设置管理，bip、ip、ipv6 等网络配置由“网络”设置管理，不在此显示。",
                     cx,
                 ),
                 cx,
@@ -2628,6 +2645,7 @@ impl RuskerApp {
                     SettingsSection::VmResources => self.render_vm_settings(cx),
                     SettingsSection::ResourceSaver => self.render_resource_saver_settings(cx),
                     SettingsSection::Proxies => self.render_proxy_settings(cx),
+                    SettingsSection::Network => self.render_network_settings(cx),
                     SettingsSection::WslIntegration => self.render_wsl_integration(cx),
                     SettingsSection::DockerEngine => self.render_docker_engine_settings(cx),
                 };
@@ -3247,21 +3265,37 @@ impl RuskerApp {
         field: fn(&mut AppSettings) -> &mut ProxyMode,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        self.settings_select(id, current, options, ProxyMode::label, field, true, cx)
+    }
+
+    /// Drop-down editing one drafted setting.
+    #[allow(clippy::too_many_arguments)]
+    fn settings_select<T: Copy + PartialEq + 'static>(
+        &self,
+        id: &'static str,
+        current: T,
+        options: &'static [T],
+        label: fn(T) -> &'static str,
+        field: fn(&mut AppSettings) -> &mut T,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let weak = cx.weak_entity();
         Button::new(id)
             .outline()
-            .label(current.label())
+            .label(label(current))
             .dropdown_caret(true)
-            .pointer(true)
+            .disabled(!enabled)
+            .pointer(enabled)
             .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-                for &mode in options {
+                for &option in options {
                     let weak = weak.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(mode.label())
-                            .checked(mode == current)
+                        PopupMenuItem::new(label(option))
+                            .checked(option == current)
                             .on_click(move |_, _, cx| {
                                 _ = weak.update(cx, |this, cx| {
-                                    *field(&mut this.settings_draft) = mode;
+                                    *field(&mut this.settings_draft) = option;
                                     this.settings_notice = None;
                                     this.settings_error = None;
                                     cx.notify();
@@ -3271,6 +3305,109 @@ impl RuskerApp {
                 }
                 menu.min_w(px(180.))
             })
+    }
+
+    /// Docker Desktop's "Network" section, applied to the managed Engine's
+    /// `daemon.json`.
+    fn render_network_settings(&self, cx: &mut Context<Self>) -> Div {
+        let managed = self.manages_engine();
+        let network = &self.settings_draft.network;
+        let indented = |cx: &App| {
+            div()
+                .ml_2()
+                .pl_4()
+                .border_l_2()
+                .border_color(cx.theme().border)
+                .flex()
+                .flex_col()
+                .gap_2()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(muted("配置 Docker 容器与网络交互的方式。", cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(settings_label("Docker 子网", cx))
+                    .child(Input::new(&self.network_subnet_input).disabled(!managed))
+                    .child(muted(
+                        "默认 bridge 网络（docker0）使用的 IPv4 网段，留空则使用 Docker 默认值。与局域网或 VPN 网段冲突时可修改；已有容器需重新创建才会使用新网段。",
+                        cx,
+                    )),
+            )
+            .child(proxy_heading(
+                "端口绑定行为",
+                self.settings_select(
+                    "network-port-binding",
+                    network.port_binding,
+                    &PortBinding::ALL,
+                    PortBinding::label,
+                    |settings| &mut settings.network.port_binding,
+                    managed,
+                    cx,
+                ),
+                cx,
+            ))
+            .child(muted(
+                "控制发布的容器端口绑定到所有网络接口（默认），还是只绑定到 127.0.0.1。端口映射中显式指定的地址（如 0.0.0.0:8080:80）不受影响。",
+                cx,
+            ))
+            .child(proxy_heading(
+                "默认网络模式",
+                self.settings_select(
+                    "network-mode",
+                    network.mode,
+                    &NetworkingMode::ALL,
+                    NetworkingMode::label,
+                    |settings| &mut settings.network.mode,
+                    managed,
+                    cx,
+                ),
+                cx,
+            ))
+            .child(muted(
+                "作用于默认 bridge 网络和之后新建的 bridge 网络，创建网络时仍可单独指定（docker network create --ipv6）。",
+                cx,
+            ))
+            .when(network.mode == NetworkingMode::DualStack, |this| {
+                this.child(indented(cx).child(muted(
+                    "默认 bridge 网络使用 IPv6 子网 fd00:7275:736b::/64，新建网络从 Docker 的 IPv6 地址池分配。",
+                    cx,
+                )))
+            })
+            .child(callout(
+                CalloutKind::Info,
+                if managed { "会重启 Engine" } else { "需要手动应用" },
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if managed {
+                        "网络配置写入受管 Engine 的 daemon.json，变化时 Engine 会重启，运行中的容器会被停止。"
+                    } else {
+                        "当前 Engine 不由 Rusker 管理（设置了 DOCKER_HOST），请直接编辑该 Engine 的 daemon.json。"
+                    })
+                    .child(
+                        div()
+                            .id("open-network-docs")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_color(cx.theme().link)
+                            .underline()
+                            .cursor_pointer()
+                            .child("了解更多")
+                            .child(Icon::new(AssetIcon::ExternalLink).xsmall())
+                            .on_click(|_, _, cx| cx.open_url(NETWORKING_DOCS_URL)),
+                    ),
+                cx,
+            ))
     }
 
     fn render_image_list(&self, images: &[ImageSummary], cx: &mut Context<Self>) -> Div {

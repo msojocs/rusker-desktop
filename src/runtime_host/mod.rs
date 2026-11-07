@@ -20,7 +20,7 @@ pub use wsl::{
     WslDistribution, MANAGED_DISTRO_NAME, MANAGED_DOCKER_HOST, MANAGED_PIPE, WSL_DOCKER_HOST,
 };
 
-use crate::settings::{DockerProxySettings, ResourceSaverSettings};
+use crate::settings::{DockerProxySettings, NetworkSettings, ResourceSaverSettings};
 
 #[derive(Debug, Error)]
 pub enum RuntimeHostError {
@@ -130,12 +130,19 @@ impl RuntimeHostService {
         self.host.set_engine_proxy(settings);
     }
 
-    /// Applies saved proxy settings immediately: rewrites `daemon.json` and
-    /// restarts a running engine when the config changed. `daemon_config`
-    /// also replaces the rest of `daemon.json` (the settings editor).
-    pub fn apply_proxy(
+    /// Like [`Self::set_engine_proxy`], for the network settings.
+    pub fn set_engine_network(&self, settings: &NetworkSettings) {
+        self.host.set_engine_network(settings);
+    }
+
+    /// Applies saved Engine settings (proxy, network) immediately: rewrites
+    /// `daemon.json` and restarts a running engine when the config changed.
+    /// `daemon_config` also replaces the rest of `daemon.json` (the settings
+    /// editor).
+    pub fn apply_engine_config(
         &self,
-        settings: DockerProxySettings,
+        proxy: DockerProxySettings,
+        network: NetworkSettings,
         daemon_config: Option<String>,
         integrations: BTreeMap<String, bool>,
     ) -> JoinHandle<Result<(ProxyApplyOutcome, RuntimeHostSnapshot), RuntimeHostError>> {
@@ -144,13 +151,14 @@ impl RuntimeHostService {
         self.spawn(async move {
             let _guard = lock.lock().await;
             let outcome = host
-                .apply_proxy(&settings, daemon_config.as_deref())
+                .apply_engine_config(&proxy, &network, daemon_config.as_deref())
                 .await?;
             Ok((outcome, host.snapshot(&integrations).await?))
         })
     }
 
-    /// The managed `daemon.json` without `proxies`, for the settings editor.
+    /// The managed `daemon.json` without the keys owned by the proxy and
+    /// network settings, for the settings editor.
     pub fn read_daemon_config(&self) -> JoinHandle<Result<String, RuntimeHostError>> {
         let host = self.host.clone();
         let lock = self.operation_lock.clone();

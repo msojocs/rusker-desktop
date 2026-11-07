@@ -256,7 +256,7 @@ fn applies_engine_proxy_directly() {
     }
     use rusker_desktop::{
         runtime_host::{ProxyApplyOutcome, MANAGED_PIPE},
-        settings::{DockerProxySettings, ProxyMode},
+        settings::{DockerProxySettings, NetworkSettings, ProxyMode},
     };
 
     let proxy_url =
@@ -286,7 +286,12 @@ fn applies_engine_proxy_directly() {
     };
     let apply = |settings: DockerProxySettings| {
         client_runtime
-            .block_on(service.apply_proxy(settings, None, BTreeMap::new()))
+            .block_on(service.apply_engine_config(
+                settings,
+                NetworkSettings::default(),
+                None,
+                BTreeMap::new(),
+            ))
             .expect("Tokio apply task")
             .expect("应用代理")
             .0

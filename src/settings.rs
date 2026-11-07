@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
     io::Write,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
 };
 
@@ -298,6 +299,142 @@ impl VmSettings {
     }
 }
 
+/// Which host addresses published container ports listen on (Docker
+/// Desktop's "Port binding behavior").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PortBinding {
+    /// Docker's default: every interface (`0.0.0.0` / `::`).
+    #[default]
+    Open,
+    /// Only `127.0.0.1`, unless a port mapping names another address.
+    LocalhostOnly,
+}
+
+impl PortBinding {
+    pub const ALL: [Self; 2] = [Self::Open, Self::LocalhostOnly];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Open => "开放（默认）",
+            Self::LocalhostOnly => "仅本机",
+        }
+    }
+}
+
+/// IP families of new networks (Docker Desktop's "Default networking mode").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NetworkingMode {
+    #[default]
+    Ipv4Only,
+    /// IPv4 and IPv6 on the default bridge and new bridge networks.
+    DualStack,
+}
+
+impl NetworkingMode {
+    pub const ALL: [Self; 2] = [Self::Ipv4Only, Self::DualStack];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ipv4Only => "仅 IPv4",
+            Self::DualStack => "IPv4 与 IPv6 双栈",
+        }
+    }
+}
+
+/// Docker's default bridge network when no subnet is set.
+pub const DEFAULT_DOCKER_SUBNET: &str = "172.17.0.0/16";
+/// IPv6 subnet of the default bridge in dual-stack mode (a ULA prefix).
+pub const DEFAULT_BRIDGE_IPV6_SUBNET: &str = "fd00:7275:736b::/64";
+
+/// `daemon.json` keys owned by [`NetworkSettings`].
+pub const ENGINE_NETWORK_KEYS: [&str; 5] =
+    ["bip", "ip", "ipv6", "fixed-cidr-v6", "default-network-opts"];
+
+/// Docker Desktop-style network settings, applied to the managed Engine's
+/// `daemon.json`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkSettings {
+    /// IPv4 subnet of the default bridge (`docker0`) in CIDR notation.
+    /// Empty: Docker's default ([`DEFAULT_DOCKER_SUBNET`]).
+    pub subnet: String,
+    pub port_binding: PortBinding,
+    pub mode: NetworkingMode,
+}
+
+impl NetworkSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        let subnet = self.subnet.trim();
+        if !subnet.is_empty() {
+            parse_ipv4_subnet(subnet)?;
+        }
+        Ok(())
+    }
+
+    fn normalized(&self) -> Self {
+        Self {
+            subnet: self.subnet.trim().to_string(),
+            ..self.clone()
+        }
+    }
+
+    /// The [`ENGINE_NETWORK_KEYS`] this configuration sets; the others are
+    /// left to Docker's defaults. An invalid subnet contributes nothing.
+    pub fn engine_config(&self) -> Map<String, Value> {
+        let mut config = Map::new();
+        if let Ok((network, prefix)) = parse_ipv4_subnet(self.subnet.trim()) {
+            // `bip` is the bridge's own address: the subnet's first host.
+            let gateway = Ipv4Addr::from(u32::from(network) + 1);
+            config.insert("bip".into(), Value::String(format!("{gateway}/{prefix}")));
+        }
+        if self.port_binding == PortBinding::LocalhostOnly {
+            config.insert("ip".into(), Value::String("127.0.0.1".into()));
+        }
+        if self.mode == NetworkingMode::DualStack {
+            config.insert("ipv6".into(), Value::Bool(true));
+            config.insert(
+                "fixed-cidr-v6".into(),
+                Value::String(DEFAULT_BRIDGE_IPV6_SUBNET.into()),
+            );
+            config.insert(
+                "default-network-opts".into(),
+                json!({ "bridge": { "com.docker.network.enable_ipv6": "true" } }),
+            );
+        }
+        config
+    }
+}
+
+/// Parses an IPv4 network such as `172.17.0.0/16`, rejecting host bits and
+/// prefixes too long for a bridge with containers.
+fn parse_ipv4_subnet(value: &str) -> Result<(Ipv4Addr, u8), String> {
+    let invalid =
+        || format!("Docker 子网“{value}”无效，应为 IPv4 CIDR，例如 {DEFAULT_DOCKER_SUBNET}");
+    let (address, prefix) = value.split_once('/').ok_or_else(invalid)?;
+    let address: Ipv4Addr = address.trim().parse().map_err(|_| invalid())?;
+    let prefix: u8 = prefix.trim().parse().map_err(|_| invalid())?;
+    if !(8..=28).contains(&prefix) {
+        return Err(format!(
+            "Docker 子网前缀长度需在 /8 到 /28 之间，当前为 /{prefix}"
+        ));
+    }
+    let mask = u32::MAX << (32 - prefix);
+    let network = Ipv4Addr::from(u32::from(address) & mask);
+    if network != address {
+        return Err(format!(
+            "Docker 子网“{value}”包含主机位，网段地址应为 {network}/{prefix}"
+        ));
+    }
+    if address.is_loopback() || address.is_multicast() || address.is_unspecified() {
+        return Err(format!(
+            "Docker 子网“{value}”不能使用回环、组播或未指定地址"
+        ));
+    }
+    Ok((network, prefix))
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -309,6 +446,7 @@ pub struct AppSettings {
     pub wsl: WslSettings,
     pub resource_saver: ResourceSaverSettings,
     pub vm: VmSettings,
+    pub network: NetworkSettings,
 }
 
 impl AppSettings {
@@ -323,7 +461,8 @@ impl AppSettings {
             .validate()
             .map_err(|error| format!("容器代理：{error}"))?;
         self.resource_saver.validate()?;
-        self.vm.validate()
+        self.vm.validate()?;
+        self.network.validate()
     }
 
     pub fn normalized(&self) -> Self {
@@ -334,6 +473,7 @@ impl AppSettings {
             wsl: self.wsl.normalized(),
             resource_saver: self.resource_saver.clone(),
             vm: self.vm.normalized(),
+            network: self.network.normalized(),
         }
     }
 
@@ -748,6 +888,58 @@ mod tests {
         assert!(VmSettings::default().validate().is_ok());
     }
 
+    #[test]
+    fn network_settings_map_to_daemon_keys() {
+        // Defaults leave every network key to Docker.
+        assert!(NetworkSettings::default().engine_config().is_empty());
+        let legacy: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).expect("旧设置");
+        assert_eq!(legacy.network, NetworkSettings::default());
+
+        let settings = NetworkSettings {
+            subnet: "10.200.0.0/24".into(),
+            port_binding: PortBinding::LocalhostOnly,
+            mode: NetworkingMode::DualStack,
+        };
+        let config = settings.engine_config();
+        assert_eq!(config["bip"], "10.200.0.1/24");
+        assert_eq!(config["ip"], "127.0.0.1");
+        assert_eq!(config["ipv6"], true);
+        assert_eq!(config["fixed-cidr-v6"], DEFAULT_BRIDGE_IPV6_SUBNET);
+        assert_eq!(
+            config["default-network-opts"]["bridge"]["com.docker.network.enable_ipv6"],
+            "true"
+        );
+        assert!(config
+            .keys()
+            .all(|key| ENGINE_NETWORK_KEYS.contains(&key.as_str())));
+        let saved = serde_json::to_value(&settings).expect("序列化");
+        assert_eq!(saved["port_binding"], "localhost-only");
+        assert_eq!(saved["mode"], "dual-stack");
+    }
+
+    #[test]
+    fn docker_subnet_must_be_an_ipv4_network() {
+        for (subnet, valid) in [
+            ("", true),
+            ("172.17.0.0/16", true),
+            ("192.168.65.0/24", true),
+            ("10.0.0.0/8", true),
+            ("192.168.65.1/24", false),
+            ("192.168.65.0", false),
+            ("192.168.65.0/29", false),
+            ("10.0.0.0/7", false),
+            ("fd00::/64", false),
+            ("127.0.0.0/8", false),
+            ("not-a-subnet", false),
+        ] {
+            let settings = NetworkSettings {
+                subnet: subnet.into(),
+                ..NetworkSettings::default()
+            };
+            assert_eq!(settings.validate().is_ok(), valid, "子网 {subnet}");
+        }
+    }
+
     fn proxy() -> DockerProxySettings {
         DockerProxySettings {
             mode: ProxyMode::Manual,
@@ -957,6 +1149,11 @@ mod tests {
             vm: VmSettings {
                 disk_image_location: format!(" {DISK_LOCATION} "),
             },
+            network: NetworkSettings {
+                subnet: " 10.200.0.0/24 ".into(),
+                port_binding: PortBinding::LocalhostOnly,
+                mode: NetworkingMode::DualStack,
+            },
         };
         store.save(&settings).expect("保存设置");
         #[cfg(unix)]
@@ -982,6 +1179,9 @@ mod tests {
         assert!(!loaded.resource_saver.enabled);
         assert_eq!(loaded.resource_saver.threshold_secs, 600);
         assert_eq!(loaded.vm.disk_image_location, DISK_LOCATION);
+        assert_eq!(loaded.network.subnet, "10.200.0.0/24");
+        assert_eq!(loaded.network.port_binding, PortBinding::LocalhostOnly);
+        assert_eq!(loaded.network.mode, NetworkingMode::DualStack);
 
         let export = store.export_proxy(&loaded.docker_proxy).expect("导出代理");
         assert_eq!(export, directory.path().join("docker-proxies.json"));
