@@ -40,13 +40,20 @@ pub const ENGINE_PROXY_PORT: u16 = 23128;
 /// Proxy address written into the managed dockerd's `daemon.json`.
 pub const ENGINE_PROXY_URL: &str = "http://127.0.0.1:23128";
 
-// Frame protocol shared with `helpers/vm-proxy/src/main.rs`.
+// Frame protocol shared with `helpers/vm-proxy/src/main.rs`. Only the
+// Windows relay speaks it; elsewhere the tests still check the constants.
+#[cfg_attr(not(windows), allow(dead_code))]
 const OPEN: u8 = 1;
+#[cfg_attr(not(windows), allow(dead_code))]
 const DATA: u8 = 2;
+#[cfg_attr(not(windows), allow(dead_code))]
 const EOF: u8 = 3;
+#[cfg_attr(not(windows), allow(dead_code))]
 const CLOSE: u8 = 4;
+#[cfg_attr(not(windows), allow(dead_code))]
 const READY: u8 = 5;
 const HEADER_LEN: usize = 9;
+#[cfg_attr(not(windows), allow(dead_code))]
 const MAX_PAYLOAD: usize = 256 * 1024;
 
 /// The VM side, built for the VM's architecture by `build.rs`.

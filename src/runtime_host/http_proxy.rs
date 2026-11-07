@@ -15,6 +15,10 @@
 //!   plain-HTTP targets), and the outgoing connection is reused while
 //!   requests keep going to the same place.
 
+// Only the Windows relay (`engine_proxy::relay`) serves this proxy; on other
+// platforms the module is still compiled so its unit tests run everywhere.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::{
     io,
     net::IpAddr,
