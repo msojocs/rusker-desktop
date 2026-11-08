@@ -83,19 +83,9 @@ async fn relay(pipe: NamedPipeServer, host: &WslHost, lock: &Mutex<()>) -> io::R
     // Counted for the whole connection so Resource Saver never stops an
     // engine that a client (pull, logs -f, attach…) is still talking to.
     let _connection = saver.track_connection();
-    // Never boot the distribution from a stray client: only relay while the
-    // supervisor session that owns dockerd is alive, except to leave
-    // Resource Saver mode or to restart an engine that went away without a
-    // deliberate stop (e.g. `wsl --shutdown`).
-    if !host.session_running() {
-        if !saver.is_active() && !host.engine_lost() {
-            return Ok(());
-        }
-        wake(host, lock).await;
-        if !host.session_running() {
-            return Ok(());
-        }
-    }
+    // Always join the lifecycle lock, including when a supervisor exists:
+    // its daemon may still be starting or frozen by Resource Saver.
+    wake(host, lock).await?;
     let mut child = dial_stdio_command().spawn()?;
     let (Some(stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
         return Err(io::Error::other("dial-stdio 缺少标准输入输出"));
@@ -114,26 +104,26 @@ async fn relay(pipe: NamedPipeServer, host: &WslHost, lock: &Mutex<()>) -> io::R
     Ok(())
 }
 
-/// Leaves Resource Saver mode, or restarts a lost engine. Concurrent clients
-/// queue on the operation lock; the first one starts the engine and the
-/// rest find it running.
-async fn wake(host: &WslHost, lock: &Mutex<()>) {
+/// Hold the original connection until the engine is ready. Do not retry or
+/// replay mutations: no request bytes have been forwarded yet.
+async fn wake(host: &WslHost, lock: &Mutex<()>) -> io::Result<()> {
     let _guard = lock.lock().await;
-    if host.session_running() {
-        return;
-    }
-    if host.engine_lost() {
-        // A failure is retried by the engine watchdog.
-        let _ = host.recover(1).await;
-        return;
-    }
-    if !host.resource_saver().is_active() {
-        return;
-    }
-    if let Err(error) = host.start().await {
-        host.proxy_status()
-            .set_error(format!("退出资源节省模式失败：{error}"));
-    }
+    let result = if host.resource_saver().is_active() {
+        host.resume_resource_saver().await
+    } else if host.engine_lost() {
+        host.recover(1).await
+    } else if host.session_running() {
+        Ok(())
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "Engine 已手动停止",
+        ));
+    };
+    result.map_err(|error| {
+        host.proxy_status().set_error(error.to_string());
+        io::Error::other(error.to_string())
+    })
 }
 
 async fn forward_until_eof(pipe_read: ReadHalf<NamedPipeServer>, mut stdin: ChildStdin) {

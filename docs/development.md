@@ -64,7 +64,11 @@ $env:RUSKER_WSL_RUNTIME_INTEGRATION='1'; cargo test --test runtime_host_operatio
 $env:RUSKER_WSL_RUNTIME_LIFECYCLE='1'; cargo test --test runtime_host_operations
 # 在指定发行版启用并停用集成，并验证 docker run -i 的 stdin EOF
 $env:RUSKER_WSL_INTEGRATION_DISTRO='Ubuntu-24.04'; cargo test --test runtime_host_operations
+# Resource Saver 回归：使用已安装的 rusker 专用发行版，运行前须退出其他 Rusker 实例且无运行中的容器
+$env:RUSKER_WSL_RESOURCE_SAVER='1'; cargo test --lib resource_saver_resumes_original_requests_without_restarting_engine -- --nocapture
 ```
+
+`RUSKER_WSL_RESOURCE_SAVER=1` 是显式选择启用（opt-in）的实机回归测试，使用已安装的 `rusker` 专用发行版，会重复暂停/恢复 Engine、启动/停止专用测试容器，并在结束时关闭受管 Engine（shutdown）。运行前必须退出其他 Rusker 实例并确保没有运行中的容器，且允许测试结束时关闭该环境；不要与上述其他实机测试同时启用。资源节省的暂停/唤醒语义与 WSL 集成限制见[资源节省设置](settings.md#资源节省)。
 
 ## macOS
 

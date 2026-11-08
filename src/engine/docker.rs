@@ -39,7 +39,9 @@ use crate::{
     },
 };
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Includes the managed runtime's wake-up, not just a pipe handshake.
+const MANAGED_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 const PULL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -66,7 +68,7 @@ impl DockerEngine {
         let client = if managed_wsl {
             Docker::connect_with_named_pipe(
                 crate::runtime_host::MANAGED_PIPE,
-                CONNECT_TIMEOUT.as_secs(),
+                DATA_TIMEOUT.as_secs(),
                 bollard::API_DEFAULT_VERSION,
             )
             .map_err(|error| EngineError::Connect(error.to_string()))?
@@ -78,7 +80,12 @@ impl DockerEngine {
         let client = Docker::connect_with_local_defaults()
             .map_err(|error| EngineError::Connect(error.to_string()))?;
 
-        let client = match timeout(CONNECT_TIMEOUT, client.negotiate_version()).await {
+        let connect_timeout = if managed_wsl {
+            MANAGED_CONNECT_TIMEOUT
+        } else {
+            CONNECT_TIMEOUT
+        };
+        let client = match timeout(connect_timeout, client.negotiate_version()).await {
             Ok(Ok(client)) => client,
             Ok(Err(error)) => {
                 let message = if managed_wsl {
@@ -93,7 +100,7 @@ impl DockerEngine {
             Err(_) => {
                 return Err(EngineError::Timeout {
                     action: "连接容器引擎".into(),
-                    seconds: CONNECT_TIMEOUT.as_secs(),
+                    seconds: connect_timeout.as_secs(),
                 });
             }
         };

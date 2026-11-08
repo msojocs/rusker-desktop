@@ -91,11 +91,21 @@ impl RuntimeHostService {
     /// Updates the Resource Saver configuration; takes effect immediately.
     pub fn set_resource_saver(&self, settings: &ResourceSaverSettings) {
         self.host.resource_saver().configure(settings);
+        if !settings.enabled {
+            let host = self.host.clone();
+            let lock = self.operation_lock.clone();
+            self.spawn(async move {
+                let _guard = lock.lock().await;
+                if let Err(error) = host.resume_resource_saver().await {
+                    host.proxy_status().set_error(error.to_string());
+                }
+            });
+        }
     }
 
-    /// Whether the engine is currently stopped by Resource Saver.
+    /// Whether the engine is currently paused by Resource Saver.
     pub fn resource_saver_active(&self) -> bool {
-        self.host.resource_saver().is_active() && !self.host.session_running()
+        self.host.resource_saver().is_active()
     }
 
     /// Whether this process holds a live engine session.
@@ -305,6 +315,7 @@ impl RuntimeHostService {
         self.spawn(async move {
             let _guard = lock.lock().await;
             host.set_integration(&distribution, enabled).await?;
+            host.resource_saver().set_integrations(&integrations);
             host.snapshot(&integrations).await
         })
     }
@@ -334,6 +345,7 @@ impl RuntimeHostService {
                     }
                 }
             }
+            host.resource_saver().set_integrations(&effective);
             let snapshot = host.snapshot(&effective).await?;
             Ok((snapshot, effective, failures))
         })
@@ -390,14 +402,14 @@ const RESOURCE_SAVER_POLL: Duration = Duration::from_secs(10);
 /// install, restart or user-initiated stop.
 #[cfg(windows)]
 async fn resource_saver_monitor(host: Arc<wsl::WslHost>, lock: Arc<Mutex<()>>) {
-    let saver = host.resource_saver();
     let mut idle_since: Option<std::time::Instant> = None;
     loop {
         tokio::time::sleep(RESOURCE_SAVER_POLL).await;
-        if !saver.enabled()
-            || saver.is_active()
-            || !host.session_running()
-            || saver.connections() > 0
+        let saver = host.resource_saver();
+        let needs_resume = saver.is_active() && !saver.can_pause();
+        if !saver.can_pause() && !needs_resume
+            || !needs_resume
+                && (saver.is_active() || !host.session_running() || saver.connections() > 0)
         {
             idle_since = None;
             continue;
@@ -406,13 +418,22 @@ async fn resource_saver_monitor(host: Arc<wsl::WslHost>, lock: Arc<Mutex<()>>) {
             idle_since = None;
             continue;
         };
+        if needs_resume {
+            if let Err(error) = host.resume_resource_saver().await {
+                host.proxy_status().set_error(error.to_string());
+            }
+            idle_since = None;
+            continue;
+        }
         if !matches!(host.running_containers().await, Ok(0)) {
             idle_since = None;
             continue;
         }
         let since = *idle_since.get_or_insert_with(std::time::Instant::now);
         if since.elapsed() >= saver.threshold() && saver.connections() == 0 {
-            host.enter_resource_saver().await;
+            if let Err(error) = host.enter_resource_saver().await {
+                host.proxy_status().set_error(error.to_string());
+            }
             idle_since = None;
         }
     }

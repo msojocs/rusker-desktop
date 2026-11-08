@@ -850,13 +850,27 @@ impl RuskerApp {
         if active {
             self.connected = false;
             self.runtime_snapshot.engine_ready = false;
-            self.runtime_snapshot.running = false;
+            // Resource Saver retains the WSL session and mounted data disk.
+            self.runtime_snapshot.running = true;
             self.runtime_snapshot.resource_saver_active = true;
             cx.notify();
         } else {
-            // Waits on the wake-up (it holds the operation lock), then
-            // reconnects once the engine is ready.
-            self.refresh_runtime_host(cx);
+            self.runtime_snapshot.resource_saver_active = false;
+            self.runtime_snapshot.engine_ready = self
+                .runtime_host
+                .as_ref()
+                .is_some_and(RuntimeHostService::engine_session_running);
+            // The original operation owns the wake-up and applies its own
+            // snapshot. Don't run GPU/environment probes or replace the page
+            // with a reconnect animation while that operation is completing.
+            if self.runtime_snapshot.engine_ready
+                && !self.connected
+                && self.busy.is_none()
+                && !self.loading
+            {
+                self.refresh(cx);
+            }
+            cx.notify();
         }
     }
 
@@ -3616,7 +3630,7 @@ impl RuskerApp {
             )
             .child(muted(
                 if managed {
-                    "没有运行中的容器时停止 Engine 和专用发行版，释放 CPU 与内存。Windows 客户端（docker.exe、Rusker）再次连接时自动恢复。"
+                    "没有运行中的容器且未启用 WSL 集成时暂停 Engine，保留 WSL 发行版和数据盘以便快速恢复。Windows 客户端再次连接时自动继续；内存回收由 WSL 管理。"
                 } else {
                     "资源节省只作用于 Rusker 管理的 WSL2 Engine，当前 Engine 不由 Rusker 管理。"
                 },
@@ -4519,8 +4533,22 @@ impl RuskerApp {
                 cx.theme().warning,
             );
         }
-        if self.loading {
-            return ("正在连接 Engine…".into(), cx.theme().warning);
+        // Backend readiness precedes the original action's fresh snapshot.
+        // Read the live session rather than the periodically polled snapshot:
+        // during that gap connected/loading can both be false, even though
+        // the engine is already handling the request that woke it.
+        let session_running = self.manages_engine()
+            && self
+                .runtime_host
+                .as_ref()
+                .is_some_and(RuntimeHostService::engine_session_running);
+        if let Some(label) = engine_reconnect_label(
+            session_running,
+            self.connected,
+            self.busy.is_some(),
+            self.loading,
+        ) {
+            return (label.into(), cx.theme().warning);
         }
         let label = if cfg!(windows) && !self.runtime_snapshot.installed && self.manages_engine() {
             "Engine 未安装"
@@ -4528,6 +4556,56 @@ impl RuskerApp {
             "Engine 已停止"
         };
         (label.into(), cx.theme().danger)
+    }
+}
+
+/// A live managed session must not be labelled stopped merely because the
+/// action/snapshot that establishes the UI connection has not completed yet.
+fn engine_reconnect_label(
+    session_running: bool,
+    connected: bool,
+    busy: bool,
+    loading: bool,
+) -> Option<&'static str> {
+    if connected {
+        None
+    } else if session_running && busy {
+        Some("Engine 恢复中…")
+    } else if session_running || loading {
+        Some("正在连接 Engine…")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod engine_status_tests {
+    use super::engine_reconnect_label;
+
+    #[test]
+    fn wake_up_action_is_not_reported_as_stopped_before_snapshot() {
+        // Saver has cleared, but action deliberately sets loading=false and
+        // connected remains false until its full snapshot has arrived.
+        assert_eq!(
+            engine_reconnect_label(true, false, true, false),
+            Some("Engine 恢复中…")
+        );
+        // Also covers an external CLI wake-up before the next UI poll.
+        assert_eq!(
+            engine_reconnect_label(true, false, false, false),
+            Some("正在连接 Engine…")
+        );
+    }
+
+    #[test]
+    fn actual_stop_and_success_do_not_get_a_reconnect_label() {
+        assert_eq!(engine_reconnect_label(false, false, false, false), None);
+        assert_eq!(engine_reconnect_label(false, false, true, false), None);
+        assert_eq!(engine_reconnect_label(true, true, true, false), None);
+        assert_eq!(
+            engine_reconnect_label(false, false, false, true),
+            Some("正在连接 Engine…")
+        );
     }
 }
 

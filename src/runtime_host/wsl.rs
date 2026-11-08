@@ -13,7 +13,7 @@ use std::{
 use directories::ProjectDirs;
 use serde_json::{Map, Value};
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
     time::timeout,
 };
@@ -141,6 +141,49 @@ if ! out=$(/usr/bin/dockerd --validate --config-file "$NEW" 2>&1); then
 fi
 chmod 0644 "$NEW"
 mv -f "$NEW" /etc/docker/daemon.json
+"#;
+
+/// Only signal the exact processes recorded at pause time, never a reused PID.
+/// Kept outside the image so existing installations gain Resource Saver too.
+const ENGINE_SIGNALS_SCRIPT: &str = r#"set -eu
+PAUSED=/var/run/rusker-engine.paused
+process_start() { awk '{print $22}' "/proc/$1/stat" 2>/dev/null; }
+resume_engine() {
+    [ -f "$PAUSED" ] || return 0
+    failed=0
+    while read -r pid started; do
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        current=$(process_start "$pid" || true)
+        if [ -n "$current" ] && [ "$current" = "$started" ]; then
+            kill -CONT "$pid" || failed=1
+        fi
+    done < "$PAUSED"
+    [ "$failed" -eq 0 ] || return 1
+    rm -f "$PAUSED"
+}
+"#;
+
+/// Pause only an idle dockerd and its own containerd, not the WSL VM or
+/// unrelated services. The session, sockets and data mounts stay alive.
+const PAUSE_SCRIPT: &str = r#"resume_engine
+running=$(/usr/bin/docker --host=unix:///var/run/docker.sock ps -q)
+[ -z "$running" ] || exit 75
+pid=$(cat /var/run/docker.pid)
+case "$pid" in ''|*[!0-9]*) exit 1 ;; esac
+grep -qx dockerd "/proc/$pid/comm"
+process_start "$pid" > /dev/null
+: > "$PAUSED"
+trap 'resume_engine' EXIT HUP INT TERM
+printf '%s %s\n' "$pid" "$(process_start "$pid")" >> "$PAUSED"
+kill -STOP "$pid"
+# dockerd can no longer create children; freeze only its managed containerd.
+for child in $(cat /proc/"$pid"/task/*/children); do
+    if grep -qx containerd "/proc/$child/comm" 2>/dev/null; then
+        printf '%s %s\n' "$child" "$(process_start "$child")" >> "$PAUSED"
+        kill -STOP "$child"
+    fi
+done
+trap - EXIT HUP INT TERM
 "#;
 
 const STOP_SCRIPT: &str = r#"set -u
@@ -329,7 +372,7 @@ pub struct RuntimeHostSnapshot {
     pub gpu: NvidiaGpuStatus,
     pub distributions: Vec<WslDistribution>,
     pub warnings: Vec<String>,
-    /// The engine was stopped by Resource Saver and wakes on the next
+    /// The engine is paused in its live WSL session and resumes on the next
     /// Windows client connection.
     pub resource_saver_active: bool,
     /// Directory holding the managed distribution's `ext4.vhdx`.
@@ -361,6 +404,7 @@ pub(crate) struct ResourceSaver {
     enabled: AtomicBool,
     threshold_secs: AtomicU64,
     active: AtomicBool,
+    integrations_enabled: AtomicBool,
     connections: AtomicUsize,
 }
 
@@ -372,6 +416,7 @@ impl Default for ResourceSaver {
             enabled: AtomicBool::new(false),
             threshold_secs: AtomicU64::new(defaults.threshold_secs),
             active: AtomicBool::new(false),
+            integrations_enabled: AtomicBool::new(false),
             connections: AtomicUsize::new(0),
         }
     }
@@ -387,6 +432,17 @@ impl ResourceSaver {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_integrations(&self, integrations: &BTreeMap<String, bool>) {
+        self.integrations_enabled.store(
+            integrations.values().any(|enabled| *enabled),
+            Ordering::SeqCst,
+        );
+    }
+
+    pub(crate) fn can_pause(&self) -> bool {
+        self.enabled() && !self.integrations_enabled.load(Ordering::SeqCst)
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -493,7 +549,7 @@ pub struct WslHost {
     saver: Arc<ResourceSaver>,
     lan_forward: Arc<LanForwardStatus>,
     /// Set once the engine started successfully, cleared by deliberate
-    /// stops (manual, quit, Resource Saver); see [`Self::engine_lost`].
+    /// stops (manual, quit); Resource Saver retains the session and intent.
     engine_wanted: Arc<AtomicBool>,
     recovery: Arc<RecoveryStatus>,
     /// Where a new Docker data disk is created (None = default).
@@ -720,18 +776,66 @@ impl WslHost {
             .count())
     }
 
-    /// Stops the idle engine and its distribution to release memory. The
-    /// pipe proxy restarts it on the next Windows client connection.
+    /// Pauses the idle engine without tearing down the WSL environment.
+    /// The caller holds the operation lock, also used by new pipe clients.
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub(crate) async fn enter_resource_saver(&self) {
-        // Resource Saver wakes the engine itself; this is not a crash.
-        self.engine_wanted.store(false, Ordering::Relaxed);
-        self.stop_engine().await;
-        let mut terminate = wsl_command();
-        terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
-        let _ = execute(terminate, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await;
-        self.detach_data_disk().await;
+    pub(crate) async fn enter_resource_saver(&self) -> Result<(), RuntimeHostError> {
+        if !self.saver.can_pause()
+            || self.saver.is_active()
+            || self.saver.connections() > 0
+            || !self.session.is_running()
+        {
+            return Ok(());
+        }
+        let mut pause = managed_command("root");
+        pause.args([
+            "/bin/sh",
+            "-c",
+            &format!("{ENGINE_SIGNALS_SCRIPT}{PAUSE_SCRIPT}"),
+        ]);
+        if let Err(error) = execute(pause, "暂停空闲 Engine", COMMAND_TIMEOUT).await {
+            // A timeout can kill wsl.exe before the shell's rollback trap ran.
+            // Preserve the gate if rollback fails so clients retry resume,
+            // rather than sending requests to a partially frozen daemon.
+            if self.continue_engine().await.is_err() {
+                self.saver.set_active(true);
+            }
+            return Err(error);
+        }
+        // Keep the flag until resume AND readiness succeed; a live session
+        // is intentionally not sufficient to mean that requests can proceed.
         self.saver.set_active(true);
+        Ok(())
+    }
+
+    /// Fast path: no ownership probe, disk attachment, config read or daemon
+    /// restart. Concurrent clients wait on the caller's operation lock.
+    pub(crate) async fn resume_resource_saver(&self) -> Result<(), RuntimeHostError> {
+        if !self.saver.is_active() {
+            return Ok(());
+        }
+        if !self.session.is_running() {
+            // WSL was shut down externally while paused: cold start is only
+            // a fallback, never the normal Resource Saver exit path.
+            self.ensure_owned().await?;
+            return self.start_engine().await;
+        }
+        self.continue_engine().await?;
+        self.wait_until_ready().await?;
+        self.saver.set_active(false);
+        self.proxy.clear();
+        Ok(())
+    }
+
+    async fn continue_engine(&self) -> Result<(), RuntimeHostError> {
+        let mut resume = managed_command("root");
+        resume.args([
+            "/bin/sh",
+            "-c",
+            &format!("{ENGINE_SIGNALS_SCRIPT}resume_engine"),
+        ]);
+        execute(resume, "恢复 Engine", COMMAND_TIMEOUT).await?;
+        Ok(())
     }
 
     /// Like Docker Desktop, dockerd never sees the configured addresses: it
@@ -920,7 +1024,9 @@ impl WslHost {
             .map(|distribution| distribution.state.eq_ignore_ascii_case("running"))
             .unwrap_or(false);
         let session_alive = self.session.is_running();
-        let engine_ready = installed && running && session_alive && engine_ping().await.is_ok();
+        let paused = self.saver.is_active();
+        let engine_ready =
+            installed && running && session_alive && !paused && self.probe_engine().await.is_ok();
         let gpu = if engine_ready {
             probe_gpu().await
         } else {
@@ -936,7 +1042,7 @@ impl WslHost {
         if let Some(error) = self.engine_proxy.error().filter(|_| session_alive) {
             warnings.push(error);
         }
-        if installed && running && !engine_ready {
+        if installed && running && !engine_ready && !paused {
             warnings.push(if session_alive {
                 "受管 Engine 尚未就绪；请稍候刷新，或查看 dockerd 日志".into()
             } else {
@@ -986,7 +1092,7 @@ impl WslHost {
             gpu,
             distributions,
             warnings,
-            resource_saver_active: self.saver.is_active() && !session_alive,
+            resource_saver_active: paused,
             disk_location,
         })
     }
@@ -1139,6 +1245,9 @@ impl WslHost {
     }
 
     pub async fn start(&self) -> Result<(), RuntimeHostError> {
+        if self.saver.is_active() && self.session.is_running() {
+            return self.resume_resource_saver().await;
+        }
         self.ensure_owned().await?;
         self.start_engine().await
     }
@@ -1149,6 +1258,7 @@ impl WslHost {
         &self,
         integrations: &BTreeMap<String, bool>,
     ) -> Result<RuntimeHostSnapshot, RuntimeHostError> {
+        self.saver.set_integrations(integrations);
         let snapshot = self.snapshot(integrations).await?;
         if !snapshot.installed || snapshot.engine_ready {
             return Ok(snapshot);
@@ -1193,6 +1303,7 @@ impl WslHost {
         &self,
         integrations: &BTreeMap<String, bool>,
     ) -> Result<RuntimeHostSnapshot, RuntimeHostError> {
+        self.saver.set_integrations(integrations);
         let mut warnings = Vec::new();
         for distribution in integrations
             .iter()
@@ -1213,6 +1324,9 @@ impl WslHost {
         distribution: &str,
         enabled: bool,
     ) -> Result<(), RuntimeHostError> {
+        if enabled {
+            self.resume_resource_saver().await?;
+        }
         self.ensure_owned().await?;
         let distros = list_distributions().await?;
         let Some(target) = distros.iter().find(|candidate| {
@@ -1228,7 +1342,7 @@ impl WslHost {
             )));
         }
         if enabled {
-            engine_ping()
+            self.probe_engine()
                 .await
                 .map_err(|message| RuntimeHostError::Command {
                     action: "检查受管 Engine".into(),
@@ -1261,9 +1375,12 @@ impl WslHost {
     }
 
     async fn start_engine(&self) -> Result<(), RuntimeHostError> {
-        self.saver.set_active(false);
         if !self.session.is_running() {
             let wwid = self.attach_data_disk().await?;
+            // A previous app instance may have exited while the daemon was
+            // paused. Resume recorded identities BEFORE sending any SIGTERM
+            // for a config change; a frozen daemon cannot handle that signal.
+            self.continue_engine().await?;
             // Write the current proxy and network config before dockerd
             // reads it. If it changed while a leftover dockerd is still
             // running, stop that one so the supervisor starts a fresh daemon
@@ -1292,6 +1409,7 @@ impl WslHost {
             self.session.replace(child);
         }
         self.wait_until_ready().await?;
+        self.saver.set_active(false);
         // From now on a vanished session is an accident to recover from.
         self.engine_wanted.store(true, Ordering::Relaxed);
         self.recovery.clear_failure();
@@ -1300,6 +1418,10 @@ impl WslHost {
 
     /// SIGTERM dockerd (so containers stop cleanly), then release the session.
     async fn stop_engine(&self) {
+        // A frozen daemon cannot handle SIGTERM. Also recovers a pause whose
+        // command failed after writing the Linux-side identity file.
+        let _ = self.continue_engine().await;
+        self.saver.set_active(false);
         let mut command = managed_command("root");
         command.arg("/bin/sh").arg("-c").arg(STOP_SCRIPT);
         let _ = execute(command, "停止 dockerd", DOCKERD_STOP_TIMEOUT).await;
@@ -1309,6 +1431,52 @@ impl WslHost {
                 let _ = child.wait().await;
             }
         }
+    }
+
+    /// Private stdio probe bypasses the public proxy: readiness is checked
+    /// while holding the lifecycle lock, which public clients must wait on.
+    async fn probe_engine(&self) -> Result<(), String> {
+        let mut child = dial_stdio_command()
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        let mut stdin = child.stdin.take().ok_or("ping stdin unavailable")?;
+        let mut stdout = child.stdout.take().ok_or("ping stdout unavailable")?;
+        let result = timeout(Duration::from_secs(2), async {
+            stdin
+                .write_all(b"GET /_ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut response = Vec::new();
+            let mut buffer = [0u8; 512];
+            loop {
+                let count = stdout
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if count == 0 {
+                    return Err("Engine ping connection closed".into());
+                }
+                response.extend_from_slice(&buffer[..count]);
+                if response.windows(4).any(|part| part == b"\r\n\r\n") {
+                    return if response.starts_with(b"HTTP/1.1 200 ")
+                        || response.starts_with(b"HTTP/1.0 200 ")
+                    {
+                        Ok(())
+                    } else {
+                        Err(String::from_utf8_lossy(&response).into_owned())
+                    };
+                }
+                if response.len() > 8192 {
+                    return Err("Engine ping response headers too large".into());
+                }
+            }
+        })
+        .await
+        .map_err(|_| "Engine ping timeout".to_string())
+        .and_then(|result| result);
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        result
     }
 
     async fn wait_until_ready(&self) -> Result<(), RuntimeHostError> {
@@ -1321,7 +1489,7 @@ impl WslHost {
                     message: format!("Engine 会话已退出。最近日志：\n{}", engine_log_tail().await),
                 });
             }
-            match engine_ping().await {
+            match self.probe_engine().await {
                 Ok(()) => return Ok(()),
                 Err(error) => last_error = error,
             }
@@ -1785,28 +1953,6 @@ pub(crate) fn dial_stdio_command() -> Command {
     command
 }
 
-/// Pings the engine end-to-end through the Windows named pipe proxy.
-#[cfg(windows)]
-async fn engine_ping() -> Result<(), String> {
-    const PING_TIMEOUT: Duration = Duration::from_secs(10);
-    let client = bollard::Docker::connect_with_named_pipe(
-        MANAGED_PIPE,
-        PING_TIMEOUT.as_secs(),
-        bollard::API_DEFAULT_VERSION,
-    )
-    .map_err(|error| error.to_string())?;
-    match timeout(PING_TIMEOUT, client.ping()).await {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(error)) => Err(error.to_string()),
-        Err(_) => Err("连接受管 Engine 超时".into()),
-    }
-}
-
-#[cfg(not(windows))]
-async fn engine_ping() -> Result<(), String> {
-    Err("当前平台不支持受管 WSL2 Engine".into())
-}
-
 async fn engine_log_tail() -> String {
     let mut command = managed_command("root");
     command.args(["/usr/bin/tail", "-n", "20", "/var/log/rusker-dockerd.log"]);
@@ -2016,6 +2162,131 @@ mod tests {
         drop(first);
         drop(second);
         assert_eq!(saver.connections(), 0);
+    }
+
+    #[test]
+    fn resource_saver_keeps_session_active_and_blocks_wsl_integration() {
+        let saver = ResourceSaver::default();
+        saver.configure(&ResourceSaverSettings {
+            enabled: true,
+            threshold_secs: 30,
+        });
+        assert!(saver.can_pause());
+        saver.set_integrations(&BTreeMap::from([("Ubuntu".into(), true)]));
+        assert!(!saver.can_pause());
+        saver.set_integrations(&BTreeMap::from([("Ubuntu".into(), false)]));
+        assert!(saver.can_pause());
+        saver.set_active(true);
+        saver.configure(&ResourceSaverSettings {
+            enabled: false,
+            threshold_secs: 30,
+        });
+        assert!(
+            saver.is_active(),
+            "disabling must not hide a daemon still awaiting resume"
+        );
+        assert!(!saver.can_pause());
+    }
+
+    #[test]
+    fn pause_scripts_preserve_processes_mounts_and_validate_pid_identity() {
+        assert!(PAUSE_SCRIPT.contains("--host=unix:///var/run/docker.sock ps -q"));
+        assert!(PAUSE_SCRIPT.contains("kill -STOP"));
+        assert!(PAUSE_SCRIPT.contains("trap 'resume_engine'"));
+        assert!(ENGINE_SIGNALS_SCRIPT.contains("kill -CONT"));
+        assert!(ENGINE_SIGNALS_SCRIPT.contains("[ \"$current\" = \"$started\" ]"));
+        for forbidden in ["kill -TERM", "--terminate", "--unmount", "dockerd --host"] {
+            assert!(!PAUSE_SCRIPT.contains(forbidden));
+        }
+    }
+
+    /// Opt-in real WSL regression. Never runs on ordinary cargo test.
+    #[cfg(windows)]
+    #[test]
+    fn resource_saver_resumes_original_requests_without_restarting_engine() {
+        if std::env::var("RUSKER_WSL_RESOURCE_SAVER").as_deref() != Ok("1") {
+            return;
+        }
+        use crate::{engine::EngineService, model::ContainerAction};
+        assert!(
+            std::env::var_os("DOCKER_HOST").is_none(),
+            "unset DOCKER_HOST: this regression only targets the managed engine"
+        );
+        let service = super::super::RuntimeHostService::new().expect("runtime host");
+        let engine = EngineService::new().expect("engine service");
+        let client_runtime = tokio::runtime::Runtime::new().expect("client runtime");
+        let outcome = client_runtime.block_on(async {
+            service.startup(BTreeMap::new()).await.unwrap()?;
+            let host = &service.host;
+            let docker = bollard::Docker::connect_with_named_pipe(
+                MANAGED_PIPE, 120, bollard::API_DEFAULT_VERSION,
+            ).unwrap().negotiate_version().await.unwrap();
+            assert_eq!(host.running_containers().await?, 0, "test requires an idle dedicated engine");
+            let identity = || async {
+                let mut cmd = managed_command("root");
+                cmd.args(["/bin/sh", "-c", "pid=$(cat /var/run/docker.pid); cat /proc/$pid/stat; findmnt -n -o SOURCE /var/lib/docker"]);
+                let output = execute(cmd, "engine identity", COMMAND_TIMEOUT).await?;
+                let text = decode(&output.stdout);
+                let fields: Vec<_> = text.lines().next().unwrap().split_whitespace().collect();
+                Ok::<_, RuntimeHostError>((fields[0].to_string(), fields[21].to_string(), text.lines().last().unwrap().to_string()))
+            };
+            let before = identity().await?;
+            // No network pull: import only the system image's static busybox.
+            let image = format!("rusker-test/resource-saver:{}", std::process::id());
+            let mut import = managed_command("root");
+            import.args(["/bin/sh", "-c", "set -eu; d=$(mktemp -d); trap 'rm -rf \"$d\"' EXIT; mkdir -p \"$d/bin\"; cp /bin/busybox \"$d/bin/\"; tar -C \"$d\" -c . | docker --host=unix:///var/run/docker.sock import - \"$1\" >/dev/null", "test-import", &image]);
+            execute(import, "import test image", COMMAND_TIMEOUT).await?;
+            let created = docker.create_container(None::<bollard::query_parameters::CreateContainerOptions>, bollard::models::ContainerCreateBody {
+                image: Some(image.clone()),
+                cmd: Some(vec!["/bin/busybox".into(), "sleep".into(), "300".into()]),
+                ..Default::default()
+            }).await.unwrap();
+            let result = async {
+                for _ in 0..3 {
+                    host.resource_saver().configure(&ResourceSaverSettings { enabled: true, threshold_secs: 30 });
+                    {
+                        let _guard = service.operation_lock.lock().await;
+                        host.enter_resource_saver().await?;
+                    }
+                    assert!(service.resource_saver_active());
+                    assert!(host.session_running(), "pause must preserve supervisor");
+                    let paused = service.snapshot(BTreeMap::new()).await.unwrap()?;
+                    assert!(paused.running && paused.resource_saver_active && !paused.engine_ready);
+                    assert!(service.resource_saver_active(), "snapshot must not wake engine");
+                    let started = std::time::Instant::now();
+                    // Original mutation, plus concurrent requests during wake-up.
+                    let (action, version, info) = tokio::join!(
+                        engine.container_action(created.id.clone(), ContainerAction::Start),
+                        docker.version(), docker.info(),
+                    );
+                    action.unwrap().unwrap();
+                    version.unwrap();
+                    info.unwrap();
+                    assert!(docker.inspect_container(&created.id, None).await.unwrap().state.unwrap().running.unwrap());
+                    assert!(!service.resource_saver_active());
+                    assert_eq!(identity().await?, before, "PID, start time and data mount must survive");
+                    eprintln!("Resource Saver -> container started: {:?}", started.elapsed());
+                    engine.container_action(created.id.clone(), ContainerAction::Stop).await.unwrap().unwrap();
+                }
+                // Disabling Resource Saver must actively resume it.
+                {
+                    let _guard = service.operation_lock.lock().await;
+                    host.enter_resource_saver().await?;
+                }
+                service.set_resource_saver(&ResourceSaverSettings { enabled: false, threshold_secs: 30 });
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while service.resource_saver_active() {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("disabling Resource Saver must resume without a client request");
+                Ok::<_, RuntimeHostError>(())
+            }.await;
+            docker.remove_container(&created.id, Some(bollard::query_parameters::RemoveContainerOptionsBuilder::default().force(true).build())).await.unwrap();
+            docker.remove_image(&image, None::<bollard::query_parameters::RemoveImageOptions>, None).await.unwrap();
+            result
+        });
+        service.shutdown_blocking(Duration::from_secs(50));
+        outcome.expect("resource saver regression");
     }
 
     #[test]

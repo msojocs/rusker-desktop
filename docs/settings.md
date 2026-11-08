@@ -18,17 +18,20 @@ Docker 数据磁盘 `docker-data.vhdx` 所在目录，存放镜像、容器和�
 - 每次启动 Engine 时，Rusker 用 `wsl --mount --vhd <文件> --bare` 把数据磁盘挂到 WSL2 虚拟机，在 `rusker` 内按磁盘 WWID 找到设备，首次使用时格式化为 ext4，再绑定挂载到 `/var/lib/docker` 和 `/var/lib/containerd`。旧版本保存在系统盘上的数据会在首次挂载时自动迁移。
 - 选择新目录并点击“应用”后，Rusker 停止 Engine、终止 `rusker`、用 `wsl --unmount` 只卸载这块数据磁盘，然后移动文件（同一分区内为重命名，跨分区时复制后删除原文件），更新记录并恢复 Engine。其他 WSL 发行版不受影响，也不需要 `wsl --shutdown`。目标目录中不能已有 `docker-data.vhdx`；移动失败时设置不会保存，数据磁盘仍在原位置。
 - 不使用 `wsl --manage --move`：WSL 在虚拟机运行期间不会释放已停止发行版的系统盘，移动会报 `ERROR_SHARING_VIOLATION`。
-- 停止 Engine、进入资源节省模式或退出 Rusker 时会卸载数据磁盘，文件随即可被备份或移动。
+- 手动停止 Engine 或退出 Rusker 时会卸载数据磁盘，文件随即可被备份或移动；进入资源节省模式时仍保持挂载，不能据此备份或移动磁盘文件。
 
 ### 资源节省
 
-开启后，受管 Engine 在**没有运行中的容器且没有 Windows 管道客户端连接**达到阈值时，停止 dockerd 并终止 `rusker` 发行版以释放 CPU 与内存，状态栏显示“资源节省模式”。
+Windows WSL2 后端开启后，受管 Engine 在**没有运行中的容器、没有 Windows 管道客户端连接且未启用任何 WSL 集成**达到阈值时，向 `dockerd` 及其直接管理的 `containerd` 发送 `SIGSTOP`，状态栏显示“资源节省模式”。这是暂停而非冷停：保留长期 WSL 会话、`rusker` 发行版和数据 VHD 挂载，不终止发行版、不卸载磁盘。
 
-- 任何连接 `npipe:////./pipe/rusker_engine` 的客户端（`docker.exe`、Rusker 自身刷新等）都会让 Engine 自动恢复，连接会等待 Engine 就绪后再转发。
+- 通过 `npipe:////./pipe/rusker_engine` 到达的下一请求（`docker.exe`、Rusker 自身刷新等）会在全局操作锁下发送 `SIGCONT` 恢复暂停的进程，等待 Docker API 就绪后再转发原请求。
 - 拉取镜像、`docker logs -f` 等仍在进行的管道连接会阻止进入资源节省模式。
-- 手动“停止”不属于资源节省，客户端连接不会自动启动 Engine。
-- 已知限制：资源节省模式下，已集成的 WSL 发行版内通过 `/mnt/wsl/rusker/docker.sock` 运行的 docker 命令无法唤醒 Engine，需要先通过 Windows 端点或 Rusker 恢复；直接连接该 socket 的长时间操作也不会被计为活动连接。
-- 修改开关或阈值后点击“应用”立即生效，不会重启 Engine。
+- 手动“停止”或退出 Rusker 仍正常优雅关闭 Engine、终止发行版并卸载数据磁盘；手动停止后，客户端请求不会自动启动 Engine。
+- 启用任意 WSL 集成时不自动进入资源节省模式：集成发行版直连 `/mnt/wsl/rusker/docker.sock`，不能触发 Windows 侧唤醒，其长时间操作也不计入 Windows 管道活动连接。
+- 修改开关或阈值后点击“应用”立即生效，不会重启 Engine；关闭资源节省开关会恢复已暂停的 Engine。
+- 暂停可减少空闲 CPU 活动，但不保证释放 WSL 内存。建议按需配置 WSL 的 `autoMemoryReclaim`；Rusker 不会自动修改用户全局 `.wslconfig`。
+
+该行为对齐 Docker 官方 Windows WSL 后端的 Resource Saver 语义（暂停 Engine，而非关闭整个 WSL 环境）；`SIGSTOP`/`SIGCONT` 是 Rusker 的实现方式，不代表 Docker 官方采用相同实现。
 
 ### 其他
 默认配置目录由操作系统决定，可通过 `RUSKER_CONFIG_DIR` 覆盖。目录内包含：
