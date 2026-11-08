@@ -172,6 +172,32 @@ fn container_count(image: &ImageSummary, containers: &[ContainerSummary]) -> usi
         .count()
 }
 
+/// Resolve the image actually used by a container, not a tag that may have moved.
+pub fn container_image<'a>(
+    images: &'a [ImageSummary],
+    container: &ContainerSummary,
+) -> Option<&'a ImageSummary> {
+    if !container.image_id.is_empty() {
+        return images.iter().find(|image| {
+            image.id.strip_prefix("sha256:").unwrap_or(&image.id)
+                == container
+                    .image_id
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&container.image_id)
+        });
+    }
+    images.iter().find(|image| {
+        image.tags.contains(&container.image)
+            || image.digests.contains(&container.image)
+            || (!container.image.is_empty()
+                && image.id.strip_prefix("sha256:").unwrap_or(&image.id)
+                    == container
+                        .image
+                        .strip_prefix("sha256:")
+                        .unwrap_or(&container.image))
+    })
+}
+
 pub fn image_rows(images: &[ImageSummary], containers: &[ContainerSummary]) -> Vec<ImageRow> {
     let mut rows = Vec::new();
     for image in images {
@@ -278,6 +304,46 @@ mod tests {
             image_id: image_id.into(),
             ..ContainerSummary::default()
         }
+    }
+
+    #[test]
+    fn resolves_container_image_by_id_even_when_tag_has_moved() {
+        let images = vec![
+            image("sha256:old", &[], 1, 1),
+            image("sha256:new", &["nginx:latest"], 1, 2),
+        ];
+        let container = ContainerSummary {
+            image_id: "old".into(),
+            image: "nginx:latest".into(),
+            ..ContainerSummary::default()
+        };
+        assert_eq!(
+            container_image(&images, &container).unwrap().id,
+            "sha256:old"
+        );
+        let missing = ContainerSummary {
+            image_id: "sha256:missing".into(),
+            ..container
+        };
+        assert!(container_image(&images, &missing).is_none());
+    }
+
+    #[test]
+    fn resolves_container_image_by_reference_without_id() {
+        let mut image = image("sha256:abc", &["nginx:latest"], 1, 1);
+        image.digests = vec!["nginx@sha256:digest".into()];
+        let images = vec![image];
+        for reference in ["nginx:latest", "nginx@sha256:digest", "abc", "sha256:abc"] {
+            let container = ContainerSummary {
+                image: reference.into(),
+                ..ContainerSummary::default()
+            };
+            assert_eq!(
+                container_image(&images, &container).unwrap().id,
+                "sha256:abc"
+            );
+        }
+        assert!(container_image(&images, &ContainerSummary::default()).is_none());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::{
 
 use gpui_kit::component::{
     breadcrumb::{Breadcrumb, BreadcrumbItem},
-    button::{Button, ButtonVariant, ButtonVariants as _},
+    button::{Button, ButtonCustomVariant, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     input::{Editor, EditorState, Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
@@ -683,6 +683,9 @@ impl RuskerApp {
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
         let entering_volumes = page == Page::Volumes && self.page != Page::Volumes;
         let entering_containers = page == Page::Containers && self.page != Page::Containers;
+        if page == Page::Images && self.page != Page::Images {
+            self.images.selected = None;
+        }
         self.page = page;
         if entering_containers {
             // The sidebar entry always opens the container list, not the
@@ -2083,8 +2086,7 @@ impl RuskerApp {
             )
             .child(div().flex_1())
             .child(
-                Button::new("refresh-containers")
-                    .ghost()
+                container_list_button("refresh-containers", container_action_blue(cx), cx)
                     .small()
                     .icon(IconName::RotateCw)
                     .tooltip("刷新")
@@ -2093,7 +2095,14 @@ impl RuskerApp {
             )
             .child(
                 Button::new("open-create-container")
-                    .primary()
+                    .pointer(true)
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .color(rgb(0x1D63ED).into())
+                            .foreground(gpui_kit::white())
+                            .hover(rgb(0x1A56D0).into())
+                            .active(rgb(0x1749B0).into()),
+                    )
                     .icon(IconName::Plus)
                     .label("创建")
                     .disabled(busy)
@@ -2144,16 +2153,20 @@ impl RuskerApp {
                 let count = checked.len();
                 let selected = selected_containers.clone();
                 this.child(
-                    Button::new("clear-container-selection")
-                        .ghost()
-                        .label("取消选择")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.containers_checked.clear();
-                            cx.notify();
-                        })),
+                    container_list_button(
+                        "clear-container-selection",
+                        container_action_blue(cx),
+                        cx,
+                    )
+                    .label("取消选择")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.containers_checked.clear();
+                        cx.notify();
+                    })),
                 )
                 .child(
                     Button::new("remove-checked-containers")
+                        .pointer(true)
                         .danger()
                         .icon(IconName::Delete)
                         .label(format!("删除所选（{count}）"))
@@ -2203,14 +2216,14 @@ impl RuskerApp {
                 ),
             )
             .child(div().w(px(CONTAINER_STATUS_COLUMN)).flex_shrink_0())
-            .child(div().flex_1().min_w(px(112.)).child("名称"))
+            .child(div().flex_1().min_w(px(112.)).pr_3().child("名称"))
             .child(
                 div()
                     .w(px(CONTAINER_ID_COLUMN))
                     .flex_shrink_0()
                     .child("容器 ID"),
             )
-            .child(div().flex_1().min_w(px(112.)).child("镜像"))
+            .child(div().flex_1().min_w(px(112.)).pr_3().child("镜像"))
             .child(
                 div()
                     .w(px(CONTAINER_PORTS_COLUMN))
@@ -2236,7 +2249,10 @@ impl RuskerApp {
                     .child("操作"),
             );
 
-        let panel = section_panel(cx)
+        let panel = div()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
             .flex_1()
             .min_h_0()
             .flex()
@@ -2314,6 +2330,8 @@ impl RuskerApp {
         let detail_id = container.id.clone();
         let check_id = container.id.clone();
         let toggle_id = container.id.clone();
+        let copy_id = container.id.clone();
+        let image_container = container.clone();
         let is_checked = self.containers_checked.contains(&container.id);
         let running = container.is_running();
         let paused = container.state.eq_ignore_ascii_case("paused");
@@ -2397,29 +2415,36 @@ impl RuskerApp {
                     .flex_shrink_0()
                     .font_family(cx.theme().mono_font_family.clone())
                     .text_xs()
-                    .child(copyable_value(
-                        ("copy-container-id", index),
-                        AssetIcon::Link,
-                        short_id(&container.id),
-                        "复制容器 ID",
-                        cx.theme().muted_foreground,
-                        cx.theme().muted_foreground,
-                    )),
+                    .child(
+                        div()
+                            .id(("copy-container-id", index))
+                            .cursor_pointer()
+                            .text_color(cx.theme().muted_foreground)
+                            .hover(|style| style.underline())
+                            .tooltip(|window, cx| Tooltip::new("复制容器 ID").build(window, cx))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
+                            })
+                            .child(short_id(&container.id)),
+                    ),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_w(px(112.))
-                    .pr_3()
-                    .truncate()
-                    .child(copyable_value(
-                        ("copy-container-image", index),
-                        AssetIcon::Link,
-                        container.image.clone(),
-                        "复制镜像引用",
-                        cx.theme().primary,
-                        cx.theme().muted_foreground,
-                    )),
+                div().flex_1().min_w(px(112.)).pr_3().truncate().child(
+                    div()
+                        .id(("open-container-image", index))
+                        .min_w_0()
+                        .truncate()
+                        .cursor_pointer()
+                        .text_color(container_action_blue(cx))
+                        .hover(|style| style.underline())
+                        .tooltip(|window, cx| Tooltip::new("查看镜像详情").build(window, cx))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.open_container_image(&image_container, cx);
+                        }))
+                        .child(container.image.clone()),
+                ),
             )
             .child(
                 div()
@@ -2450,54 +2475,60 @@ impl RuskerApp {
                     .items_center()
                     .gap_1()
                     .child(
-                        Button::new(("toggle-container", index))
-                            .ghost()
-                            .small()
-                            .icon(
-                                Icon::new(if running {
-                                    IconName::Square
+                        container_list_button(
+                            ("toggle-container", index),
+                            container_action_blue(cx),
+                            cx,
+                        )
+                        .small()
+                        .icon(if running {
+                            IconName::Square
+                        } else {
+                            IconName::Play
+                        })
+                        .tooltip(if running { "停止" } else { "启动" })
+                        .disabled(busy)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.start_container_action(
+                                toggle_id.clone(),
+                                if running {
+                                    ContainerAction::Stop
                                 } else {
-                                    IconName::Play
-                                })
-                                .text_color(cx.theme().primary),
-                            )
-                            .tooltip(if running { "停止" } else { "启动" })
-                            .disabled(busy)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.start_container_action(
-                                    toggle_id.clone(),
-                                    if running {
-                                        ContainerAction::Stop
-                                    } else {
-                                        ContainerAction::Start
-                                    },
-                                    cx,
-                                );
-                            })),
+                                    ContainerAction::Start
+                                },
+                                cx,
+                            );
+                        })),
                     )
                     .child(
-                        Button::new(("container-more", index))
-                            .ghost()
-                            .small()
-                            .icon(
-                                Icon::new(IconName::EllipsisVertical)
-                                    .text_color(cx.theme().primary),
-                            )
-                            .disabled(busy)
-                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                                container_menu(menu, &menu_container, weak.clone())
-                            }),
+                        container_list_button(
+                            ("container-more", index),
+                            container_action_blue(cx),
+                            cx,
+                        )
+                        .small()
+                        .icon(IconName::EllipsisVertical)
+                        .disabled(busy)
+                        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                            container_menu(menu, &menu_container, weak.clone())
+                        }),
                     )
                     .child(
-                        Button::new(("remove-container-row", index))
-                            .ghost()
-                            .small()
-                            .icon(Icon::new(IconName::Delete).text_color(cx.theme().danger))
-                            .tooltip("删除")
-                            .disabled(busy)
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                        container_list_button(
+                            ("remove-container-row", index),
+                            cx.theme().danger,
+                            cx,
+                        )
+                        .small()
+                        .icon(Icon::new(IconName::Delete).text_color(cx.theme().danger))
+                        .tooltip("删除")
+                        .disabled(busy)
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
                                 this.confirm_remove_container(&remove_container, window, cx);
-                            })),
+                            },
+                        )),
                     ),
             )
     }
@@ -3986,6 +4017,25 @@ impl RuskerApp {
     }
 }
 
+/// Use an explicit blue: the component theme's primary can be neutral.
+fn container_action_blue(cx: &App) -> Hsla {
+    if cx.theme().mode.is_dark() {
+        rgb(0x60A5FA).into()
+    } else {
+        rgb(0x1D63ED).into()
+    }
+}
+
+/// Transparent list action with distinct hover and pressed backgrounds.
+fn container_list_button(id: impl Into<ElementId>, color: Hsla, cx: &App) -> Button {
+    Button::new(id).pointer(true).custom(
+        ButtonCustomVariant::new(cx)
+            .foreground(color)
+            .hover(color.opacity(0.12))
+            .active(color.opacity(0.24)),
+    )
+}
+
 /// Usage summary block shown above the container table.
 fn container_usage(
     title: &'static str,
@@ -4050,6 +4100,26 @@ fn copyable_value(
         )
 }
 
+/// Custom content spans the menu row, including its horizontal padding,
+/// so both the icon and label (and the space around them) use a pointer.
+/// Keep the handler on PopupMenuItem to preserve dismissal and keyboard activation.
+fn container_menu_item(label: &'static str, icon: impl Into<Icon>) -> PopupMenuItem {
+    let icon: Icon = icon.into();
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .flex_1()
+            .min_h(px(26.))
+            .mx_neg_2()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .child(icon.clone().xsmall())
+            .child(label)
+    })
+}
+
 fn container_menu(
     menu: gpui_kit::component::menu::PopupMenu,
     container: &ContainerSummary,
@@ -4062,37 +4132,29 @@ fn container_menu(
     let id = container.id.clone();
     let image = container.image.clone();
     menu.item(
-        PopupMenuItem::new("查看详情")
-            .icon(AssetIcon::Container)
-            .on_click(move |_, _, cx| {
-                _ = detail_weak.update(cx, |this, cx| {
-                    this.select_container(detail_container.id.clone(), cx);
-                });
-            }),
+        container_menu_item("查看详情", AssetIcon::Container).on_click(move |_, _, cx| {
+            _ = detail_weak.update(cx, |this, cx| {
+                this.select_container(detail_container.id.clone(), cx);
+            });
+        }),
     )
     .item(
-        PopupMenuItem::new("重启")
-            .icon(IconName::RotateCw)
-            .on_click(move |_, _, cx| {
-                _ = restart_weak.update(cx, |this, cx| {
-                    this.start_container_action(restart_id.clone(), ContainerAction::Restart, cx);
-                });
-            }),
+        container_menu_item("重启", IconName::RotateCw).on_click(move |_, _, cx| {
+            _ = restart_weak.update(cx, |this, cx| {
+                this.start_container_action(restart_id.clone(), ContainerAction::Restart, cx);
+            });
+        }),
     )
     .separator()
     .item(
-        PopupMenuItem::new("复制容器 ID")
-            .icon(IconName::Copy)
-            .on_click(move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
-            }),
+        container_menu_item("复制容器 ID", IconName::Copy).on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+        }),
     )
     .item(
-        PopupMenuItem::new("复制镜像引用")
-            .icon(IconName::Copy)
-            .on_click(move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(image.clone()));
-            }),
+        container_menu_item("复制镜像引用", IconName::Copy).on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(image.clone()));
+        }),
     )
 }
 
@@ -4123,11 +4185,6 @@ impl Render for RuskerApp {
             }
             if let Some(error) = self.error.clone() {
                 content = content.child(message_banner(&error, true, cx));
-            }
-            if let Some(busy) = self.busy.clone() {
-                content = content.child(message_banner(&busy, false, cx));
-            } else if let Some(notice) = self.notice.clone() {
-                content = content.child(message_banner(&notice, false, cx));
             }
         }
 
