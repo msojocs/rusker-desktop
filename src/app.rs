@@ -51,9 +51,10 @@ use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 
 use crate::ui::theme::change_theme;
-use crate::ui::{detail_row, empty_state, message_banner, muted, section_panel, stat_card};
+use crate::ui::{detail_row, empty_state, muted, section_panel, stat_card};
 
 mod images;
+mod notifications;
 mod run;
 mod volumes;
 
@@ -210,8 +211,6 @@ pub struct RuskerApp {
     snapshot: EngineSnapshot,
     connected: bool,
     loading: bool,
-    error: Option<String>,
-    notice: Option<String>,
     busy: Option<String>,
     selected_container: Option<String>,
     /// Container list shows only running containers.
@@ -464,6 +463,9 @@ impl RuskerApp {
             Ok(engine) => (Some(engine), None),
             Err(error) => (None, Some(error.to_string())),
         };
+        if let Some(error) = error {
+            cx.defer_in(window, move |this, _, cx| this.notify_error(error, cx));
+        }
         let (runtime_host, runtime_error) = match RuntimeHostService::new() {
             Ok(host) => {
                 host.set_engine_proxy(&settings.docker_proxy);
@@ -521,8 +523,6 @@ impl RuskerApp {
             snapshot: EngineSnapshot::default(),
             connected: false,
             loading: false,
-            error,
-            notice: None,
             busy: None,
             selected_container: None,
             containers_running_only: false,
@@ -980,15 +980,13 @@ impl RuskerApp {
         }
         let Some(engine) = self.engine.clone() else {
             self.loading = false;
-            self.error = Some("后台运行时不可用，请重启应用".into());
+            self.notify_error("后台运行时不可用，请重启应用", cx);
             cx.notify();
             return;
         };
 
         let revision = self.refresh_revision.advance();
         self.loading = true;
-        self.error = None;
-        self.notice = None;
         cx.notify();
         let handle = engine.snapshot();
         self._refresh_task = Some(cx.spawn(async move |this, cx| {
@@ -1006,7 +1004,7 @@ impl RuskerApp {
                     }
                     Err(error) => {
                         this.connected = false;
-                        this.error = Some(error.to_string());
+                        this.notify_error(error.to_string(), cx);
                     }
                 }
                 cx.notify();
@@ -1098,7 +1096,7 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.error = Some("容器引擎不可用".into());
+            self.notify_error("容器引擎不可用", cx);
             cx.notify();
             return;
         };
@@ -1111,26 +1109,12 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.error = Some("容器引擎不可用".into());
+            self.notify_error("容器引擎不可用", cx);
             cx.notify();
             return;
         };
         let handle = engine.remove_image(id);
         self.run_snapshot_operation("删除镜像".into(), handle, cx);
-    }
-
-    /// `reference` must already be validated (non-empty, no whitespace).
-    fn pull_image(&mut self, reference: String, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
-            return;
-        }
-        let Some(engine) = self.engine.clone() else {
-            self.error = Some("容器引擎不可用".into());
-            cx.notify();
-            return;
-        };
-        let handle = engine.pull_image(reference.clone());
-        self.run_snapshot_operation(format!("拉取镜像 {reference}"), handle, cx);
     }
 
     fn proxy_draft(&self, cx: &App) -> DockerProxySettings {
@@ -1586,8 +1570,6 @@ impl RuskerApp {
         let revision = self.refresh_revision.advance();
         self.busy = Some(format!("{label}…"));
         self.loading = false;
-        self.error = None;
-        self.notice = None;
         cx.notify();
         self._action_task = Some(cx.spawn(async move |this, cx| {
             let result = await_engine(handle).await;
@@ -1600,10 +1582,10 @@ impl RuskerApp {
                     Ok(snapshot) => {
                         this.connected = true;
                         this.apply_snapshot(snapshot);
-                        this.notice = Some(format!("{label}完成"));
+                        this.notify_success(format!("{label}完成"), cx);
                         this.after_volume_snapshot(cx);
                     }
-                    Err(error) => this.error = Some(error.to_string()),
+                    Err(error) => this.notify_error(error.to_string(), cx),
                 }
                 cx.notify();
             });
@@ -1689,7 +1671,7 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.error = Some("容器引擎不可用".into());
+            self.notify_error("容器引擎不可用", cx);
             cx.notify();
             return;
         };
@@ -1698,8 +1680,6 @@ impl RuskerApp {
         let revision = self.refresh_revision.advance();
         self.busy = Some(format!("删除 {total} 个容器…"));
         self.loading = false;
-        self.error = None;
-        self.notice = None;
         cx.notify();
         self._action_task = Some(cx.spawn(async move |this, cx| {
             let result = await_engine(handle).await;
@@ -1713,17 +1693,20 @@ impl RuskerApp {
                         this.connected = true;
                         this.apply_snapshot(snapshot);
                         if failures.is_empty() {
-                            this.notice = Some(format!("已删除 {total} 个容器"));
+                            this.notify_success(format!("已删除 {total} 个容器"), cx);
                         } else {
-                            this.error = Some(format!(
-                                "已删除 {} 个容器，{} 个失败：\n{}",
-                                total - failures.len(),
-                                failures.len(),
-                                failures.join("\n")
-                            ));
+                            this.notify_error(
+                                format!(
+                                    "已删除 {} 个容器，{} 个失败：\n{}",
+                                    total - failures.len(),
+                                    failures.len(),
+                                    failures.join("\n")
+                                ),
+                                cx,
+                            );
                         }
                     }
-                    Err(error) => this.error = Some(error.to_string()),
+                    Err(error) => this.notify_error(error.to_string(), cx),
                 }
                 cx.notify();
             });
@@ -4150,9 +4133,6 @@ impl Render for RuskerApp {
             // row (list) or breadcrumb (detail).
             if self.page != Page::Containers {
                 content = content.child(self.render_header(phase.is_none(), cx));
-            }
-            if let Some(error) = self.error.clone() {
-                content = content.child(message_banner(&error, true, cx));
             }
         }
 

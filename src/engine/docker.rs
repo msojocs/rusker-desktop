@@ -381,6 +381,14 @@ impl DockerEngine {
     }
 
     pub async fn pull_image(&self, reference: &str) -> Result<(), EngineError> {
+        self.pull_image_with_progress(reference, |_| {}).await
+    }
+
+    pub async fn pull_image_with_progress(
+        &self,
+        reference: &str,
+        mut on_progress: impl FnMut(bollard::models::CreateImageInfo) + Send,
+    ) -> Result<(), EngineError> {
         let mut options = CreateImageOptionsBuilder::default();
         options = options.from_image(reference);
         if needs_default_tag(reference) {
@@ -394,12 +402,13 @@ impl DockerEngine {
                 while let Some(response) = stream.try_next().await.map_err(|error| {
                     EngineError::operation(format!("拉取镜像 {reference}"), error)
                 })? {
-                    if let Some(detail) = response.error_detail {
+                    if let Some(detail) = &response.error_detail {
                         return Err(EngineError::operation(
                             format!("拉取镜像 {reference}"),
-                            detail.message.unwrap_or_else(|| "引擎返回未知错误".into()),
+                            detail.message.as_deref().unwrap_or("引擎返回未知错误"),
                         ));
                     }
+                    on_progress(response);
                 }
                 Ok(())
             })

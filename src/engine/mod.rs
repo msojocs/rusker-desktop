@@ -1,4 +1,7 @@
 mod docker;
+mod pull;
+
+pub use pull::{ImagePullLayer, ImagePullProgress};
 
 use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
@@ -141,6 +144,22 @@ impl EngineService {
         self.spawn(async move {
             let engine = docker::DockerEngine::connect().await?;
             engine.pull_image(&reference).await?;
+            engine.snapshot().await
+        })
+    }
+
+    pub fn pull_image_with_progress(
+        &self,
+        reference: String,
+        progress: tokio::sync::watch::Sender<ImagePullProgress>,
+    ) -> JoinHandle<Result<EngineSnapshot, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine
+                .pull_image_with_progress(&reference, |response| {
+                    progress.send_modify(|state| state.update(response));
+                })
+                .await?;
             engine.snapshot().await
         })
     }

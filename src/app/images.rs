@@ -2,6 +2,7 @@
 //! columns, filter, run / pull / delete per row, batch delete and cleanup.
 
 mod detail;
+mod pull;
 
 use std::collections::HashSet;
 
@@ -103,7 +104,7 @@ impl RuskerApp {
             self.navigate(Page::Images, cx);
             self.open_image_detail(row, cx);
         } else {
-            self.error = Some("容器使用的镜像已不在本地镜像列表中，请刷新后重试。".into());
+            self.notify_error("容器使用的镜像已不在本地镜像列表中，请刷新后重试。", cx);
         }
         cx.notify();
     }
@@ -229,7 +230,7 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.error = Some("容器引擎不可用".into());
+            self.notify_error("容器引擎不可用", cx);
             cx.notify();
             return;
         };
@@ -238,8 +239,6 @@ impl RuskerApp {
         self.refresh_revision.advance();
         self.busy = Some(format!("删除 {total} 个镜像…"));
         self.loading = false;
-        self.error = None;
-        self.notice = None;
         cx.notify();
         self._action_task = Some(cx.spawn(async move |this, cx| {
             let result = super::await_engine(handle).await;
@@ -250,17 +249,20 @@ impl RuskerApp {
                         this.connected = true;
                         this.apply_snapshot(snapshot);
                         if failures.is_empty() {
-                            this.notice = Some(format!("已删除 {total} 个镜像"));
+                            this.notify_success(format!("已删除 {total} 个镜像"), cx);
                         } else {
-                            this.error = Some(format!(
-                                "已删除 {} 个镜像，{} 个失败：\n{}",
-                                total - failures.len(),
-                                failures.len(),
-                                failures.join("\n")
-                            ));
+                            this.notify_error(
+                                format!(
+                                    "已删除 {} 个镜像，{} 个失败：\n{}",
+                                    total - failures.len(),
+                                    failures.len(),
+                                    failures.join("\n")
+                                ),
+                                cx,
+                            );
                         }
                     }
-                    Err(error) => this.error = Some(error.to_string()),
+                    Err(error) => this.notify_error(error.to_string(), cx),
                 }
                 cx.notify();
             });
@@ -349,7 +351,7 @@ impl RuskerApp {
             return;
         }
         window.close_dialog(cx);
-        self.pull_image(reference, cx);
+        self.pull_image(reference, window, cx);
     }
 
     /// Shows the containers created from the row's image on the Containers page.
@@ -882,9 +884,9 @@ fn image_menu(
             AssetIcon::Download,
             pull_reference.is_some(),
         )
-        .on_click(move |_, _, cx| {
+        .on_click(move |_, window, cx| {
             if let Some(reference) = pull_reference.clone() {
-                _ = weak.update(cx, |this, cx| this.pull_image(reference, cx));
+                _ = weak.update(cx, |this, cx| this.pull_image(reference, window, cx));
             }
         }),
     )

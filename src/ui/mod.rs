@@ -90,25 +90,6 @@ pub fn empty_state(
         )
 }
 
-pub fn message_banner(message: &str, is_error: bool, cx: &App) -> Div {
-    let color = if is_error {
-        cx.theme().danger
-    } else {
-        cx.theme().success
-    };
-    div()
-        .mx_6()
-        .mt_4()
-        .px_4()
-        .py_3()
-        .rounded_md()
-        .border_1()
-        .border_color(color)
-        .text_sm()
-        .text_color(color)
-        .child(message.to_string())
-}
-
 pub fn section_panel(cx: &App) -> Div {
     div()
         .rounded_lg()

@@ -518,8 +518,6 @@ impl RuskerApp {
         // otherwise overwrite the snapshot that contains the new container.
         self.refresh_revision.advance();
         self.busy = Some("正在创建并启动容器…".into());
-        self.error = None;
-        self.notice = None;
         cx.notify();
         let handle = engine.create_container(request);
         let window = self.window_handle;
@@ -541,7 +539,7 @@ impl RuskerApp {
                         });
                         this.navigate(Page::Containers, cx);
                         this.select_container(id, cx);
-                        this.notice = Some("容器已创建并启动".into());
+                        this.notify_success("容器已创建并启动", cx);
                     }
                     // Keep the dialog and its input so the user can fix it.
                     Err(error) => this.create_error = Some(error.to_string()),

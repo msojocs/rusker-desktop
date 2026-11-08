@@ -151,8 +151,6 @@ impl RuskerApp {
         self.refresh_revision.advance();
         self.busy = Some(format!("{label}…"));
         self.loading = false;
-        self.error = None;
-        self.notice = None;
         cx.notify();
         self._action_task = Some(cx.spawn(async move |this, cx| {
             let result = await_engine(handle).await;
@@ -160,7 +158,7 @@ impl RuskerApp {
                 this.busy = None;
                 match result {
                     Ok(value) => on_done(this, value, cx),
-                    Err(error) => this.error = Some(error.to_string()),
+                    Err(error) => this.notify_error(error.to_string(), cx),
                 }
                 cx.notify();
             });
@@ -222,7 +220,7 @@ impl RuskerApp {
 
     fn remove_volumes(&mut self, names: Vec<String>, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.clone() else {
-            self.error = Some("容器引擎不可用".into());
+            self.notify_error("容器引擎不可用", cx);
             cx.notify();
             return;
         };
@@ -235,14 +233,17 @@ impl RuskerApp {
                 this.connected = true;
                 this.apply_snapshot(snapshot);
                 if failures.is_empty() {
-                    this.notice = Some(format!("已删除 {total} 个卷"));
+                    this.notify_success(format!("已删除 {total} 个卷"), cx);
                 } else {
-                    this.error = Some(format!(
-                        "已删除 {} 个卷，{} 个失败：\n{}",
-                        total - failures.len(),
-                        failures.len(),
-                        failures.join("\n")
-                    ));
+                    this.notify_error(
+                        format!(
+                            "已删除 {} 个卷，{} 个失败：\n{}",
+                            total - failures.len(),
+                            failures.len(),
+                            failures.join("\n")
+                        ),
+                        cx,
+                    );
                 }
                 this.after_volume_snapshot(cx);
             },
@@ -269,7 +270,7 @@ impl RuskerApp {
                 Ok(Ok(path)) => path,
                 Ok(Err(error)) => {
                     _ = this.update(cx, |this, cx| {
-                        this.error = Some(format!("无法打开保存对话框：{error}"));
+                        this.notify_error(format!("无法打开保存对话框：{error}"), cx);
                         cx.notify();
                     });
                     None
@@ -284,7 +285,7 @@ impl RuskerApp {
 
     fn export_volume(&mut self, name: String, path: PathBuf, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.clone() else {
-            self.error = Some("容器引擎不可用".into());
+            self.notify_error("容器引擎不可用", cx);
             cx.notify();
             return;
         };
@@ -292,12 +293,15 @@ impl RuskerApp {
         self.run_volume_task(
             format!("导出卷 {name}"),
             handle,
-            move |this, size, _| {
-                this.notice = Some(format!(
-                    "已导出卷 {name} 到 {}（{}）",
-                    path.display(),
-                    format_bytes(size)
-                ));
+            move |this, size, cx| {
+                this.notify_success(
+                    format!(
+                        "已导出卷 {name} 到 {}（{}）",
+                        path.display(),
+                        format_bytes(size)
+                    ),
+                    cx,
+                );
                 this.volumes.exports.insert(
                     0,
                     ExportRecord {
@@ -611,7 +615,7 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.error = Some("容器引擎不可用".into());
+            self.notify_error("容器引擎不可用", cx);
             cx.notify();
             return;
         };
@@ -659,7 +663,7 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.error = Some("容器引擎不可用".into());
+            self.notify_error("容器引擎不可用", cx);
             cx.notify();
             return;
         };
@@ -684,7 +688,7 @@ impl RuskerApp {
                 Ok(Ok(Some(paths))) => paths.into_iter().next(),
                 Ok(Err(error)) => {
                     _ = this.update(cx, |this, cx| {
-                        this.error = Some(format!("无法打开文件选择器：{error}"));
+                        this.notify_error(format!("无法打开文件选择器：{error}"), cx);
                         cx.notify();
                     });
                     None
@@ -737,7 +741,7 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.error = Some("容器引擎不可用".into());
+            self.notify_error("容器引擎不可用", cx);
             cx.notify();
             return;
         };
