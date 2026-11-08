@@ -2493,6 +2493,7 @@ impl RuskerApp {
                             .tooltip("删除")
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
                                 this.confirm_remove_container(&remove_container, window, cx);
                             })),
                     ),
