@@ -5,7 +5,7 @@ use crate::ui::{
     stats_chart::{stats_chart, ChartPoint, ChartUnit, StatsHover},
     terminal::TerminalView,
 };
-use gpui_kit::Context;
+use gpui_kit::{component::scroll::ScrollableElement as _, Context};
 use rusker_desktop::{
     engine::{StatsCache, StatsHistory, STATS_SAMPLE_INTERVAL},
     model::{Revision, VolumeEntryKind},
@@ -211,14 +211,16 @@ impl RuskerApp {
     }
 
     fn connect_container_shell(&mut self, cx: &mut Context<Self>) {
-        if !self.selected_container_running() || self.container_tools.shell_connecting {
+        if !self.selected_container_running()
+            || self.container_tools.shell_task.is_some()
+            || self.container_tools.shell_connecting
+        {
             return;
         }
         let (Some(engine), Some(id)) = (self.engine.clone(), self.selected_container.clone())
         else {
             return;
         };
-        self.container_tools.shell_task = None;
         self.container_terminal = Some(cx.new(TerminalView::new));
         self.container_tools.shell_error = None;
         self.container_tools.shell_connecting = true;
@@ -504,67 +506,14 @@ impl RuskerApp {
         cx: &mut Context<Self>,
     ) -> Div {
         let tools = &self.container_tools;
-        let output = self
-            .container_terminal
-            .as_ref()
-            .map(|terminal| terminal.read(cx).contents())
-            .unwrap_or_default();
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        muted(
-                            if tools.shell_connecting {
-                                "正在连接 /bin/sh…"
-                            } else {
-                                "点击终端直接输入 · Ctrl+C 中断 · Ctrl+Shift+V 粘贴"
-                            },
-                            cx,
-                        )
-                        .flex_1(),
-                    )
-                    .child(
-                        button("shell-copy")
-                            .ghost()
-                            .small()
-                            .icon(IconName::Copy)
-                            .tooltip("复制输出")
-                            .disabled(output.is_empty())
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(output.clone()))
-                            }),
-                    )
-                    .child(
-                        button("shell-clear")
-                            .ghost()
-                            .small()
-                            .label("清屏")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(terminal) = &this.container_terminal {
-                                    terminal.update(cx, |terminal, cx| terminal.clear(cx));
-                                }
-                            })),
-                    )
-                    .child(
-                        button("shell-reconnect")
-                            .outline()
-                            .small()
-                            .label("重新连接")
-                            .disabled(!container.is_running() || tools.shell_connecting)
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.connect_container_shell(cx)),
-                            ),
-                    ),
-            )
+            .when(tools.shell_connecting, |view| {
+                view.child(muted("正在连接 /bin/sh…", cx).px_4().py_2())
+            })
             .when(!container.is_running(), |view| {
                 view.child(muted("请先启动容器再连接命令行。", cx).px_4().py_2())
             })
@@ -765,7 +714,7 @@ impl RuskerApp {
                     .id("container-files-scroll")
                     .flex_1()
                     .min_h_0()
-                    .overflow_scroll()
+                    .overflow_y_scrollbar()
                     .child(content),
             )
     }
