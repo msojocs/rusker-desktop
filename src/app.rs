@@ -752,14 +752,15 @@ impl RuskerApp {
         (value.trim() != loaded.trim()).then_some(value)
     }
 
-    /// Launch-time hook: refreshes state and starts an installed managed
-    /// engine, unless `DOCKER_HOST` points the app at another engine.
+    /// Launch-time hook: starts the managed engine before connecting to its
+    /// API. External engines can be connected to immediately.
     pub fn startup_runtime_host(&mut self, cx: &mut Context<Self>) {
-        if !cfg!(windows) || self.runtime_busy.is_some() {
+        if !self.manages_engine() {
+            self.refresh(cx);
+            self.refresh_runtime_host(cx);
             return;
         }
-        if std::env::var_os("DOCKER_HOST").is_some() {
-            self.refresh_runtime_host(cx);
+        if self.runtime_busy.is_some() {
             return;
         }
         let Some(host) = self.runtime_host.clone() else {
@@ -975,7 +976,12 @@ impl RuskerApp {
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
+        // A managed engine cannot accept API requests until its lifecycle
+        // operation finishes. Startup refreshes automatically once it is ready.
+        if self.busy.is_some()
+            || self.quitting
+            || (self.manages_engine() && self.engine_transition.is_some())
+        {
             return;
         }
         let Some(engine) = self.engine.clone() else {
