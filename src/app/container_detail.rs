@@ -400,6 +400,7 @@ impl RuskerApp {
                 .child(div().flex_1().min_w_0().child(right))
         };
         let mut env = section_panel(cx)
+            .bg(cx.theme().background)
             .flex()
             .flex_col()
             .child(div().px_4().py_3().font_semibold().child("环境变量"))
@@ -435,6 +436,7 @@ impl RuskerApp {
             env = env.child(muted("没有环境变量。", cx).px_4().py_3());
         }
         let mut ports = section_panel(cx)
+            .bg(cx.theme().background)
             .flex()
             .flex_col()
             .child(div().px_4().py_3().font_semibold().child("端口"))

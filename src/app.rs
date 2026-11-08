@@ -31,8 +31,8 @@ use gpui_kit::{
 use rusker_desktop::{
     engine::{EngineError, EngineService},
     format::{
-        container_matches, format_bytes, format_port_bindings, format_ports, format_relative,
-        format_timestamp, short_id,
+        container_matches, format_bytes, format_port_bindings, format_relative, format_timestamp,
+        short_id,
     },
     model::{ContainerAction, ContainerSummary, EngineSnapshot, Revision},
     runtime_host::{
@@ -2758,9 +2758,7 @@ impl RuskerApp {
             1 if !self.container_tools.inspect_summary => {
                 self.render_container_inspect_tab(cx).into_any_element()
             }
-            1 => self
-                .render_container_details_tab(container, cx)
-                .into_any_element(),
+            1 => self.render_container_details_tab(cx).into_any_element(),
             2 => self
                 .render_container_mounts_tab(container, cx)
                 .into_any_element(),
@@ -2947,49 +2945,13 @@ impl RuskerApp {
             })
     }
 
-    fn render_container_details_tab(
-        &self,
-        container: &ContainerSummary,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let state = if container.status.trim().is_empty() {
-            container.state.clone()
-        } else {
-            format!("{}（{}）", container.state, container.status)
-        };
-        let volumes = if container.volumes.is_empty() {
-            "—".to_string()
-        } else {
-            container.volumes.join(", ")
-        };
-
+    fn render_container_details_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("container-details-scroll")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
             .p_6()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                section_panel(cx)
-                    .p_5()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(detail_row("容器 ID", container.id.clone(), cx))
-                    .child(detail_row("镜像", container.image.clone(), cx))
-                    .child(detail_row("镜像 ID", short_id(&container.image_id), cx))
-                    .child(detail_row("状态", state, cx))
-                    .child(detail_row(
-                        "创建时间",
-                        format_timestamp(container.created),
-                        cx,
-                    ))
-                    .child(detail_row("端口", format_ports(&container.ports), cx))
-                    .child(detail_row("命名卷", volumes, cx)),
-            )
             .child(self.render_container_inspect_fields(cx))
     }
 
