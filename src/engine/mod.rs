@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio::{runtime::Runtime, task::JoinHandle};
 
 use crate::{
-    model::{ContainerAction, CreateContainerRequest, EngineSnapshot},
+    model::{ContainerAction, CreateContainerRequest, EngineSnapshot, ImageDetail},
     volume::DirectoryListing,
 };
 
@@ -106,6 +106,13 @@ impl EngineService {
             let engine = docker::DockerEngine::connect().await?;
             let failures = engine.remove_containers(&ids).await;
             Ok((engine.snapshot().await?, failures))
+        })
+    }
+
+    pub fn image_detail(&self, id: String) -> JoinHandle<Result<ImageDetail, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.image_detail(&id).await
         })
     }
 

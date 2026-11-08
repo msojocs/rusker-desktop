@@ -107,6 +107,24 @@ pub struct ImageSummary {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImageDetail {
+    pub id: String,
+    pub architecture: String,
+    pub os: String,
+    /// Engine history order: newest layer first, including zero-size layers.
+    pub layers: Vec<ImageLayer>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImageLayer {
+    pub id: String,
+    pub created: i64,
+    pub created_by: String,
+    pub size: u64,
+    pub comment: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VolumeSummary {
     pub name: String,
     pub driver: String,

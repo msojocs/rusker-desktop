@@ -5,8 +5,8 @@ use bollard::{
     container::LogOutput,
     errors::Error as BollardError,
     models::{
-        ContainerCreateBody, ContainerSummary, DeviceRequest, HostConfig, ImageSummary, Mount,
-        MountType, PortBinding, Volume, VolumeCreateRequest,
+        ContainerCreateBody, ContainerSummary, DeviceRequest, HostConfig, ImageHistoryResponseItem,
+        ImageInspect, ImageSummary, Mount, MountType, PortBinding, Volume, VolumeCreateRequest,
     },
     query_parameters::{
         CreateContainerOptionsBuilder, CreateImageOptionsBuilder, DataUsageOptionsBuilder,
@@ -29,7 +29,8 @@ use crate::{
     format::{bound_logs, short_id},
     model::{
         ContainerAction, ContainerSummary as ContainerDto, CreateContainerRequest, EngineInfo,
-        EngineSnapshot, ImageSummary as ImageDto, PortMapping, VolumeSummary,
+        EngineSnapshot, ImageDetail, ImageLayer, ImageSummary as ImageDto, PortMapping,
+        VolumeSummary,
     },
     volume::{
         container_path, parse_listing, parse_timestamp, partial_export_path, validate_volume_name,
@@ -347,6 +348,22 @@ impl DockerEngine {
                 seconds: REQUEST_TIMEOUT.as_secs(),
             }),
         }
+    }
+
+    pub async fn image_detail(&self, id: &str) -> Result<ImageDetail, EngineError> {
+        let (image, history) = tokio::try_join!(
+            with_timeout(
+                "读取镜像详情",
+                REQUEST_TIMEOUT,
+                self.client.inspect_image(id)
+            ),
+            with_timeout(
+                "读取镜像历史",
+                REQUEST_TIMEOUT,
+                self.client.image_history(id)
+            ),
+        )?;
+        Ok(image_detail_dto(image, history))
     }
 
     pub async fn remove_image(&self, id: &str) -> Result<(), EngineError> {
@@ -981,6 +998,25 @@ fn image_dto(image: ImageSummary) -> ImageDto {
     }
 }
 
+fn image_detail_dto(image: ImageInspect, history: Vec<ImageHistoryResponseItem>) -> ImageDetail {
+    ImageDetail {
+        id: image.id.unwrap_or_default(),
+        architecture: image.architecture.unwrap_or_default(),
+        os: image.os.unwrap_or_default(),
+        // Keep every history entry in the engine's newest-first order.
+        layers: history
+            .into_iter()
+            .map(|layer| ImageLayer {
+                id: layer.id,
+                created: layer.created,
+                created_by: layer.created_by,
+                size: u64::try_from(layer.size).unwrap_or(0),
+                comment: layer.comment,
+            })
+            .collect(),
+    }
+}
+
 fn nvidia_device_requests(enabled: bool) -> Option<Vec<DeviceRequest>> {
     enabled.then(|| {
         vec![DeviceRequest {
@@ -1002,7 +1038,87 @@ fn needs_default_tag(reference: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{needs_default_tag, nvidia_device_requests};
+    use super::{image_detail_dto, needs_default_tag, nvidia_device_requests};
+    use bollard::models::{ImageHistoryResponseItem, ImageInspect};
+
+    use crate::model::{ImageDetail, ImageLayer};
+
+    #[test]
+    fn maps_image_details_and_preserves_all_history_in_engine_order() {
+        let image = ImageInspect {
+            id: Some("sha256:image".into()),
+            architecture: Some("arm64".into()),
+            os: Some("linux".into()),
+            ..Default::default()
+        };
+        let history = vec![
+            ImageHistoryResponseItem {
+                id: "sha256:newest".into(),
+                created: 1_700_000_002,
+                created_by: "CMD [\"sh\"]".into(),
+                size: 0,
+                comment: "metadata only".into(),
+                ..Default::default()
+            },
+            ImageHistoryResponseItem {
+                id: "<missing>".into(),
+                created: 1_700_000_001,
+                created_by: "ADD rootfs /".into(),
+                size: 4096,
+                comment: "base layer".into(),
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            image_detail_dto(image, history),
+            ImageDetail {
+                id: "sha256:image".into(),
+                architecture: "arm64".into(),
+                os: "linux".into(),
+                layers: vec![
+                    ImageLayer {
+                        id: "sha256:newest".into(),
+                        created: 1_700_000_002,
+                        created_by: "CMD [\"sh\"]".into(),
+                        size: 0,
+                        comment: "metadata only".into(),
+                    },
+                    ImageLayer {
+                        id: "<missing>".into(),
+                        created: 1_700_000_001,
+                        created_by: "ADD rootfs /".into(),
+                        size: 4096,
+                        comment: "base layer".into(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn image_details_default_missing_inspect_fields_and_empty_history() {
+        let image = serde_json::from_str::<ImageInspect>("{}").expect("缺失的可选字段");
+        assert_eq!(image_detail_dto(image, Vec::new()), ImageDetail::default());
+    }
+
+    #[test]
+    fn image_history_sizes_are_converted_without_wrapping() {
+        let history = [i64::MIN, -1, 0, i64::MAX]
+            .into_iter()
+            .map(|size| ImageHistoryResponseItem {
+                size,
+                ..Default::default()
+            })
+            .collect();
+        let detail = image_detail_dto(ImageInspect::default(), history);
+
+        assert_eq!(detail.layers.len(), 4);
+        assert_eq!(detail.layers[0], ImageLayer::default());
+        assert_eq!(detail.layers[1], ImageLayer::default());
+        assert_eq!(detail.layers[2], ImageLayer::default());
+        assert_eq!(detail.layers[3].size, i64::MAX as u64);
+    }
 
     #[test]
     fn maps_nvidia_gpu_switch_to_all_device_requests() {

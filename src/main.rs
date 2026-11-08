@@ -1,7 +1,7 @@
-// GUI application: use the Windows GUI subsystem so launching the exe does not
-// open a console window. All child processes (wsl.exe, curl.exe) are spawned
-// with CREATE_NO_WINDOW as well.
-#![cfg_attr(windows, windows_subsystem = "windows")]
+// Release builds do not open a console window. Keep a console in debug builds
+// so `cargo run` can report panics (including those inside native callbacks).
+// Child processes (wsl.exe, curl.exe) still use CREATE_NO_WINDOW.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
 mod ui;

@@ -1,10 +1,11 @@
 //! Images page (Docker Desktop-style): one row per tag with usage, sortable
 //! columns, filter, run / pull / delete per row, batch delete and cleanup.
 
+mod detail;
+
 use std::collections::HashSet;
 
 use gpui_kit::component::{
-    breadcrumb::{Breadcrumb, BreadcrumbItem},
     button::{Button, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     input::Input,
@@ -20,7 +21,7 @@ use gpui_kit::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
 };
 use rusker_desktop::{
-    format::{format_bytes, format_relative, format_timestamp, short_id},
+    format::{format_bytes, format_relative, short_id},
     image::{
         distinct_images, image_disk_usage, image_row_matches, image_rows, unused_image_targets,
         ImageFilter, ImageRow, ImageSort, ImageSortKey,
@@ -30,7 +31,7 @@ use rusker_desktop::{
 use time::OffsetDateTime;
 
 use super::{form_field, list_action_button, Page, PointerCursor as _, RuskerApp};
-use crate::ui::{detail_row, empty_state, muted, section_panel};
+use crate::ui::{empty_state, muted};
 
 const CHECK_COLUMN: f32 = 32.;
 const DOT_COLUMN: f32 = 28.;
@@ -44,6 +45,7 @@ const USAGE_BAR_WIDTH: f32 = 240.;
 #[derive(Default)]
 pub(super) struct ImageState {
     pub(super) selected: Option<ImageRow>,
+    detail: detail::ImageDetailState,
     /// Row keys (`repo:tag` or ID) ticked for batch deletion.
     checked: HashSet<String>,
     filter: ImageFilter,
@@ -76,6 +78,9 @@ impl RuskerApp {
                 .or_else(|| rows.iter().find(|row| row.id == selected.id))
                 .cloned();
         }
+        if self.images.selected.is_none() {
+            self.reset_image_detail();
+        }
     }
 
     pub(super) fn open_container_image(
@@ -96,7 +101,7 @@ impl RuskerApp {
             });
         if let Some(row) = row {
             self.navigate(Page::Images, cx);
-            self.images.selected = Some(row);
+            self.open_image_detail(row, cx);
         } else {
             self.error = Some("容器使用的镜像已不在本地镜像列表中，请刷新后重试。".into());
         }
@@ -362,103 +367,15 @@ impl RuskerApp {
 
     // ---- rendering --------------------------------------------------------
 
-    fn render_image_detail(&self, row: &ImageRow, cx: &mut Context<Self>) -> Div {
-        let back = cx.weak_entity();
-        let run_target = row.target().to_string();
-        let title = row.reference.clone().unwrap_or_else(|| short_id(&row.id));
-        let image = self.snapshot.images.iter().find(|image| image.id == row.id);
-        let tags = image
-            .map(|image| image.tags.join("\n"))
-            .filter(|tags| !tags.is_empty())
-            .unwrap_or_else(|| "无标签".into());
-        let digests = image
-            .map(|image| image.digests.join("\n"))
-            .filter(|digests| !digests.is_empty())
-            .unwrap_or_else(|| "—".into());
-
-        div().flex_1().min_h_0().child(
-            div()
-                .id("image-detail")
-                .size_full()
-                .overflow_y_scroll()
-                .p_6()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(
-                    Breadcrumb::new()
-                        .child(BreadcrumbItem::new("镜像").on_click(move |_, _, cx| {
-                            _ = back.update(cx, |this, cx| {
-                                this.images.selected = None;
-                                cx.notify();
-                            });
-                        }))
-                        .child(BreadcrumbItem::new(title.clone())),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            Button::new("image-detail-back")
-                                .ghost()
-                                .pointer(true)
-                                .icon(IconName::ChevronLeft)
-                                .tooltip("返回镜像列表")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.images.selected = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_xl()
-                                .font_semibold()
-                                .child(title),
-                        )
-                        .child(
-                            Button::new("run-image-detail")
-                                .primary()
-                                .pointer(true)
-                                .icon(IconName::Play)
-                                .label("运行")
-                                .disabled(self.busy.is_some())
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_create_container_dialog(
-                                        Some(run_target.clone()),
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        ),
-                )
-                .child(
-                    section_panel(cx)
-                        .p_5()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .child(detail_row("镜像 ID", row.id.clone(), cx))
-                        .child(detail_row("标签", tags, cx))
-                        .child(detail_row("摘要", digests, cx))
-                        .child(detail_row("创建时间", format_timestamp(row.created), cx))
-                        .child(detail_row("大小", format_bytes(row.size), cx))
-                        .child(detail_row(
-                            "使用此镜像的容器",
-                            row.containers.to_string(),
-                            cx,
-                        )),
-                ),
-        )
-    }
-
     pub(super) fn render_images(&self, cx: &mut Context<Self>) -> Div {
         if let Some(row) = &self.images.selected {
             return self.render_image_detail(row, cx);
         }
+        self.render_image_list(cx)
+    }
+
+    // Keep list construction off the detail render call stack in debug builds.
+    fn render_image_list(&self, cx: &mut Context<Self>) -> Div {
         let query = self.search_input.read(cx).value().to_string();
         let all_rows = self.image_rows();
         let mut rows: Vec<ImageRow> = all_rows
@@ -786,6 +703,7 @@ impl RuskerApp {
         let run_target = row.target().to_string();
         let remove_row = row.clone();
         let menu_row = row.clone();
+        let detail_row = row.clone();
         let weak = cx.weak_entity();
         let muted_color = cx.theme().muted_foreground;
         let none = |text: &str| text == rusker_desktop::image::NONE_LABEL;
@@ -831,15 +749,22 @@ impl RuskerApp {
             )
             .child(
                 div()
+                    .id(("open-image-detail", index))
                     .flex_1()
                     .min_w_0()
                     .py_3()
                     .pr_3()
                     .truncate()
+                    .cursor_pointer()
+                    .text_color(cx.theme().primary)
+                    .hover(|this| this.underline())
                     .when(none(&remove_row.repository), |this| {
                         this.text_color(muted_color)
                     })
-                    .child(remove_row.repository.clone()),
+                    .child(remove_row.repository.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_image_detail(detail_row.clone(), cx);
+                    })),
             )
             .child(
                 div()
@@ -921,12 +846,21 @@ fn image_menu(
     row: &ImageRow,
     weak: gpui_kit::WeakEntity<RuskerApp>,
 ) -> gpui_kit::component::menu::PopupMenu {
+    let detail_row = row.clone();
+    let detail_weak = weak.clone();
     let containers_row = row.clone();
     let containers_weak = weak.clone();
     let pull_reference = row.reference.clone();
     let id = row.id.clone();
     let reference = row.reference.clone();
     menu.item(
+        image_menu_item("查看镜像详情", AssetIcon::Layers2, true).on_click(move |_, _, cx| {
+            _ = detail_weak.update(cx, |this, cx| {
+                this.open_image_detail(detail_row.clone(), cx);
+            });
+        }),
+    )
+    .item(
         image_menu_item(
             if row.in_use() {
                 format!("查看使用的容器（{}）", row.containers)

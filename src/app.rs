@@ -683,8 +683,9 @@ impl RuskerApp {
     fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
         let entering_volumes = page == Page::Volumes && self.page != Page::Volumes;
         let entering_containers = page == Page::Containers && self.page != Page::Containers;
-        if page == Page::Images && self.page != Page::Images {
+        if page != Page::Images || self.page != Page::Images {
             self.images.selected = None;
+            self.reset_image_detail();
         }
         self.page = page;
         if entering_containers {
