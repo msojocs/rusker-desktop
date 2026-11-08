@@ -3,7 +3,7 @@
 //! variables, command and GPU.
 
 use gpui_kit::component::{
-    button::{Button, ButtonVariants as _},
+    button::ButtonVariants as _,
     input::{Input, InputState},
     switch::Switch,
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _,
@@ -20,6 +20,7 @@ use gpui_kit::{
 use rusker_desktop::container::{merge_env, ContainerDraft};
 
 use super::{form_field, Page, RuskerApp};
+use crate::ui::button;
 
 type InputPair = (Entity<InputState>, Entity<InputState>);
 
@@ -186,14 +187,14 @@ impl RuskerApp {
                         .justify_end()
                         .gap_2()
                         .child(
-                            Button::new("cancel-create")
+                            button("cancel-create")
                                 .outline()
                                 .label("取消")
                                 .disabled(submitting)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            Button::new("submit-create")
+                            button("submit-create")
                                 .primary()
                                 .icon(IconName::Play)
                                 .label(if submitting { "运行中…" } else { "运行" })
@@ -385,7 +386,7 @@ impl RuskerApp {
             if matches!(list, RowList::Mounts) {
                 let browse_weak = weak.clone();
                 left_input = left_input.suffix(
-                    Button::new(SharedString::from(format!("{id}-browse-{index}")))
+                    button(SharedString::from(format!("{id}-browse-{index}")))
                         .ghost()
                         .xsmall()
                         .icon(Icon::new(IconName::Ellipsis).text_color(cx.theme().primary))
@@ -412,7 +413,7 @@ impl RuskerApp {
                         .flex()
                         .gap_1()
                         .child(
-                            Button::new(SharedString::from(format!("{id}-remove-{index}")))
+                            button(SharedString::from(format!("{id}-remove-{index}")))
                                 .ghost()
                                 .small()
                                 .icon(IconName::Minus)
@@ -426,7 +427,7 @@ impl RuskerApp {
                         )
                         .when(index + 1 == count, |this| {
                             this.child(
-                                Button::new(SharedString::from(format!("{id}-add")))
+                                button(SharedString::from(format!("{id}-add")))
                                     .ghost()
                                     .small()
                                     .icon(Icon::new(IconName::Plus).text_color(cx.theme().primary))

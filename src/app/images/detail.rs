@@ -3,7 +3,7 @@
 
 use gpui_kit::component::{
     breadcrumb::{Breadcrumb, BreadcrumbItem},
-    button::{Button, ButtonVariants as _},
+    button::ButtonVariants as _,
     menu::DropdownMenu as _,
     tab::{Tab, TabBar},
     ActiveTheme as _, Icon, IconName, Sizable as _,
@@ -25,7 +25,7 @@ use rusker_desktop::{
 use super::{image_menu, now, RuskerApp};
 use crate::{
     app::{await_engine, list_action_button, PointerCursor as _},
-    ui::{detail_row, empty_state, muted},
+    ui::{button, detail_row, empty_state, muted},
 };
 
 #[derive(Default)]
@@ -117,7 +117,7 @@ impl RuskerApp {
             .flex_wrap()
             .gap_4()
             .child(
-                Button::new("image-detail-back")
+                button("image-detail-back")
                     .ghost()
                     .small()
                     .pointer(true)
@@ -181,7 +181,7 @@ impl RuskerApp {
                     .items_center()
                     .gap_2()
                     .child(
-                        Button::new("run-image-detail")
+                        button("run-image-detail")
                             .primary()
                             .pointer(!busy)
                             .icon(IconName::Play)
@@ -196,7 +196,7 @@ impl RuskerApp {
                             })),
                     )
                     .child(
-                        Button::new("image-detail-more")
+                        button("image-detail-more")
                             .outline()
                             .pointer(!busy)
                             .icon(IconName::ChevronDown)
@@ -207,7 +207,7 @@ impl RuskerApp {
                             }),
                     )
                     .child(
-                        Button::new("remove-image-detail")
+                        button("remove-image-detail")
                             .danger()
                             .pointer(!busy)
                             .icon(AssetIcon::Trash)
@@ -356,7 +356,7 @@ impl RuskerApp {
                             .child(error.clone()),
                     )
                     .child(
-                        Button::new("retry-image-detail")
+                        button("retry-image-detail")
                             .outline()
                             .pointer(true)
                             .label("重试")
@@ -525,7 +525,7 @@ impl RuskerApp {
             }, cx))
             .child(muted("镜像不会被自动上传至第三方服务。", cx))
             .child(
-                Button::new("show-image-metadata")
+                button("show-image-metadata")
                     .outline()
                     .pointer(true)
                     .label("查看镜像信息")

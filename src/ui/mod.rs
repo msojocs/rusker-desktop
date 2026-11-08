@@ -1,8 +1,45 @@
 pub mod theme;
 
 use gpui_kit::base::StyledExt as _;
-use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::{div, px, App, Div, ParentElement as _, SharedString, Styled as _};
+use gpui_kit::component::{
+    button::{Button, ButtonVariant, ButtonVariants as _},
+    dialog::{Cancel, Confirm},
+    ActiveTheme as _,
+};
+use gpui_kit::{
+    div, px, App, Div, ElementId, InteractiveElement as _, ParentElement as _, SharedString,
+    Styled as _,
+};
+
+/// Shared constructor so every application button uses the pointing-hand cursor.
+pub fn button(id: impl Into<ElementId>) -> Button {
+    Button::new(id).cursor_pointer()
+}
+
+/// Pointer-enabled alert buttons, dispatching through their own dialog's focus path.
+pub fn confirmation_footer(label: &'static str, variant: ButtonVariant, cx: &mut App) -> Div {
+    let anchor = cx.focus_handle();
+    let cancel = anchor.clone();
+    div()
+        .flex()
+        .justify_end()
+        .gap_2()
+        .child(div().absolute().size_0().track_focus(&anchor))
+        .child(
+            button("cancel")
+                .outline()
+                .label("取消")
+                .on_click(move |_, window, cx| cancel.dispatch_action(&Cancel, window, cx)),
+        )
+        .child(
+            button("ok")
+                .with_variant(variant)
+                .label(label)
+                .on_click(move |_, window, cx| {
+                    anchor.dispatch_action(&Confirm { secondary: false }, window, cx);
+                }),
+        )
+}
 
 pub fn page_header(
     title: impl Into<SharedString>,

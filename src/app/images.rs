@@ -7,7 +7,7 @@ mod pull;
 use std::collections::HashSet;
 
 use gpui_kit::component::{
-    button::{Button, ButtonVariant, ButtonVariants as _},
+    button::{ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     input::Input,
     menu::{DropdownMenu as _, PopupMenuItem},
@@ -32,7 +32,7 @@ use rusker_desktop::{
 use time::OffsetDateTime;
 
 use super::{form_field, list_action_button, Page, PointerCursor as _, RuskerApp};
-use crate::ui::{empty_state, muted};
+use crate::ui::{button, confirmation_footer, empty_state, muted};
 
 const CHECK_COLUMN: f32 = 32.;
 const DOT_COLUMN: f32 = 28.;
@@ -150,7 +150,7 @@ impl RuskerApp {
             row.reference.clone().unwrap_or_else(|| short_id(&row.id))
         );
         let weak = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let target = target.clone();
             let weak = weak.clone();
             dialog
@@ -160,6 +160,7 @@ impl RuskerApp {
                 .ok_text("删除")
                 .cancel_text("取消")
                 .ok_variant(ButtonVariant::Danger)
+                .footer(confirmation_footer("删除", ButtonVariant::Danger, cx))
                 .on_ok(move |_, _, cx| {
                     let target = target.clone();
                     _ = weak.update(cx, |this, cx| this.remove_image(target, cx));
@@ -207,7 +208,7 @@ impl RuskerApp {
             format!("删除 {} 个镜像？", targets.len())
         };
         let weak = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let targets = targets.clone();
             let weak = weak.clone();
             dialog
@@ -217,6 +218,7 @@ impl RuskerApp {
                 .ok_text("删除")
                 .cancel_text("取消")
                 .ok_variant(ButtonVariant::Danger)
+                .footer(confirmation_footer("删除", ButtonVariant::Danger, cx))
                 .on_ok(move |_, _, cx| {
                     let targets = targets.clone();
                     _ = weak.update(cx, |this, cx| this.remove_images(targets, cx));
@@ -322,13 +324,13 @@ impl RuskerApp {
                         .justify_end()
                         .gap_2()
                         .child(
-                            Button::new("cancel-pull")
+                            button("cancel-pull")
                                 .outline()
                                 .label("取消")
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            Button::new("submit-pull")
+                            button("submit-pull")
                                 .primary()
                                 .icon(IconName::ArrowDown)
                                 .label("拉取")
@@ -486,7 +488,7 @@ impl RuskerApp {
                         })),
                 )
                 .child(
-                    Button::new("remove-checked-images")
+                    button("remove-checked-images")
                         .danger()
                         .pointer(!busy)
                         .icon(AssetIcon::Trash)
@@ -498,7 +500,7 @@ impl RuskerApp {
                 )
             })
             .child(
-                Button::new("prune-images")
+                button("prune-images")
                     .outline()
                     .pointer(!busy && !unused.is_empty())
                     .icon(AssetIcon::BrushCleaning)
@@ -510,7 +512,7 @@ impl RuskerApp {
                     })),
             )
             .child(
-                Button::new("open-pull-image")
+                button("open-pull-image")
                     .primary()
                     .pointer(!busy)
                     .icon(IconName::ArrowDown)

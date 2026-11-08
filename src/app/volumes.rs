@@ -7,7 +7,7 @@ use std::{
 };
 
 use gpui_kit::component::{
-    button::{Button, ButtonVariant, ButtonVariants as _},
+    button::{ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     input::Input,
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _,
@@ -35,7 +35,9 @@ use tokio::task::JoinHandle;
 use super::{
     await_engine, brand_color, form_field, list_action_button, Page, PointerCursor as _, RuskerApp,
 };
-use crate::ui::{detail_row, empty_state, muted, page_header, section_panel};
+use crate::ui::{
+    button, confirmation_footer, detail_row, empty_state, muted, page_header, section_panel,
+};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum VolumeTab {
@@ -200,7 +202,7 @@ impl RuskerApp {
             format!("删除 {} 个卷？", names.len())
         };
         let weak = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let names = names.clone();
             let weak = weak.clone();
             dialog
@@ -210,6 +212,7 @@ impl RuskerApp {
                 .ok_text("删除")
                 .cancel_text("取消")
                 .ok_variant(ButtonVariant::Danger)
+                .footer(confirmation_footer("删除", ButtonVariant::Danger, cx))
                 .on_ok(move |_, _, cx| {
                     let names = names.clone();
                     _ = weak.update(cx, |this, cx| this.remove_volumes(names, cx));
@@ -608,7 +611,7 @@ impl RuskerApp {
         };
         let title = format!("删除卷 {name}？");
         let weak = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let name = name.clone();
             let weak = weak.clone();
             dialog
@@ -618,6 +621,7 @@ impl RuskerApp {
                 .ok_text("删除")
                 .cancel_text("取消")
                 .ok_variant(ButtonVariant::Danger)
+                .footer(confirmation_footer("删除", ButtonVariant::Danger, cx))
                 .on_ok(move |_, _, cx| {
                     let name = name.clone();
                     _ = weak.update(cx, |this, cx| this.remove_volume(name, cx));
@@ -656,7 +660,7 @@ impl RuskerApp {
         }
         let title = format!("清空卷 {name}？");
         let weak = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let name = name.clone();
             let weak = weak.clone();
             dialog
@@ -666,6 +670,7 @@ impl RuskerApp {
                 .ok_text("清空")
                 .cancel_text("取消")
                 .ok_variant(ButtonVariant::Danger)
+                .footer(confirmation_footer("清空", ButtonVariant::Danger, cx))
                 .on_ok(move |_, _, cx| {
                     let name = name.clone();
                     _ = weak.update(cx, |this, cx| this.empty_volume(name, cx));
@@ -733,7 +738,7 @@ impl RuskerApp {
         );
         let title = format!("导入数据到卷 {name}？");
         let weak = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let name = name.clone();
             let archive = archive.clone();
             let weak = weak.clone();
@@ -743,6 +748,7 @@ impl RuskerApp {
                 .confirm()
                 .ok_text("导入")
                 .cancel_text("取消")
+                .footer(confirmation_footer("导入", ButtonVariant::Primary, cx))
                 .on_ok(move |_, _, cx| {
                     let name = name.clone();
                     let archive = archive.clone();
@@ -1031,7 +1037,7 @@ impl RuskerApp {
                                 })),
                         )
                         .child(
-                            Button::new("remove-checked-volumes")
+                            button("remove-checked-volumes")
                                 .danger()
                                 .pointer(!busy)
                                 .icon(AssetIcon::Trash)
@@ -1043,7 +1049,7 @@ impl RuskerApp {
                         )
                     })
                     .child(
-                        Button::new("prune-volumes")
+                        button("prune-volumes")
                             .outline()
                             .pointer(!busy && !unused.is_empty())
                             .icon(AssetIcon::BrushCleaning)
@@ -1055,7 +1061,7 @@ impl RuskerApp {
                             })),
                     )
                     .child(
-                        Button::new("open-create-volume")
+                        button("open-create-volume")
                             .primary()
                             .pointer(!busy)
                             .icon(IconName::Plus)
@@ -1166,7 +1172,7 @@ impl RuskerApp {
                     .flex_shrink_0()
                     .gap_2()
                     .child(
-                        Button::new("clone-volume-detail")
+                        button("clone-volume-detail")
                             .outline()
                             .icon(IconName::Copy)
                             .label("克隆")
@@ -1176,7 +1182,7 @@ impl RuskerApp {
                             })),
                     )
                     .child(
-                        Button::new("empty-volume")
+                        button("empty-volume")
                             .outline()
                             .icon(AssetIcon::Eraser)
                             .label("清空")
@@ -1186,7 +1192,7 @@ impl RuskerApp {
                             })),
                     )
                     .child(
-                        Button::new("export-volume")
+                        button("export-volume")
                             .outline()
                             .icon(AssetIcon::Download)
                             .label("导出")
@@ -1196,7 +1202,7 @@ impl RuskerApp {
                             })),
                     )
                     .child(
-                        Button::new("import-volume")
+                        button("import-volume")
                             .primary()
                             .icon(AssetIcon::Upload)
                             .label("导入")
@@ -1206,7 +1212,7 @@ impl RuskerApp {
                             })),
                     )
                     .child(
-                        Button::new("remove-volume-detail")
+                        button("remove-volume-detail")
                             .danger()
                             .icon(AssetIcon::Trash)
                             .label("删除")
@@ -1341,7 +1347,7 @@ impl RuskerApp {
                             .child(format_timestamp(record.finished)),
                     )
                     .child(
-                        Button::new(("reveal-export", index))
+                        button(("reveal-export", index))
                             .ghost()
                             .small()
                             .icon(IconName::FolderOpen)
@@ -1378,7 +1384,7 @@ impl RuskerApp {
                     .gap_3()
                     .child(div().flex_1().child(muted(hint, cx)))
                     .child(
-                        Button::new("export-volume-tab")
+                        button("export-volume-tab")
                             .outline()
                             .small()
                             .icon(AssetIcon::Download)
@@ -1494,7 +1500,7 @@ impl RuskerApp {
                         )),
                     )
                     .child(
-                        Button::new("reload-volume-tree")
+                        button("reload-volume-tree")
                             .ghost()
                             .small()
                             .icon(IconName::RefreshCw)
@@ -1775,13 +1781,13 @@ fn dialog_footer(
         .justify_end()
         .gap_2()
         .child(
-            Button::new(SharedString::from(format!("{submit_id}-cancel")))
+            button(SharedString::from(format!("{submit_id}-cancel")))
                 .outline()
                 .label("取消")
                 .on_click(|_, window, cx| window.close_dialog(cx)),
         )
         .child(
-            Button::new(submit_id)
+            button(submit_id)
                 .primary()
                 .icon(icon)
                 .label(submit_label)

@@ -6,7 +6,7 @@ use std::{
 
 use gpui_kit::component::{
     breadcrumb::{Breadcrumb, BreadcrumbItem},
-    button::{Button, ButtonCustomVariant, ButtonVariant, ButtonVariants as _},
+    button::{Button, ButtonCustomVariant, ButtonVariants as _},
     checkbox::Checkbox,
     input::{Editor, EditorState, Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
@@ -51,7 +51,7 @@ use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 
 use crate::ui::theme::change_theme;
-use crate::ui::{detail_row, empty_state, muted, section_panel, stat_card};
+use crate::ui::{button, detail_row, empty_state, muted, section_panel, stat_card};
 
 mod images;
 mod notifications;
@@ -192,6 +192,13 @@ impl EngineTransition {
     }
 }
 
+#[derive(Default)]
+struct ContainerRemoval {
+    pending_ids: Vec<String>,
+    submitting: bool,
+    error: Option<String>,
+}
+
 pub struct RuskerApp {
     engine: Option<EngineService>,
     /// Set while a managed runtime start/stop is in flight.
@@ -217,6 +224,7 @@ pub struct RuskerApp {
     containers_running_only: bool,
     /// IDs ticked for batch removal in the container list.
     containers_checked: HashSet<String>,
+    container_removal: ContainerRemoval,
     /// Container detail tab: 0 logs, 1 details, 2 mounts.
     container_tab: usize,
     /// Scroll state of the container log viewer.
@@ -527,6 +535,7 @@ impl RuskerApp {
             selected_container: None,
             containers_running_only: false,
             containers_checked: HashSet::new(),
+            container_removal: ContainerRemoval::default(),
             container_tab: 0,
             container_logs_scroll: ScrollHandle::new(),
             logs: String::new(),
@@ -1548,7 +1557,7 @@ impl RuskerApp {
 
     fn theme_button(&self, preference: ThemePreference, cx: &mut Context<Self>) -> Button {
         let selected = self.settings_draft.theme == preference;
-        let button = Button::new(preference.label())
+        let button = button(preference.label())
             .label(preference.label())
             .pointer(true)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1604,27 +1613,13 @@ impl RuskerApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let id = container.id.clone();
-        let title = format!("删除容器 {}？", container.name);
-        let weak = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
-            let id = id.clone();
-            let weak = weak.clone();
-            dialog
-                .title(title.clone())
-                .description("此操作不可撤销。关联卷不会被删除；运行中的容器需先停止。")
-                .confirm()
-                .ok_text("删除")
-                .cancel_text("取消")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
-                    let id = id.clone();
-                    _ = weak.update(cx, |this, cx| {
-                        this.start_container_action(id, ContainerAction::Remove, cx);
-                    });
-                    true
-                })
-        });
+        self.open_remove_containers_dialog(
+            vec![container.id.clone()],
+            format!("删除容器 {}？", container.name),
+            "此操作不可撤销。关联卷不会被删除；运行中的容器需先停止。".into(),
+            window,
+            cx,
+        );
     }
 
     fn confirm_remove_containers(
@@ -1649,42 +1644,103 @@ impl RuskerApp {
             "此操作不可撤销。关联卷不会被删除；运行中的容器会被 Engine 拒绝。\n{}",
             listed.join("\n")
         );
-        let ids: Vec<String> = containers
+        let ids = containers
             .into_iter()
             .map(|container| container.id)
             .collect();
-        let weak = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
-            let ids = ids.clone();
-            let weak = weak.clone();
-            dialog
-                .title(title.clone())
-                .description(description.clone())
-                .confirm()
-                .ok_text("删除")
-                .cancel_text("取消")
-                .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
-                    let ids = ids.clone();
-                    _ = weak.update(cx, |this, cx| this.remove_containers(ids, cx));
-                    true
-                })
-        });
+        self.open_remove_containers_dialog(ids, title, description, window, cx);
     }
 
-    fn remove_containers(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+    fn open_remove_containers_dialog(
+        &mut self,
+        ids: Vec<String>,
+        title: String,
+        description: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if ids.is_empty() || self.busy.is_some() {
             return;
         }
+        self.container_removal = ContainerRemoval {
+            pending_ids: ids,
+            ..ContainerRemoval::default()
+        };
+        let weak = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
+            let Some(this) = weak.upgrade() else {
+                return dialog;
+            };
+            let removal = &this.read(cx).container_removal;
+            let submitting = removal.submitting;
+            let error = removal.error.clone();
+            let submit = weak.clone();
+            let confirm = weak.clone();
+            let cancel = weak.clone();
+            dialog
+                .title(title.clone())
+                .description(description.clone())
+                .keyboard(!submitting)
+                .on_ok(move |_, _, cx| {
+                    _ = confirm.update(cx, |this, cx| this.submit_remove_containers(cx));
+                    // Close only after the engine reports success.
+                    false
+                })
+                .on_cancel(move |_, _, cx| {
+                    cancel
+                        .upgrade()
+                        .is_none_or(|this| !this.read(cx).container_removal.submitting)
+                })
+                .when_some(error, |dialog, error| {
+                    dialog.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                })
+                .footer(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            button("cancel-remove-containers")
+                                .outline()
+                                .label("取消")
+                                .disabled(submitting)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            button("submit-remove-containers")
+                                .danger()
+                                .label(if submitting { "删除中..." } else { "删除" })
+                                .loading(submitting)
+                                .disabled(submitting)
+                                .on_click(move |_, _, cx| {
+                                    _ = submit.update(cx, |this, cx| {
+                                        this.submit_remove_containers(cx);
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn submit_remove_containers(&mut self, cx: &mut Context<Self>) {
+        if self.container_removal.submitting
+            || self.container_removal.pending_ids.is_empty()
+            || self.busy.is_some()
+        {
+            return;
+        }
         let Some(engine) = self.engine.clone() else {
-            self.notify_error("容器引擎不可用", cx);
+            self.container_removal.error = Some("容器引擎不可用".into());
             cx.notify();
             return;
         };
+        let ids = self.container_removal.pending_ids.clone();
         let total = ids.len();
         let handle = engine.remove_containers(ids);
         let revision = self.refresh_revision.advance();
-        self.busy = Some(format!("删除 {total} 个容器…"));
+        self.container_removal.submitting = true;
+        self.container_removal.error = None;
+        self.busy = Some("删除中...".into());
         self.loading = false;
         cx.notify();
         self._action_task = Some(cx.spawn(async move |this, cx| {
@@ -1694,25 +1750,33 @@ impl RuskerApp {
                     return;
                 }
                 this.busy = None;
+                this.container_removal.submitting = false;
                 match result {
                     Ok((snapshot, failures)) => {
                         this.connected = true;
+                        // On retry, do not submit containers already deleted by a partial success.
+                        this.container_removal.pending_ids.retain(|id| {
+                            snapshot
+                                .containers
+                                .iter()
+                                .any(|container| &container.id == id)
+                        });
                         this.apply_snapshot(snapshot);
+                        this.after_volume_snapshot(cx);
                         if failures.is_empty() {
+                            let window = this.window_handle;
+                            _ = cx.update_window(window, |_, window, cx| window.close_dialog(cx));
                             this.notify_success(format!("已删除 {total} 个容器"), cx);
                         } else {
-                            this.notify_error(
-                                format!(
-                                    "已删除 {} 个容器，{} 个失败：\n{}",
-                                    total - failures.len(),
-                                    failures.len(),
-                                    failures.join("\n")
-                                ),
-                                cx,
-                            );
+                            this.container_removal.error = Some(format!(
+                                "已删除 {} 个容器，{} 个失败：\n{}",
+                                total - failures.len(),
+                                failures.len(),
+                                failures.join("\n")
+                            ));
                         }
                     }
-                    Err(error) => this.notify_error(error.to_string(), cx),
+                    Err(error) => this.container_removal.error = Some(error.to_string()),
                 }
                 cx.notify();
             });
@@ -1928,7 +1992,7 @@ impl RuskerApp {
             .child(div().text_lg().font_semibold().child(self.page.title()))
             .when(show_refresh, |this| {
                 this.child(
-                    Button::new("refresh")
+                    button("refresh")
                         .outline()
                         .small()
                         .icon(IconName::RefreshCw)
@@ -2084,7 +2148,7 @@ impl RuskerApp {
                     .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
             )
             .child(
-                Button::new("open-create-container")
+                button("open-create-container")
                     .pointer(true)
                     .primary()
                     .icon(IconName::Plus)
@@ -2145,7 +2209,7 @@ impl RuskerApp {
                         })),
                 )
                 .child(
-                    Button::new("remove-checked-containers")
+                    button("remove-checked-containers")
                         .pointer(true)
                         .danger()
                         .icon(AssetIcon::Trash)
@@ -2525,7 +2589,7 @@ impl RuskerApp {
             .items_center()
             .gap_2()
             .child(
-                Button::new("stop-container")
+                button("stop-container")
                     .secondary()
                     .icon(IconName::Square)
                     .tooltip("停止")
@@ -2535,7 +2599,7 @@ impl RuskerApp {
                     })),
             )
             .child(
-                Button::new("start-container")
+                button("start-container")
                     .primary()
                     .icon(IconName::Play)
                     .tooltip("启动")
@@ -2545,7 +2609,7 @@ impl RuskerApp {
                     })),
             )
             .child(
-                Button::new("restart-container")
+                button("restart-container")
                     .outline()
                     .icon(IconName::RotateCw)
                     .tooltip("重启")
@@ -2559,7 +2623,7 @@ impl RuskerApp {
                     })),
             )
             .child(
-                Button::new("remove-container")
+                button("remove-container")
                     .danger()
                     .icon(AssetIcon::Trash)
                     .tooltip("删除")
@@ -2595,7 +2659,7 @@ impl RuskerApp {
                     }),
             )
             .child(
-                Button::new("copy-container-logs")
+                button("copy-container-logs")
                     .ghost()
                     .small()
                     .icon(IconName::Copy)
@@ -2606,7 +2670,7 @@ impl RuskerApp {
                     }),
             )
             .child(
-                Button::new("refresh-container-logs")
+                button("refresh-container-logs")
                     .ghost()
                     .small()
                     .icon(IconName::RotateCw)
@@ -2654,7 +2718,7 @@ impl RuskerApp {
                     .items_center()
                     .gap_4()
                     .child(
-                        Button::new("container-back")
+                        button("container-back")
                             .ghost()
                             .small()
                             .icon(IconName::ChevronLeft)
@@ -2666,7 +2730,11 @@ impl RuskerApp {
                     .child(
                         Icon::new(AssetIcon::Container)
                             .size(px(40.))
-                            .text_color(cx.theme().muted_foreground),
+                            .text_color(if running {
+                                cx.theme().success
+                            } else {
+                                cx.theme().muted_foreground
+                            }),
                     )
                     .child(
                         div()
@@ -2781,7 +2849,7 @@ impl RuskerApp {
             .when(!is_placeholder, |this| {
                 this.child(
                     div().absolute().bottom_4().right_6().child(
-                        Button::new("container-logs-bottom")
+                        button("container-logs-bottom")
                             .outline()
                             .icon(IconName::ArrowDown)
                             .tooltip("滚动到底部")
@@ -2925,7 +2993,7 @@ impl RuskerApp {
                     .flex_wrap()
                     .gap_3()
                     .child(
-                        Button::new("install-runtime")
+                        button("install-runtime")
                             .primary()
                             .icon(IconName::HardDrive)
                             .label(if snapshot.installed { "修复环境" } else { "安装环境" })
@@ -2936,7 +3004,7 @@ impl RuskerApp {
                             })),
                     )
                     .child(
-                        Button::new("start-runtime")
+                        button("start-runtime")
                             .outline()
                             .icon(IconName::Play)
                             .label("启动")
@@ -2947,7 +3015,7 @@ impl RuskerApp {
                             })),
                     )
                     .child(
-                        Button::new("stop-runtime")
+                        button("stop-runtime")
                             .outline()
                             .icon(IconName::Square)
                             .label("停止")
@@ -2958,7 +3026,7 @@ impl RuskerApp {
                             })),
                     )
                     .child(
-                        Button::new("refresh-runtime")
+                        button("refresh-runtime")
                             .ghost()
                             .icon(IconName::RefreshCw)
                             .label("刷新状态")
@@ -3033,7 +3101,7 @@ impl RuskerApp {
                     .gap_3()
                     .child(div().flex_1().child(settings_label("Daemon 配置文件", cx)))
                     .child(
-                        Button::new("reload-daemon-config")
+                        button("reload-daemon-config")
                             .ghost()
                             .small()
                             .icon(IconName::Redo)
@@ -3344,7 +3412,7 @@ impl RuskerApp {
                     .child(message),
             )
             .child(
-                Button::new("discard-settings")
+                button("discard-settings")
                     .outline()
                     .label("放弃更改")
                     .disabled(!dirty || applying)
@@ -3354,7 +3422,7 @@ impl RuskerApp {
                     })),
             )
             .child(
-                Button::new("apply-settings")
+                button("apply-settings")
                     .primary()
                     .label("应用")
                     .disabled(applying || !dirty || apply_blocked)
@@ -3482,7 +3550,7 @@ impl RuskerApp {
                                     ),
                             )
                             .child(
-                                Button::new("browse-disk-location")
+                                button("browse-disk-location")
                                     .outline()
                                     .label("浏览…")
                                     .disabled(busy)
@@ -3682,7 +3750,7 @@ impl RuskerApp {
                         .items_center()
                         .gap_3()
                         .child(
-                            Button::new("export-proxy-settings")
+                            button("export-proxy-settings")
                                 .outline()
                                 .icon(IconName::FileText)
                                 .label("导出 Engine JSON")
@@ -3782,7 +3850,7 @@ impl RuskerApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let weak = cx.weak_entity();
-        Button::new(id)
+        button(id)
             .outline()
             .label(label(current))
             .dropdown_caret(true)
@@ -3986,7 +4054,7 @@ impl RuskerApp {
 
 /// Transparent list action using the shared theme's hover and pressed colors.
 fn list_action_button(id: impl Into<ElementId>, color: Hsla, cx: &App) -> Button {
-    Button::new(id).pointer(true).custom(
+    button(id).pointer(true).custom(
         ButtonCustomVariant::new(cx)
             .foreground(color)
             .hover(cx.theme().button_hover)
@@ -4286,6 +4354,7 @@ impl RuskerApp {
         let is_close = button == WindowButton::Close;
         div()
             .id(id)
+            .cursor_pointer()
             .w(px(WINDOW_BUTTON_WIDTH))
             .h_full()
             .flex_shrink_0()
@@ -4507,7 +4576,7 @@ trait PointerCursor: gpui_kit::Styled + Sized {
         if enabled {
             self.cursor_pointer()
         } else {
-            self
+            self.cursor_default()
         }
     }
 }
