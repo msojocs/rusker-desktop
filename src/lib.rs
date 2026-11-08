@@ -1,4 +1,5 @@
 pub mod container;
+pub mod diagnostics;
 pub mod engine;
 pub mod format;
 pub mod image;

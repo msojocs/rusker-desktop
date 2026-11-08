@@ -21,9 +21,9 @@ Windows                                   WSL2 utility VM
 ┌──────────────────────────────┐          ┌──────────────────────────────────────┐
 │ Rusker Desktop               │ wsl.exe  │ rusker 发行版                         │
 │  Engine 会话 ────────────────┼─────────►│  supervisor → dockerd（前台）         │
-│  \\.\pipe\rusker_engine      │ 每连接   │   ├ unix:///var/run/docker.sock       │
-│   └ 代理 ────────────────────┼─────────►│   │  ▲ docker system dial-stdio       │
-│ docker.exe / Bollard ─► pipe │          │   └ unix:///mnt/wsl/rusker/docker.sock│
+│  \\.\pipe\rusker_engine      │ 常驻会话 │   ├ unix:///var/run/docker.sock       │
+│   └ 代理 ────────────────────┼─────────►│   │  ▲ rusker-vm-proxy --docker-api    │
+│ docker.exe / Bollard ─► pipe │ 常驻复用 │   └ unix:///mnt/wsl/rusker/docker.sock│
 └──────────────────────────────┘          │ Ubuntu 等已集成发行版 ──────────────►┘│
                                           └──────────────────────────────────────┘
 ```
@@ -34,7 +34,7 @@ Windows                                   WSL2 utility VM
 2. 通过 `wsl.exe --import` 创建名为 `rusker` 的 WSL2 专用发行版，并校验镜像版本与组件。安装过程不在发行版内联网安装任何软件。
 3. **修复环境 / 升级**与 Docker Desktop 一样整体替换系统盘：先确认 Docker 数据已在数据磁盘上（旧版本会先迁移），保存 `/etc/docker/daemon.json`，然后注销旧系统盘、导入当前镜像，再恢复 `daemon.json`（缺少的 `nvidia` runtime 会从新镜像补上）。容器、镜像和卷保留；在 `rusker` 发行版里手动安装的软件不保留。镜像版本与应用要求不一致时，设置页会提示点击“修复环境”。
 4. 应用通过一个长期运行的 `wsl.exe` 会话在前台运行 `dockerd`，不依赖发行版内的 systemd。WSL2 会在最后一个会话结束约 10 秒后终止发行版，后台 `nohup` 进程无法保活，因此会话必须由应用持有。如果发行版中已有上一次留下的 `dockerd`，supervisor 会接管它，而不会再启动第二个。
-5. Engine **不监听 TCP 端口**。Windows 侧由应用内代理提供 `\\.\pipe\rusker_engine`，每个连接转发到发行版内的 `docker system dial-stdio`；该路径与 WSL 网络模式（NAT/mirrored）无关，并正确传递 `docker run -i`/`exec -i` 的 stdin EOF。资源节省模式下，下一请求会在全局操作锁下恢复暂停的 Engine，等待 Docker API 就绪后再转发原请求；手动停止后不会因客户端请求而自动启动。
+5. Engine **不监听 TCP 端口**。Windows 侧由应用内代理提供 `\\.\pipe\rusker_engine`，一个长期 `wsl.exe` 会话运行嵌入的 `rusker-vm-proxy --docker-api`，将各管道连接多路复用到发行版内独立的 `/var/run/docker.sock` 连接；该路径与 WSL 网络模式（NAT/mirrored）无关，并正确传递 `docker run -i`/`exec -i` 的 stdin EOF。空闲常驻通道不算业务连接；活跃的管道客户端仍阻止资源节省。资源节省模式下，下一请求会在全局操作锁下恢复暂停的 Engine，等待 Docker API 就绪后再转发原请求；手动停止后不会因客户端请求而自动启动。
 6. **绑定挂载与 Docker Desktop 的 WSL2 后端一致，不需要配置文件共享**：WSL 自动把所有盘符挂到 `rusker` 发行版的 `/mnt/<盘符>`，因此任意 Windows 目录都能挂载。管道代理会改写 `containers/create` 请求中 `-v`（`HostConfig.Binds`）与 `--mount type=bind`（`HostConfig.Mounts`）的 Windows 源路径，例如 `docker run -v C:\Users\me\src:/src` 中的 `C:\Users\me\src`（或 `C:/Users/me/src`）会变为 `/mnt/c/Users/me/src`；命名卷、Linux 路径和 UNC 路径保持不变。attach/exec 等升级后的连接及其他请求原样转发。已集成的 WSL 发行版直连 socket，应直接使用 `/mnt/c/...` 形式。
 7. **Engine 代理与 Docker Desktop 一致，在 Windows 上逐请求解析**：dockerd 的代理固定为 `rusker` 内的 `http://127.0.0.1:23128`（对应 `http.docker.internal:3128`）；Engine 会话存活期间，应用另持有一个 `wsl.exe` 会话运行转发程序 `rusker-vm-proxy`（随应用嵌入的静态 Linux 程序，首次运行时安装到 `/usr/local/libexec/rusker/<内容哈希>/`，升级后自动替换），把每个连接以多路复用帧经该会话的 stdio 交给 Windows 上的内置 HTTP 代理，由它按当前设置与 `NO_PROXY` 决定走上游代理还是直连。因此 NAT 模式下填写 `127.0.0.1:7890` 也指 Windows 本机，修改代理不重启 Engine，也不需要开放端口或防火墙规则。详见[设置文档](settings.md#受管-engine与-docker-desktop-相同的代理结构)。
 
@@ -55,7 +55,7 @@ docker context use rusker
 # 或单次：docker -H npipe:////./pipe/rusker_engine ps
 ```
 
-每个新连接都要启动一次 `wsl.exe`，因此单条 CLI 命令会多出约 0.3–0.8 秒；应用内的 Bollard 客户端会复用连接。同一 Windows 用户只能有一个 Rusker 实例持有该 named pipe，冲突时会在设置页显示警告。
+Docker API 通道在首次连接时启动，随后每个新管道连接只打开一个复用流，不再逐连接启动 WSL 或 Docker CLI。首次启动可能包含检查/安装嵌入 helper 的成本；通道失败会关闭已有流，下一新连接重新建立通道，不重放原请求。应用内客户端复用版本协商结果，Windows 管道连接池最多保留 4 个空闲连接并在 5 秒后回收，避免长期阻止资源节省。同一 Windows 用户只能有一个 Rusker 实例持有该 named pipe，冲突时会在设置页显示警告。
 
 安装环境需要可用的 WSL2，不需要网络：系统镜像随安装包分发。WSL 功能本身的启用及 Windows 重启不由应用自动执行。
 

@@ -39,6 +39,9 @@ url = "2"
 vt100 = "0.18.1"
 
 [target.'cfg(windows)'.dependencies]
+hex = "0.4"
+hyper-named-pipe = "0.1.1"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 windows-registry = "0.6"
 
 [dev-dependencies]

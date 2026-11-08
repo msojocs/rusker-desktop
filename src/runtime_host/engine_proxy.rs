@@ -59,6 +59,11 @@ const MAX_PAYLOAD: usize = 256 * 1024;
 /// The VM side, built for the VM's architecture by `build.rs`.
 #[cfg(windows)]
 const VM_PROXY: &[u8] = include_bytes!(env!("RUSKER_VM_PROXY_BIN"));
+
+#[cfg(all(test, windows))]
+pub(super) fn embedded_helper_for_test() -> &'static [u8] {
+    VM_PROXY
+}
 /// Where versions of the VM side are installed, one directory per content
 /// hash, so an app upgrade installs its own copy and removes older ones.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -140,7 +145,7 @@ fn parse_header(header: &[u8; HEADER_LEN]) -> (u8, u32, usize) {
 }
 
 #[cfg(windows)]
-pub(super) use relay::serve;
+pub(super) use relay::{install_vm_proxy, serve};
 
 #[cfg(windows)]
 mod relay {
@@ -184,7 +189,10 @@ mod relay {
 
     /// Copies the embedded VM side into the distribution unless this build
     /// is already there.
-    async fn install_vm_proxy() -> Result<&'static str, String> {
+    pub(in crate::runtime_host) async fn install_vm_proxy() -> Result<&'static str, String> {
+        // HTTP and Docker API relays share the same embedded binary/install.
+        static INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _guard = INSTALL.lock().await;
         let (version, path) = vm_proxy_path();
         let mut check = managed_command("root");
         check.args(["/usr/bin/test", "-x", path]);

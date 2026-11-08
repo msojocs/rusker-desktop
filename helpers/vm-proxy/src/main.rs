@@ -14,6 +14,8 @@
 //! One thread per connection with blocking I/O; reads go straight into the
 //! frame buffer. Exits when stdin closes, i.e. when the backend goes away.
 
+mod docker_api;
+
 use std::{
     collections::HashMap,
     fs::{self, File},
@@ -32,6 +34,8 @@ const DATA: u8 = 2;
 const EOF: u8 = 3;
 const CLOSE: u8 = 4;
 const READY: u8 = 5;
+// Docker API mode only: one credit per consumed DATA frame, eight initially.
+const CREDIT: u8 = 6;
 const HEADER_LEN: usize = 9;
 const MAX_PAYLOAD: usize = 256 * 1024;
 const PIDFILE: &str = "/run/rusker-vm-proxy.pid";
@@ -184,6 +188,20 @@ fn listen(port: u16) -> TcpListener {
 }
 
 fn main() {
+    // No listener/PID file in Docker API mode: HTTP proxy instances must not
+    // terminate this independent reverse relay (or vice versa).
+    if std::env::args().nth(1).as_deref() == Some("--docker-api") {
+        let socket = std::env::args()
+            .nth(2)
+            .unwrap_or_else(|| "/var/run/docker.sock".into());
+        if let Err(error) = docker_api::run(io::stdin().lock(), &socket) {
+            if error.kind() != io::ErrorKind::UnexpectedEof {
+                eprintln!("Docker API relay: {error}");
+                process::exit(1);
+            }
+        }
+        return;
+    }
     let Some(port) = std::env::args()
         .nth(1)
         .and_then(|arg| arg.parse::<u16>().ok())

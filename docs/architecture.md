@@ -35,9 +35,10 @@
 - `engine/docker.rs`：Bollard 连接、查询、第三方模型转换，以及卷操作用的临时辅助容器。
 - `runtime_host/mod.rs`：WSL2 运行环境服务、操作串行锁、启动与退出钩子。
 - `runtime_host/wsl.rs`：专用发行版安装、所有权校验、Engine 会话（supervisor）、发行版集成与 GPU 检测。
-- `runtime_host/proxy.rs`：`//./pipe/rusker_engine` → `docker system dial-stdio` 的逐连接转发。
+- `runtime_host/proxy.rs`：`//./pipe/rusker_engine` → 常驻 WSL2 Docker API 多路复用通道；每个 pipe 对应独立 Unix socket，保留 HTTP 请求路径转换及升级流。
+- `runtime_host/docker_api_transport.rs`：单一长期 helper 会话、流量控制、连接隔离和半关闭；会话失败时关闭原有流，下一连接重建通道，不重放请求。
 - `runtime_host/engine_proxy.rs`：Engine 代理转发（对应 Docker Desktop 的 `http.docker.internal:3128`）：dockerd 固定使用 VM 内 `127.0.0.1:23128`，连接经一个长期 `wsl.exe` 会话的 stdio 多路复用到 Windows。
-- `helpers/vm-proxy`（独立 Cargo workspace）：上述转发的 VM 一侧，纯 std 的静态 Linux musl 程序；`build.rs` 为 VM 架构构建并嵌入 Windows exe，运行时按内容哈希安装到 `rusker` 发行版。
+- `helpers/vm-proxy`（独立 Cargo workspace）：HTTP 代理与 Docker API 转发的 VM 一侧，纯 std 的静态 Linux musl 程序；`build.rs` 为 VM 架构构建并嵌入 Windows exe，运行时按内容哈希安装到 `rusker` 发行版。
 - `runtime_host/http_proxy.rs`：Windows 侧 HTTP 正向代理（对应 `com.docker.backend` 内置代理）：逐请求解析代理设置、在 Windows 侧应用 `NO_PROXY`，`CONNECT` 与纯 HTTP 请求走上游代理（`http://`/`https://`）或直连。
 - `format.rs`：不含 I/O 的格式化、过滤和展示逻辑。
 - `app.rs`：页面、选择、忙碌状态、请求序号、通知和 GPUI Task；`app/volumes.rs` 为卷页面与卷详情。
@@ -48,6 +49,8 @@
 ## 线程与异步模型
 
 Bollard 和 WSL 子进程依赖 Tokio，GPUI 使用自己的 executor。`EngineService` 与 `RuntimeHostService` 各持有一个 `Arc<tokio::runtime::Runtime>`，Engine future 始终通过 runtime 提交，不能直接在 GPUI 前台 future 中执行 Tokio I/O。WSL 命令设置超时和 `kill_on_drop`，Windows 下使用无控制台窗口标志。运行环境操作由一把异步锁串行化；named pipe 代理作为常驻任务运行在 `RuntimeHostService` 的 runtime 上。应用退出时先由 `request_quit` 异步调用 `RuntimeHostService::shutdown`（停止 dockerd 并 `wsl --terminate rusker`，界面显示停止动画），完成后再 `cx.quit()`；其他退出路径的退出钩子仍同步调用 `shutdown_blocking` 兜底（GPUI 只为退出 future 等待约 200 ms）。
+
+`EngineService` 对同一 `DOCKER_HOST` 缓存已协商版本的 Docker 客户端，并发首次调用只初始化一次；初始化完成即释放缓存锁，业务请求和长连接不串行。操作失败仅使当前缓存失效，不自动重放（避免重复创建/删除等副作用）；旧操作的迟到失败不会清除新一代客户端。Windows named pipe 使用自定义 Hyper 传输启用连接复用（Bollard 内置传输关闭 idle 池），最多保留 4 个空闲连接，5 秒空闲后回收；exec/attach 的升级连接不受 idle 超时影响，确保活跃操作仍阻止 Resource Saver。
 
 一次刷新：
 
@@ -60,6 +63,12 @@ Bollard 和 WSL 子进程依赖 Tokio，GPUI 使用自己的 executor。`EngineS
 `Task` 必须由 View 持有。替换任务会取消旧的前台等待，但已发送到 Engine 的停止或删除操作可能已生效，因此取消界面等待不等于回滚外部副作用。所有用户操作都应通过最终刷新反映真实状态。
 
 日志和镜像拉取响应使用有界消费：日志只请求固定尾部行数并限制单条/总展示长度；拉取完整消费响应流并检查其中的错误，不能把未消费的流留作后台泄漏。
+
+## 容器文件浏览
+
+目录脚本使用 NUL 分隔的单层 `find` 结果，每批最多 128 个路径调用一次 `stat -c`，并把元数据与原始 argv 文件名配对，保留空格、换行、管道符等特殊名称。路径通过独立参数传入，不拼接 shell；不递归、不跟随符号链接、不计算 `du`。在脚本端最多处理 5001 项（额外一项用于报告截断），并限制输出到 8 MiB + 1；Rust 端保留 5000 项并再次检查输出边界。`find` 自身的 readdir 缓冲和阻塞文件系统调用不受这个条目上限保证。
+
+UI 按容器 ID 与目录路径缓存最近 8 个目录（合计约 16 MiB，TTL 30 秒），缓存命中直接显示并标识；手动刷新绕过缓存，同目录刷新保留上次内容，失败显示错误。容器停止或引擎断连时清空缓存；请求 revision 跨详情切换保持递增，旧响应不能覆盖新选择。本次没有把 exec 的部分结果流式推送到 UI，首次未缓存目录仍等待完整、校验成功的结果。
 
 ## 卷数据操作
 
@@ -89,7 +98,7 @@ Docker API 没有直接读写卷内容的接口，卷的浏览、克隆和清空
 | Linux/macOS | `Docker::connect_with_local_defaults()`，Unix socket |
 | Windows | Rusker 受管 WSL2 Engine，`//./pipe/rusker_engine` named pipe |
 
-Windows 版参照 Docker Desktop 的 WSL2 后端：`RuntimeHostService` 相当于 `com.docker.backend`，`rusker` 专用发行版相当于 `docker-desktop` 发行版。应用持有一个长期 `wsl.exe` 会话前台运行 `dockerd`（WSL2 会在最后一个会话结束约 10 秒后终止发行版，`nohup` 后台进程不能保活）；进程内代理把 named pipe 的每个连接转发给发行版内的 `docker system dial-stdio`；`dockerd` 同时监听 `/mnt/wsl/rusker/docker.sock`，供已集成的发行版直接访问。该路径不开放 TCP 端口，也不依赖 WSL 网络模式（NAT 或 mirrored）。详见 [WSL2 运行环境文档](wsl2.md)。
+Windows 版参照 Docker Desktop 的 WSL2 后端：`RuntimeHostService` 相当于 `com.docker.backend`，`rusker` 专用发行版相当于 `docker-desktop` 发行版。应用持有一个长期 `wsl.exe` 会话前台运行 `dockerd`（WSL2 会在最后一个会话结束约 10 秒后终止发行版，`nohup` 后台进程不能保活）；进程内代理通过一个常驻 helper 的 stdio 多路复用会话，将每个 named pipe 连接映射到独立的 `/var/run/docker.sock` 连接，不再为每个连接启动 `wsl.exe` / Docker CLI；`dockerd` 同时监听 `/mnt/wsl/rusker/docker.sock`，供已集成的发行版直接访问。该路径不开放 TCP 端口，也不依赖 WSL 网络模式（NAT 或 mirrored）。详见 [WSL2 运行环境文档](wsl2.md)。
 
 `DOCKER_HOST` 可覆盖默认值；设置后 Windows 版通过 Bollard 本地默认逻辑连接该端点，并且不会自动启动受管 Engine。UI 不写死平台路径，也不把 Unix 路径作为 Windows socket 参数。后续远程连接必须单独处理 TLS、证书和凭据，不把开放 TCP 端口作为默认引导。
 

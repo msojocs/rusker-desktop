@@ -52,6 +52,45 @@ const DATA_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const MAX_HELPER_OUTPUT: usize = 8 * 1024 * 1024;
 const IMPORT_CHUNK: usize = 256 * 1024;
 
+/// Bollard's built-in transports explicitly disable idle pooling. A custom
+/// transport preserves Hyper's upgrade support (exec/attach) while reusing normal
+/// HTTP connections. Quiet *active* streams are never subject to this timeout;
+/// only connections returned to Hyper's idle pool expire, allowing Resource
+/// Saver to observe zero clients after a short idle period.
+#[cfg(windows)]
+fn pooled_named_pipe(path: &str) -> Result<Docker, EngineError> {
+    use hyper_named_pipe::NamedPipeConnector;
+    use hyper_util::{client::legacy::Client, rt::TokioExecutor, rt::TokioTimer};
+
+    let mut builder = Client::builder(TokioExecutor::new());
+    builder
+        .http1_title_case_headers(true)
+        .pool_timer(TokioTimer::new())
+        .pool_idle_timeout(Duration::from_secs(5))
+        .pool_max_idle_per_host(4)
+        // Mutations must not be automatically replayed if a pooled connection
+        // closes during a lifecycle transition.
+        .retry_canceled_requests(false);
+    let client = builder.build(NamedPipeConnector);
+    let host = hex::encode(path.replacen("npipe://", "", 1).as_bytes());
+    Docker::connect_with_custom_transport(
+        move |request| {
+            let client = client.clone();
+            async move {
+                client
+                    .request(request)
+                    .await
+                    .map_err(bollard::errors::Error::from)
+            }
+        },
+        Some(format!("net.pipe://{host}")),
+        DATA_TIMEOUT.as_secs(),
+        bollard::API_DEFAULT_VERSION,
+    )
+    .map_err(|error| EngineError::Connect(error.to_string()))
+}
+
+#[derive(Clone)]
 pub struct DockerEngine {
     client: Docker,
     managed_wsl: bool,
@@ -59,6 +98,7 @@ pub struct DockerEngine {
 
 impl DockerEngine {
     pub async fn connect() -> Result<Self, EngineError> {
+        let _timing = crate::diagnostics::PerfSpan::new("engine.connect");
         #[cfg(windows)]
         let managed_wsl = std::env::var_os("DOCKER_HOST").is_none();
         #[cfg(not(windows))]
@@ -66,12 +106,12 @@ impl DockerEngine {
 
         #[cfg(windows)]
         let client = if managed_wsl {
-            Docker::connect_with_named_pipe(
-                crate::runtime_host::MANAGED_PIPE,
-                DATA_TIMEOUT.as_secs(),
-                bollard::API_DEFAULT_VERSION,
-            )
-            .map_err(|error| EngineError::Connect(error.to_string()))?
+            pooled_named_pipe(crate::runtime_host::MANAGED_PIPE)?
+        } else if let Some(path) = std::env::var_os("DOCKER_HOST")
+            .and_then(|host| host.into_string().ok())
+            .filter(|host| host.starts_with("npipe://"))
+        {
+            pooled_named_pipe(&path)?
         } else {
             Docker::connect_with_local_defaults()
                 .map_err(|error| EngineError::Connect(error.to_string()))?
@@ -85,6 +125,7 @@ impl DockerEngine {
         } else {
             CONNECT_TIMEOUT
         };
+        let negotiation = crate::diagnostics::PerfSpan::new("engine.negotiate_version");
         let client = match timeout(connect_timeout, client.negotiate_version()).await {
             Ok(Ok(client)) => client,
             Ok(Err(error)) => {
@@ -104,6 +145,7 @@ impl DockerEngine {
                 });
             }
         };
+        drop(negotiation);
         Ok(Self {
             client,
             managed_wsl,
@@ -1077,6 +1119,10 @@ fn needs_default_tag(reference: &str) -> bool {
     let last_segment = reference.rsplit('/').next().unwrap_or(reference);
     !last_segment.contains(':')
 }
+
+#[cfg(all(test, windows))]
+#[path = "pipe_pool_tests.rs"]
+mod pipe_pool_tests;
 
 #[cfg(test)]
 mod tests {

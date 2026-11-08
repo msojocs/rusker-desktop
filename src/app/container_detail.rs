@@ -73,6 +73,77 @@ impl StatsHistory {
     }
 }
 
+const DIRECTORY_CACHE_LIMIT: usize = 8;
+const DIRECTORY_CACHE_BYTES: usize = 16 * 1024 * 1024;
+const DIRECTORY_CACHE_TTL: Duration = Duration::from_secs(30);
+
+struct CachedDirectory {
+    container: String,
+    path: String,
+    listing: DirectoryListing,
+    at: Instant,
+    bytes: usize,
+}
+
+/// Small LRU shared across detail selections, never across engine disconnects.
+#[derive(Default)]
+struct DirectoryCache {
+    entries: VecDeque<CachedDirectory>,
+}
+
+impl DirectoryCache {
+    fn get(
+        &mut self,
+        container: &str,
+        path: &str,
+        now: Instant,
+        refresh: bool,
+    ) -> Option<DirectoryListing> {
+        // A refresh never reads cached contents, even before their TTL expires.
+        if refresh {
+            return None;
+        }
+        self.entries
+            .retain(|entry| now.saturating_duration_since(entry.at) < DIRECTORY_CACHE_TTL);
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.container == container && entry.path == path)?;
+        let entry = self.entries.remove(index)?;
+        let listing = entry.listing.clone();
+        self.entries.push_back(entry);
+        Some(listing)
+    }
+
+    fn insert(&mut self, container: String, path: String, listing: DirectoryListing, at: Instant) {
+        self.entries
+            .retain(|entry| entry.container != container || entry.path != path);
+        let bytes = container.len()
+            + path.len()
+            + listing
+                .entries
+                .iter()
+                .map(|entry| std::mem::size_of_val(entry) + entry.name.len() + entry.mode.len())
+                .sum::<usize>();
+        if bytes > DIRECTORY_CACHE_BYTES {
+            return;
+        }
+        while self.entries.len() >= DIRECTORY_CACHE_LIMIT
+            || self.entries.iter().map(|entry| entry.bytes).sum::<usize>() + bytes
+                > DIRECTORY_CACHE_BYTES
+        {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(CachedDirectory {
+            container,
+            path,
+            listing,
+            at,
+            bytes,
+        });
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ContainerTools {
     shell_connecting: bool,
@@ -84,6 +155,8 @@ pub(super) struct ContainerTools {
     files_error: Option<String>,
     files_revision: Revision,
     files_task: Option<Task<()>>,
+    files_cache: DirectoryCache,
+    files_cached: bool,
     stats: Option<ContainerStats>,
     stats_error: Option<String>,
     stats_updated: Option<Instant>,
@@ -94,7 +167,15 @@ pub(super) struct ContainerTools {
 
 impl RuskerApp {
     pub(super) fn reset_container_tools(&mut self) {
-        self.container_tools = ContainerTools::default();
+        // Keep the request clock monotonic even across A -> B -> A selections.
+        let mut files_revision = self.container_tools.files_revision;
+        files_revision.advance();
+        let files_cache = std::mem::take(&mut self.container_tools.files_cache);
+        self.container_tools = ContainerTools {
+            files_revision,
+            files_cache,
+            ..Default::default()
+        };
         self.container_terminal = None;
     }
 
@@ -111,6 +192,8 @@ impl RuskerApp {
         tools.files_task = None;
         tools.files_loading = false;
         tools.listing = None;
+        tools.files_cache = DirectoryCache::default();
+        tools.files_cached = false;
         self.container_terminal = None;
     }
 
@@ -236,6 +319,10 @@ impl RuskerApp {
     }
 
     fn load_container_directory(&mut self, path: String, cx: &mut Context<Self>) {
+        self.request_container_directory(path, false, cx);
+    }
+
+    fn request_container_directory(&mut self, path: String, refresh: bool, cx: &mut Context<Self>) {
         let (Some(engine), Some(id)) = (self.engine.clone(), self.selected_container.clone())
         else {
             return;
@@ -244,22 +331,47 @@ impl RuskerApp {
             return;
         }
         let revision = self.container_tools.files_revision.advance();
-        self.container_tools.directory = path.clone();
-        self.container_tools.listing = None;
-        self.container_tools.files_error = None;
-        self.container_tools.files_loading = true;
-        let handle = engine.list_container_directory(id.clone(), path);
+        let same_path = self.container_tools.directory == path;
+        let tools = &mut self.container_tools;
+        tools.files_task = None;
+        tools.directory = path.clone();
+        if !same_path {
+            tools.listing = None;
+        }
+        tools.files_error = None;
+        tools.files_loading = false;
+        tools.files_cached = false;
+        if let Some(listing) = tools.files_cache.get(&id, &path, Instant::now(), refresh) {
+            tools.listing = Some(listing);
+            tools.files_cached = true;
+            cx.notify();
+            return;
+        }
+        tools.files_loading = true;
+        let fill_span = rusker_desktop::diagnostics::PerfSpan::new("directory.ui.fill");
+        let handle = engine.list_container_directory(id.clone(), path.clone());
         self.container_tools.files_task = Some(cx.spawn(async move |this, cx| {
+            let _fill_span = fill_span;
             let result = await_engine(handle).await;
             _ = this.update(cx, |this, cx| {
                 if this.selected_container.as_ref() != Some(&id)
                     || !this.container_tools.files_revision.is_current(revision)
+                    || this.container_tools.directory != path
+                    || !this.selected_container_running()
                 {
                     return;
                 }
                 this.container_tools.files_loading = false;
                 match result {
-                    Ok(listing) => this.container_tools.listing = Some(listing),
+                    Ok(listing) => {
+                        this.container_tools.files_cache.insert(
+                            id,
+                            path,
+                            listing.clone(),
+                            Instant::now(),
+                        );
+                        this.container_tools.listing = Some(listing);
+                    }
                     Err(error) => this.container_tools.files_error = Some(error.to_string()),
                 }
                 cx.notify();
@@ -428,95 +540,111 @@ impl RuskerApp {
         if !container.is_running() {
             content = content.child(empty_state(
                 "容器未运行",
-                "启动容器后可浏览文件；需要容器内提供 sh、find 和 stat。",
+                "启动容器后可浏览文件；需要 sh、find、stat、tr、head 和 xargs。",
                 cx,
             ));
-        } else if tools.files_loading {
-            content = content.child(muted("正在读取目录…", cx).p_4());
-        } else if let Some(error) = &tools.files_error {
-            content = content.child(
-                div()
-                    .p_4()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(error.clone()),
-            );
-        } else if let Some(listing) = &tools.listing {
-            content = content.child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .flex()
-                    .gap_4()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(div().flex_1().child("名称"))
-                    .child(div().w(px(100.)).child("大小"))
-                    .child(div().w(px(190.)).child("修改时间"))
-                    .child(div().w(px(110.)).child("权限")),
-            );
-            for (index, entry) in listing.entries.iter().enumerate() {
-                let directory = entry.kind == VolumeEntryKind::Directory;
-                let child_path = format!("{}/{}", path.trim_end_matches('/'), entry.name);
+        } else {
+            if tools.files_loading {
                 content = content.child(
-                    div()
-                        .id(("container-file", index))
-                        .px_4()
-                        .py_3()
-                        .flex()
-                        .items_center()
-                        .gap_4()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .when(directory, |row| {
-                            row.cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.load_container_directory(child_path.clone(), cx)
-                                }))
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    Icon::new(if directory {
-                                        IconName::Folder
-                                    } else {
-                                        IconName::File
-                                    })
-                                    .small()
-                                    .text_color(cx.theme().muted_foreground),
-                                )
-                                .child(div().truncate().text_sm().child(entry.name.clone())),
-                        )
-                        .child(div().w(px(100.)).text_sm().child(if directory {
-                            "—".into()
+                    muted(
+                        if tools.listing.is_some() {
+                            "正在刷新目录，暂时保留上次内容…"
                         } else {
-                            format_bytes(entry.size)
-                        }))
-                        .child(
-                            div()
-                                .w(px(190.))
-                                .text_xs()
-                                .child(format_timestamp(entry.modified)),
-                        )
-                        .child(
-                            div()
-                                .w(px(110.))
-                                .text_xs()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .child(entry.mode.clone()),
-                        ),
+                            "正在读取目录…"
+                        },
+                        cx,
+                    )
+                    .p_4(),
                 );
             }
-            if listing.entries.is_empty() {
-                content = content.child(empty_state("空目录", "此目录没有文件。", cx));
+            if let Some(error) = &tools.files_error {
+                content = content.child(
+                    div()
+                        .p_4()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(format!("读取失败（如有内容则为上次结果）：{error}")),
+                );
             }
-            if listing.truncated {
-                content = content.child(muted("目录过大，仅显示前 5000 项。", cx).p_4());
+            if let Some(listing) = &tools.listing {
+                content = content.child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .flex()
+                        .gap_4()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(div().flex_1().child("名称"))
+                        .child(div().w(px(100.)).child("大小"))
+                        .child(div().w(px(190.)).child("修改时间"))
+                        .child(div().w(px(110.)).child("权限")),
+                );
+                for (index, entry) in listing.entries.iter().enumerate() {
+                    let directory = entry.kind == VolumeEntryKind::Directory;
+                    let child_path = format!("{}/{}", path.trim_end_matches('/'), entry.name);
+                    content = content.child(
+                        div()
+                            .id(("container-file", index))
+                            .px_4()
+                            .py_3()
+                            .flex()
+                            .items_center()
+                            .gap_4()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .when(directory, |row| {
+                                row.cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.load_container_directory(child_path.clone(), cx)
+                                    }))
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Icon::new(if directory {
+                                            IconName::Folder
+                                        } else {
+                                            IconName::File
+                                        })
+                                        .small()
+                                        .text_color(cx.theme().muted_foreground),
+                                    )
+                                    .child(div().truncate().text_sm().child(entry.name.clone())),
+                            )
+                            .child(div().w(px(100.)).text_sm().child(if directory {
+                                "—".into()
+                            } else {
+                                format_bytes(entry.size)
+                            }))
+                            .child(
+                                div()
+                                    .w(px(190.))
+                                    .text_xs()
+                                    .child(format_timestamp(entry.modified)),
+                            )
+                            .child(
+                                div()
+                                    .w(px(110.))
+                                    .text_xs()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .child(entry.mode.clone()),
+                            ),
+                    );
+                }
+                if listing.entries.is_empty() {
+                    content = content.child(empty_state("空目录", "此目录没有文件。", cx));
+                }
+                if listing.truncated {
+                    content = content.child(
+                        muted("目录过大，仅显示扫描到的前 5000 项（非全目录排序）。", cx).p_4(),
+                    );
+                }
             }
         }
         div()
@@ -550,7 +678,16 @@ impl RuskerApp {
                             .font_family(cx.theme().mono_font_family.clone())
                             .child(path.to_string()),
                     )
-                    .child(muted("只读", cx))
+                    .child(muted(
+                        if tools.files_loading && tools.listing.is_some() {
+                            "只读 · 刷新中"
+                        } else if tools.files_cached {
+                            "只读 · 缓存（30 秒）"
+                        } else {
+                            "只读"
+                        },
+                        cx,
+                    ))
                     .child(
                         button("container-files-refresh")
                             .ghost()
@@ -559,7 +696,7 @@ impl RuskerApp {
                             .tooltip("刷新目录")
                             .disabled(tools.files_loading || !container.is_running())
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.load_container_directory(refresh_path.clone(), cx)
+                                this.request_container_directory(refresh_path.clone(), true, cx)
                             })),
                     ),
             )
@@ -780,9 +917,83 @@ fn directory_parent(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{directory_parent, StatsHistory, STATS_HISTORY_LIMIT};
-    use rusker_desktop::engine::ContainerStats;
+    use super::{
+        directory_parent, DirectoryCache, StatsHistory, DIRECTORY_CACHE_BYTES,
+        DIRECTORY_CACHE_LIMIT, DIRECTORY_CACHE_TTL, STATS_HISTORY_LIMIT,
+    };
+    use rusker_desktop::{
+        engine::ContainerStats,
+        model::{VolumeEntry, VolumeEntryKind},
+        volume::DirectoryListing,
+    };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn directory_cache_keys_include_container_and_expire() {
+        let now = Instant::now();
+        let mut cache = DirectoryCache::default();
+        let listing = DirectoryListing {
+            truncated: true,
+            ..Default::default()
+        };
+        cache.insert("a".into(), "/".into(), listing.clone(), now);
+        assert!(cache.get("a", "/", now, true).is_none());
+        assert!(cache.get("b", "/", now, false).is_none());
+        assert!(cache.get("a", "/other", now, false).is_none());
+        assert_eq!(cache.get("a", "/", now, false), Some(listing));
+        assert!(cache
+            .get("a", "/", now + DIRECTORY_CACHE_TTL, false)
+            .is_none());
+    }
+
+    #[test]
+    fn directory_cache_is_lru_and_bounded_by_bytes() {
+        let now = Instant::now();
+        let mut cache = DirectoryCache::default();
+        for index in 0..DIRECTORY_CACHE_LIMIT {
+            cache.insert(
+                "a".into(),
+                format!("/{index}"),
+                DirectoryListing::default(),
+                now,
+            );
+        }
+        assert!(cache.get("a", "/0", now, false).is_some());
+        cache.insert("b".into(), "/".into(), DirectoryListing::default(), now);
+        assert!(cache.get("a", "/1", now, false).is_none());
+        assert!(cache.get("a", "/0", now, false).is_some());
+        let listing = DirectoryListing {
+            entries: vec![VolumeEntry {
+                name: "x".repeat(DIRECTORY_CACHE_BYTES),
+                size: 0,
+                kind: VolumeEntryKind::File,
+                modified: 0,
+                mode: String::new(),
+            }],
+            truncated: false,
+        };
+        cache.insert("large".into(), "/".into(), listing, now);
+        assert!(cache.get("large", "/", now, false).is_none());
+        assert!(cache.entries.len() <= DIRECTORY_CACHE_LIMIT);
+        assert!(
+            cache.entries.iter().map(|entry| entry.bytes).sum::<usize>() <= DIRECTORY_CACHE_BYTES
+        );
+    }
+
+    #[test]
+    fn directory_request_clock_survives_selection_reset() {
+        let mut tools = super::ContainerTools::default();
+        let old_request = tools.files_revision.advance();
+        let mut revision = tools.files_revision;
+        revision.advance();
+        tools = super::ContainerTools {
+            files_revision: revision,
+            ..Default::default()
+        };
+        let next_request = tools.files_revision.advance();
+        assert!(!tools.files_revision.is_current(old_request));
+        assert!(tools.files_revision.is_current(next_request));
+    }
 
     #[test]
     fn stats_history_bounds_memory_and_time() {

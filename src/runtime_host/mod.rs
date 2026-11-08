@@ -1,4 +1,6 @@
 mod data_disk;
+#[cfg(any(windows, test))]
+mod docker_api_transport;
 mod engine_proxy;
 mod http_proxy;
 mod lan_forward;

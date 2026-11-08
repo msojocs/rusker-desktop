@@ -76,18 +76,38 @@ pub struct ContainerStats {
 
 // Paths are positional arguments, never interpolated into either script.
 // Metadata is ASCII under LC_ALL=C; filenames end in NUL, not newline.
-// Requires GNU/BusyBox-compatible find (-mindepth/-maxdepth/-exec +) and stat -c.
-const DIRECTORY_SCRIPT: &str = r#"command -v find >/dev/null 2>&1 && command -v stat >/dev/null 2>&1 || {
-    printf '%s\n' 'Directory listing requires /bin/sh, find and stat (-c).' >&2
-    exit 127
-}
+// GNU and BusyBox stat -c both accept multiple paths, but neither interprets
+// \\0 in -c. Read metadata in bounded batches and pair it with the original argv
+// names, not stat's quoted/line-delimited %n output. No symlink dereference/du.
+// Swapping LF and NUL makes head -n a portable NUL-record limiter (BusyBox head
+// has no -z). All bytes, including embedded LF, survive the inverse swap.
+// head closes the producer after limit+1 names; pipes add only bounded read-ahead.
+// find implementations may still buffer readdir internally; no portable find
+// interface can bound those internal filesystem reads or a blocked syscall.
+const DIRECTORY_SCRIPT: &str = r#"LC_ALL=C
+export LC_ALL
+for tool in find stat tr head xargs; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        printf '%s\n' 'Directory listing requires sh, find, stat -c, tr, head and xargs -0.' >&2
+        exit 127
+    }
+done
 cd "$1" || exit 3
-find . -mindepth 1 -maxdepth 1 -exec /bin/sh -c '
-    for entry do
-        stat -c "%F|%s|%Y|%A" "$entry" || exit 4
-        printf "%s\000" "$entry" || exit 4
-    done
-' sh {} +
+# Report traversal failure in-band; a deliberate downstream close also drops
+# this marker, whereas an early failure cannot be mistaken for an empty dir.
+{ find . -mindepth 1 -maxdepth 1 -print0 2>/dev/null || printf '\000SCAN_ERROR\000'; } |
+    tr '\000\012' '\012\000' | head -n "$2" | tr '\000\012' '\012\000' |
+    {
+        xargs -0 -r -n 128 /bin/sh -c '
+            metadata=$(stat -c "%F|%s|%Y|%A" "$@" 2>/dev/null) || exit 4
+            printf "%s\n" "$metadata" | {
+                for entry do
+                    IFS= read -r row || exit 4
+                    printf "%s\n%s\000" "$row" "$entry" || exit 4
+                done
+            }
+        ' rusker-stat || printf '%s\n' 'Directory metadata batch failed.' >&2
+    } | head -c "$3"
 "#;
 
 pub(super) async fn open_shell(client: &Docker, id: &str) -> Result<ContainerShell, EngineError> {
@@ -327,9 +347,11 @@ pub(super) async fn list_directory(
     id: &str,
     path: &str,
 ) -> Result<DirectoryListing, EngineError> {
-    let action = "读取容器目录（需要 /bin/sh、find 和 stat -c）";
+    let _total = crate::diagnostics::PerfSpan::new("directory.total");
+    let action = "读取容器目录（需要 sh、find、stat、tr、head 和 xargs）";
     let path = absolute_path(path).map_err(|error| EngineError::operation(action, error))?;
     let result = timeout(DIRECTORY_TIMEOUT, async {
+        let create_span = crate::diagnostics::PerfSpan::new("directory.exec.create");
         let created = client
             .create_exec(
                 id,
@@ -344,6 +366,8 @@ pub(super) async fn list_directory(
                         DIRECTORY_SCRIPT.into(),
                         "rusker-list".into(),
                         path,
+                        (MAX_DIRECTORY_ENTRIES + 1).to_string(),
+                        (MAX_DIRECTORY_OUTPUT + 1).to_string(),
                     ]),
                     env: Some(vec!["LC_ALL=C".into()]),
                     ..Default::default()
@@ -351,6 +375,8 @@ pub(super) async fn list_directory(
             )
             .await
             .map_err(|error| EngineError::operation(action, error))?;
+        drop(create_span);
+        let start_span = crate::diagnostics::PerfSpan::new("directory.exec.start");
         let StartExecResults::Attached { mut output, input } = client
             .start_exec(&created.id, Some(attach_options()))
             .await
@@ -358,7 +384,9 @@ pub(super) async fn list_directory(
         else {
             return Err(EngineError::operation(action, "引擎未返回 attached IO"));
         };
+        drop(start_span);
         drop(input);
+        let output_span = crate::diagnostics::PerfSpan::new("directory.exec.output");
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut output_bytes = 0usize;
@@ -375,8 +403,13 @@ pub(super) async fn list_directory(
                 .map_err(|error| EngineError::operation(action, error))?;
             target.extend_from_slice(&message);
         }
+        drop(output_span);
+        let inspect_span = crate::diagnostics::PerfSpan::new("directory.exec.inspect");
         let code = exec_exit_code(client, &created.id, action).await?;
-        if code != 0 {
+        drop(inspect_span);
+        // POSIX sh has no pipefail. Any diagnostic is fatal, including stat or
+        // xargs errors hidden by the final head. Never cache a partial success.
+        if code != 0 || !stderr.is_empty() {
             return Err(EngineError::operation(
                 action,
                 format!(
@@ -418,6 +451,8 @@ fn absolute_path(path: &str) -> Result<String, String> {
 }
 
 fn parse_directory(bytes: &[u8]) -> Result<DirectoryListing, String> {
+    let _parse = crate::diagnostics::PerfSpan::new("directory.parse");
+    checked_output_size(0, bytes.len()).map_err(str::to_string)?;
     let mut listing = DirectoryListing::default();
     if bytes.is_empty() {
         return Ok(listing);
@@ -724,6 +759,164 @@ mod tests {
         );
         assert!(checked_output_size(MAX_DIRECTORY_OUTPUT, 1).is_err());
         assert!(checked_output_size(1, usize::MAX).is_err());
+    }
+
+    // On Windows opt in with RUSKER_DIRECTORY_TEST_WSL=<distribution>; on
+    // Linux these exercise real local GNU/BusyBox applets, never Docker.
+    fn run_directory_fixture(
+        busybox: bool,
+        fixture: &str,
+        limit: usize,
+        output_limit: usize,
+    ) -> Option<std::process::Output> {
+        use std::{
+            io::Write,
+            process::{Command, Stdio},
+        };
+        let mut command = if cfg!(windows) {
+            let distro = std::env::var("RUSKER_DIRECTORY_TEST_WSL").ok()?;
+            let mut command = Command::new("wsl.exe");
+            command.args(["-d", &distro, "--", "/bin/sh", "-s"]);
+            command
+        } else {
+            let mut command = Command::new("/bin/sh");
+            command.arg("-s");
+            command
+        };
+        let setup = if busybox {
+            r#"busybox=$(command -v busybox) || exit 77
+mkdir "$root/tools"
+for tool in find stat tr head xargs; do ln -s "$busybox" "$root/tools/$tool"; done
+PATH="$root/tools:$PATH"
+"#
+        } else {
+            ""
+        };
+        let script = format!(
+            r#"set -eu
+root=$(mktemp -d)
+trap 'rm -rf "$root"' EXIT
+mkdir "$root/data"
+{setup}
+{fixture}
+list_directory() {{
+{DIRECTORY_SCRIPT}
+}}
+list_directory "$root/data" {limit} {output_limit}
+"#
+        );
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        if output.status.code() == Some(77) {
+            eprintln!("BusyBox not installed; script test skipped");
+            return None;
+        }
+        Some(output)
+    }
+
+    #[test]
+    fn directory_script_gnu_and_busybox_preserve_names_and_metadata() {
+        for busybox in [false, true] {
+            let Some(output) = run_directory_fixture(
+                busybox,
+                r#"cd "$root/data"
+printf abc > 'a|b
+"$x'
+: > '-option'
+: > '.hidden'
+: > "quote' back\\slash"
+: > ' leading trailing '
+: > '中文🙂'
+: > '
+'
+mkdir dir
+printf nested > dir/child
+ln -s dir link
+ln -s missing dangling
+mkfifo pipe
+chmod 640 './-option'
+"#,
+                MAX_DIRECTORY_ENTRIES + 1,
+                MAX_DIRECTORY_OUTPUT + 1,
+            ) else {
+                continue;
+            };
+            assert!(output.status.success(), "{:?}", output);
+            assert!(output.stderr.is_empty(), "{:?}", output);
+            let listing = parse_directory(&output.stdout).unwrap();
+            assert_eq!(listing.entries.len(), 11);
+            let entry = |name| {
+                listing
+                    .entries
+                    .iter()
+                    .find(|entry| entry.name == name)
+                    .unwrap()
+            };
+            assert_eq!(entry("a|b\n\"$x").size, 3);
+            assert_eq!(entry("-option").mode, "-rw-r-----");
+            assert_eq!(entry(" leading trailing ").size, 0);
+            assert_eq!(entry("\n").size, 0);
+            assert_eq!(entry("中文🙂").size, 0);
+            assert_eq!(entry("quote' back\\slash").kind, VolumeEntryKind::File);
+            assert_eq!(entry("dir").size, 0);
+            assert_eq!(entry("link").kind, VolumeEntryKind::Symlink);
+            assert_eq!(entry("link").size, 3);
+            assert_eq!(entry("dangling").kind, VolumeEntryKind::Symlink);
+            assert_eq!(entry("pipe").kind, VolumeEntryKind::Other);
+            assert!(entry(".hidden").modified > 0);
+            assert!(!listing.truncated);
+        }
+    }
+
+    #[test]
+    fn directory_script_limits_entries_before_stat_and_bounds_output() {
+        for busybox in [false, true] {
+            let Some(output) = run_directory_fixture(
+                busybox,
+                r#"i=0
+while [ "$i" -lt 5200 ]; do : > "$root/data/$i"; i=$((i + 1)); done
+# Count stat argv and batches without modifying the directory being listed.
+real_stat=$(command -v stat)
+mkdir "$root/wrapper"
+printf '#!/bin/sh\nprintf "%%s\\n" "$#" >> "$RUSKER_BATCH_LOG"\nexec "$RUSKER_REAL_STAT" "$@"\n' > "$root/wrapper/stat"
+chmod +x "$root/wrapper/stat"
+export RUSKER_REAL_STAT="$real_stat" RUSKER_BATCH_LOG="$root/batches"
+PATH="$root/wrapper:$PATH"
+# Validate batch count after listing, emitting only failed assertions on stderr.
+trap 'lines=$(wc -l < "$root/batches"); [ "$lines" -le 40 ] || printf "too many stat batches\\n" >&2; rm -rf "$root"' EXIT
+"#,
+                MAX_DIRECTORY_ENTRIES + 1,
+                MAX_DIRECTORY_OUTPUT + 1,
+            ) else {
+                continue;
+            };
+            assert!(output.status.success(), "{:?}", output);
+            assert!(output.stderr.is_empty(), "{:?}", output);
+            assert_eq!(
+                output.stdout.iter().filter(|byte| **byte == 0).count(),
+                MAX_DIRECTORY_ENTRIES + 1
+            );
+            let listing = parse_directory(&output.stdout).unwrap();
+            assert_eq!(listing.entries.len(), MAX_DIRECTORY_ENTRIES);
+            assert!(listing.truncated);
+
+            let output = run_directory_fixture(busybox, ": > \"$root/data/file\"", 10, 7).unwrap();
+            assert_eq!(output.stdout.len(), 7);
+            assert!(parse_directory(&output.stdout).is_err());
+            let output = run_directory_fixture(busybox, "rmdir \"$root/data\"", 10, 1000).unwrap();
+            assert!(!output.status.success());
+        }
     }
 
     #[test]

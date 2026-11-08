@@ -106,6 +106,37 @@ cargo test
 
 首次构建会下载并编译较多 GPUI 原生依赖。开发 profile 只优化框架 crate，不改变业务代码的 Debug 属性，因此首次编译不会明显加快，但界面运行性能更好。
 
+## 性能诊断与只读延迟测量
+
+性能日志默认关闭。启动应用前设置 `RUSKER_PERF_LOG` 为本地 JSONL 文件路径，可记录客户端获取/版本协商、管道唤醒/转发、目录 exec 各阶段及 UI 数据回填耗时。日志仅含固定阶段名、测量 ID、开始时间和耗时，不记录容器 ID、目录、请求正文或凭据。日志由独立线程追加写入，有界队列满时丢弃测量而不阻塞应用；文件由开发者自行轮换/删除。
+
+```powershell
+$env:RUSKER_PERF_LOG="$env:TEMP/rusker-perf.jsonl"
+cargo run
+```
+
+不重启现有应用、不启动或停止容器的只读延迟探针：
+
+```powershell
+$env:RUSKER_LATENCY_PROBE='1'
+$env:DOCKER_HOST='npipe:////./pipe/rusker_engine'
+# 可选：指定正在运行的容器，额外测量目录读取；不会修改目录内容
+$env:RUSKER_LATENCY_CONTAINER='<运行容器 ID>'
+$env:RUSKER_LATENCY_DIRECTORY='/'
+cargo test --test engine_latency -- --nocapture
+```
+
+探针连续测量三次完整快照及可选的三次目录读取，便于区分冷连接和后续操作；它测的是指定端点当前提供的代理版本，不能用旧应用持有的端点声称验证了新转发实现。比较时必须使用同一引擎、同一目录，明确是否包含首次安装/启动辅助通道。
+
+不启动真实 Engine 的隔离 WSL 通道测试（测试发行版需 Python 3）：
+
+```powershell
+$env:RUSKER_WSL_TRANSPORT_TEST_DISTRO='<测试发行版>'
+cargo test --lib isolated_wsl_named_pipe_round_trips -- --ignored --nocapture
+```
+
+此测试使用独立 Windows 管道、临时 Unix socket 模拟服务和内存执行的嵌入 helper，覆盖真实 WSL stdio 与 HTTP 路径转换；输出是模拟 ping 延迟，不是实际容器目录耗时。不要用这个指标替代应用 UI 的手动验收。
+
 ## 手动验收
 
 1. 无 Engine 时启动应用，确认错误可读且界面仍可操作。
