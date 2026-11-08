@@ -53,11 +53,13 @@ use tokio::task::JoinHandle;
 use crate::ui::theme::change_theme;
 use crate::ui::{button, detail_row, empty_state, muted, section_panel, stat_card};
 
+mod container_detail;
 mod images;
 mod notifications;
 mod run;
 mod volumes;
 
+use container_detail::ContainerTools;
 use images::ImageState;
 use run::RunForm;
 use volumes::VolumeState;
@@ -225,8 +227,10 @@ pub struct RuskerApp {
     /// IDs ticked for batch removal in the container list.
     containers_checked: HashSet<String>,
     container_removal: ContainerRemoval,
-    /// Container detail tab: 0 logs, 1 details, 2 mounts.
+    /// Container detail tab: logs, details, mounts, exec, files, stats.
     container_tab: usize,
+    container_tools: ContainerTools,
+    container_terminal: Option<Entity<crate::ui::terminal::TerminalView>>,
     /// Scroll state of the container log viewer.
     container_logs_scroll: ScrollHandle,
     logs: String,
@@ -537,6 +541,8 @@ impl RuskerApp {
             containers_checked: HashSet::new(),
             container_removal: ContainerRemoval::default(),
             container_tab: 0,
+            container_tools: ContainerTools::default(),
+            container_terminal: None,
             container_logs_scroll: ScrollHandle::new(),
             logs: String::new(),
             logs_loading: false,
@@ -696,8 +702,12 @@ impl RuskerApp {
             self.images.selected = None;
             self.reset_image_detail();
         }
+        if page != Page::Containers {
+            self.reset_container_tools();
+        }
         self.page = page;
         if entering_containers {
+            self.reset_container_tools();
             // The sidebar entry always opens the container list, not the
             // detail page of the last selected container.
             self.selected_container = None;
@@ -1030,9 +1040,11 @@ impl RuskerApp {
                         this.connected = true;
                         this.apply_snapshot(snapshot);
                         this.after_volume_snapshot(cx);
+                        this.sync_container_tools(cx);
                     }
                     Err(error) => {
                         this.connected = false;
+                        this.stop_container_live_tools();
                         this.notify_error(error.to_string(), cx);
                     }
                 }
@@ -1049,6 +1061,7 @@ impl RuskerApp {
                 .any(|container| &container.id == selected)
             {
                 self.selected_container = None;
+                self.reset_container_tools();
                 self.logs_revision.advance();
                 self.logs_loading = false;
                 self.logs.clear();
@@ -1056,6 +1069,14 @@ impl RuskerApp {
             }
         }
         self.snapshot = snapshot;
+        if self.selected_container.as_ref().is_some_and(|selected| {
+            self.snapshot
+                .containers
+                .iter()
+                .any(|container| &container.id == selected && !container.is_running())
+        }) {
+            self.stop_container_live_tools();
+        }
         let ids: HashSet<&str> = self
             .snapshot
             .containers
@@ -1070,6 +1091,7 @@ impl RuskerApp {
 
     fn select_container(&mut self, id: String, cx: &mut Context<Self>) {
         if self.selected_container.as_deref() != Some(id.as_str()) {
+            self.reset_container_tools();
             self.container_tab = 0;
         }
         self.selected_container = Some(id.clone());
@@ -1078,6 +1100,7 @@ impl RuskerApp {
 
     /// Returns from the container detail page to the container list.
     fn close_container_detail(&mut self, cx: &mut Context<Self>) {
+        self.reset_container_tools();
         self.selected_container = None;
         self.logs_revision.advance();
         self.logs_loading = false;
@@ -1613,6 +1636,7 @@ impl RuskerApp {
                         this.apply_snapshot(snapshot);
                         this.notify_success(format!("{label}完成"), cx);
                         this.after_volume_snapshot(cx);
+                        this.sync_container_tools(cx);
                     }
                     Err(error) => this.notify_error(error.to_string(), cx),
                 }
@@ -1777,6 +1801,7 @@ impl RuskerApp {
                         });
                         this.apply_snapshot(snapshot);
                         this.after_volume_snapshot(cx);
+                        this.sync_container_tools(cx);
                         if failures.is_empty() {
                             let window = this.window_handle;
                             _ = cx.update_window(window, |_, window, cx| window.close_dialog(cx));
@@ -2579,7 +2604,7 @@ impl RuskerApp {
     }
 
     /// Container detail page: breadcrumb, identity header with the Docker
-    /// Desktop action cluster, and logs / details / mounts tabs.
+    /// Desktop action cluster and logs / details / mounts / exec / files / stats tabs.
     fn render_container_detail(&self, container: &ContainerSummary, cx: &mut Context<Self>) -> Div {
         let busy = self.busy.is_some();
         let running = container.is_running();
@@ -2588,7 +2613,7 @@ impl RuskerApp {
         } else {
             container.status.clone()
         };
-        let tab = self.container_tab.min(2);
+        let tab = self.container_tab.min(5);
         let weak = cx.weak_entity();
         let back_weak = weak.clone();
         let start_id = container.id.clone();
@@ -2659,41 +2684,53 @@ impl RuskerApp {
                     .underline()
                     .flex_1()
                     .selected_index(tab)
-                    .child(Tab::new().label("日志"))
-                    .child(Tab::new().label("详情"))
-                    .child(Tab::new().label("挂载"))
+                    .child(Tab::new().cursor_pointer().label("日志"))
+                    .child(Tab::new().cursor_pointer().label("详情"))
+                    .child(Tab::new().cursor_pointer().label("挂载"))
+                    .child(Tab::new().cursor_pointer().label("命令行"))
+                    .child(Tab::new().cursor_pointer().label("文件"))
+                    .child(Tab::new().cursor_pointer().label("统计"))
                     .on_click({
                         let weak = weak.clone();
-                        move |index, _, cx| {
+                        move |index, window, cx| {
                             _ = weak.update(cx, |this, cx| {
-                                this.container_tab = *index;
-                                cx.notify();
+                                this.select_container_tab(*index, cx);
+                                if *index == 3 {
+                                    if let Some(terminal) = &this.container_terminal {
+                                        terminal
+                                            .update(cx, |terminal, cx| terminal.focus(window, cx));
+                                    }
+                                }
                             });
                         }
                     }),
             )
-            .child(
-                button("copy-container-logs")
-                    .ghost()
-                    .small()
-                    .icon(IconName::Copy)
-                    .tooltip("复制日志")
-                    .disabled(self.logs.is_empty())
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(logs_for_copy.clone()));
-                    }),
-            )
-            .child(
-                button("refresh-container-logs")
-                    .ghost()
-                    .small()
-                    .icon(IconName::RotateCw)
-                    .tooltip("刷新日志")
-                    .disabled(self.logs_loading)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.load_logs(logs_id.clone(), cx);
-                    })),
-            );
+            .when(tab == 0, |tabs| {
+                tabs.child(
+                    button("copy-container-logs")
+                        .ghost()
+                        .small()
+                        .icon(IconName::Copy)
+                        .tooltip("复制日志")
+                        .disabled(self.logs.is_empty())
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(logs_for_copy.clone()));
+                        }),
+                )
+            })
+            .when(tab == 0, |tabs| {
+                tabs.child(
+                    button("refresh-container-logs")
+                        .ghost()
+                        .small()
+                        .icon(IconName::RotateCw)
+                        .tooltip("刷新日志")
+                        .disabled(self.logs_loading)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.load_logs(logs_id.clone(), cx);
+                        })),
+                )
+            });
 
         let content = match tab {
             1 => self
@@ -2701,6 +2738,15 @@ impl RuskerApp {
                 .into_any_element(),
             2 => self
                 .render_container_mounts_tab(container, cx)
+                .into_any_element(),
+            3 => self
+                .render_container_exec_tab(container, cx)
+                .into_any_element(),
+            4 => self
+                .render_container_files_tab(container, cx)
+                .into_any_element(),
+            5 => self
+                .render_container_stats_tab(container, cx)
                 .into_any_element(),
             _ => self.render_container_logs_tab(cx).into_any_element(),
         };

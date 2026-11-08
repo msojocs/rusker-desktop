@@ -1,6 +1,8 @@
+mod container_detail;
 mod docker;
 mod pull;
 
+pub use container_detail::{ContainerShell, ContainerStats};
 pub use pull::{ImagePullLayer, ImagePullProgress};
 
 use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
@@ -96,6 +98,44 @@ impl EngineService {
         self.spawn(async move {
             let engine = docker::DockerEngine::connect().await?;
             engine.container_logs(&id).await
+        })
+    }
+
+    /// Opens a persistent TTY `/bin/sh -i` with `TERM=xterm-256color`.
+    /// Input/output strings carry terminal control bytes unchanged (invalid
+    /// output UTF-8 is replaced). `resize` sends `(rows, cols)`, default 24x80.
+    /// Retain the returned value while in use; dropping it aborts backend IO
+    /// (not a guaranteed remote process-tree kill).
+    pub fn open_container_shell(
+        &self,
+        id: String,
+    ) -> JoinHandle<Result<ContainerShell, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.open_container_shell(&id).await
+        })
+    }
+
+    /// Reads a single absolute POSIX directory without modifying its contents.
+    /// Requires `/bin/sh`, GNU/BusyBox-compatible `find` and `stat -c` in the
+    /// running container. At most 5000 entries; directory sizes are unmeasured
+    /// (zero), not recursive `du` results. Non-UTF-8 filenames are an error.
+    pub fn list_container_directory(
+        &self,
+        id: String,
+        path: String,
+    ) -> JoinHandle<Result<DirectoryListing, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.list_container_directory(&id, &path).await
+        })
+    }
+
+    /// Returns one non-streaming sample, with Docker's previous CPU sample.
+    pub fn container_stats(&self, id: String) -> JoinHandle<Result<ContainerStats, EngineError>> {
+        self.spawn(async move {
+            let engine = docker::DockerEngine::connect().await?;
+            engine.container_stats(&id).await
         })
     }
 

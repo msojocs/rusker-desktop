@@ -357,6 +357,25 @@ impl DockerEngine {
         }
     }
 
+    pub async fn open_container_shell(
+        &self,
+        id: &str,
+    ) -> Result<super::ContainerShell, EngineError> {
+        super::container_detail::open_shell(&self.client, id).await
+    }
+
+    pub async fn list_container_directory(
+        &self,
+        id: &str,
+        path: &str,
+    ) -> Result<DirectoryListing, EngineError> {
+        super::container_detail::list_directory(&self.client, id, path).await
+    }
+
+    pub async fn container_stats(&self, id: &str) -> Result<super::ContainerStats, EngineError> {
+        super::container_detail::stats(&self.client, id).await
+    }
+
     pub async fn image_detail(&self, id: &str) -> Result<ImageDetail, EngineError> {
         let (image, history) = tokio::try_join!(
             with_timeout(

@@ -268,9 +268,9 @@ impl RuskerApp {
                     .underline()
                     .h(px(52.))
                     .selected_index(detail.tab)
-                    .child(Tab::new().label("漏洞"))
-                    .child(Tab::new().label("软件包"))
-                    .child(Tab::new().label("镜像信息"))
+                    .child(Tab::new().cursor_pointer().label("漏洞"))
+                    .child(Tab::new().cursor_pointer().label("软件包"))
+                    .child(Tab::new().cursor_pointer().label("镜像信息"))
                     .on_click(move |index, _, cx| {
                         _ = tab_weak.update(cx, |this, cx| {
                             this.images.detail.tab = *index;

@@ -1,3 +1,5 @@
+pub mod stats_chart;
+pub mod terminal;
 pub mod theme;
 
 use gpui_kit::base::StyledExt as _;
