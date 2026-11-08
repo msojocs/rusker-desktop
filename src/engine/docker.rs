@@ -367,6 +367,17 @@ impl DockerEngine {
         failures
     }
 
+    pub async fn container_inspect(&self, id: &str) -> Result<String, EngineError> {
+        let inspect = with_timeout(
+            "读取容器详情",
+            REQUEST_TIMEOUT,
+            self.client.inspect_container(id, None),
+        )
+        .await?;
+        serde_json::to_string_pretty(&inspect)
+            .map_err(|error| EngineError::operation("格式化容器详情", error))
+    }
+
     pub async fn container_logs(&self, id: &str) -> Result<String, EngineError> {
         let options = LogsOptionsBuilder::default()
             .follow(false)

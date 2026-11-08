@@ -113,7 +113,99 @@ impl DirectoryCache {
 }
 
 #[derive(Default)]
+struct InspectFields {
+    env: Vec<(String, String)>,
+    ports: Vec<(String, String)>,
+}
+
+fn inspect_fields(json: &str) -> Result<InspectFields, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    let env = value
+        .pointer("/Config/Env")
+        .and_then(|env| env.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.as_str())
+        .map(|entry| {
+            let (name, value) = entry.split_once('=').unwrap_or((entry, ""));
+            (name.to_string(), value.to_string())
+        })
+        .collect();
+    let mut ports = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for pointer in [
+        "/Config/ExposedPorts",
+        "/HostConfig/PortBindings",
+        "/NetworkSettings/Ports",
+    ] {
+        if let Some(object) = value.pointer(pointer).and_then(|ports| ports.as_object()) {
+            for port in object.keys() {
+                ports.entry(port.clone()).or_default();
+            }
+        }
+    }
+    for (port, bindings) in &mut ports {
+        // Prefer the daemon's actual bindings (including dynamically allocated
+        // host ports), falling back to configured bindings for stopped containers.
+        let runtime = value
+            .pointer("/NetworkSettings/Ports")
+            .and_then(|ports| ports.get(port))
+            .and_then(|bindings| bindings.as_array())
+            .filter(|bindings| !bindings.is_empty());
+        let configured = value
+            .pointer("/HostConfig/PortBindings")
+            .and_then(|ports| ports.get(port))
+            .and_then(|bindings| bindings.as_array());
+        for binding in runtime.or(configured).into_iter().flatten() {
+            let Some(host_port) = binding.get("HostPort").and_then(|port| port.as_str()) else {
+                continue;
+            };
+            let host_port = if host_port.is_empty() || host_port == "0" {
+                "自动分配"
+            } else {
+                host_port
+            };
+            let ip = binding
+                .get("HostIp")
+                .and_then(|ip| ip.as_str())
+                .filter(|ip| !ip.is_empty())
+                .unwrap_or("0.0.0.0");
+            let address = if ip.contains(':') {
+                format!("[{ip}]:{host_port}")
+            } else {
+                format!("{ip}:{host_port}")
+            };
+            if !bindings.contains(&address) {
+                bindings.push(address);
+            }
+        }
+    }
+    Ok(InspectFields {
+        env,
+        ports: ports
+            .into_iter()
+            .map(|(port, bindings)| {
+                (
+                    port,
+                    if bindings.is_empty() {
+                        "未绑定".into()
+                    } else {
+                        bindings.join(", ")
+                    },
+                )
+            })
+            .collect(),
+    })
+}
+
+#[derive(Default)]
 pub(super) struct ContainerTools {
+    pub(super) inspect_summary: bool,
+    inspect_loading: bool,
+    inspect_error: Option<String>,
+    inspect_revision: Revision,
+    inspect_task: Option<Task<()>>,
+    inspect_view: Option<Entity<crate::ui::json_view::JsonView>>,
+    inspect_fields: Option<InspectFields>,
     shell_connecting: bool,
     shell_error: Option<String>,
     shell_task: Option<Task<()>>,
@@ -135,8 +227,11 @@ impl RuskerApp {
         // Keep the request clock monotonic even across A -> B -> A selections.
         let mut files_revision = self.container_tools.files_revision;
         files_revision.advance();
+        let mut inspect_revision = self.container_tools.inspect_revision;
+        inspect_revision.advance();
         let files_cache = std::mem::take(&mut self.container_tools.files_cache);
         self.container_tools = ContainerTools {
+            inspect_revision,
             files_revision,
             files_cache,
             ..Default::default()
@@ -186,6 +281,11 @@ impl RuskerApp {
             self.container_tools.stats_error = None;
         }
         match tab {
+            1 if self.container_tools.inspect_view.is_none()
+                && !self.container_tools.inspect_loading =>
+            {
+                self.load_container_inspect(cx);
+            }
             3 if self.container_tools.shell_task.is_none() => self.connect_container_shell(cx),
             4 if self.container_tools.listing.is_none() && !self.container_tools.files_loading => {
                 let path = if self.container_tools.directory.is_empty() {
@@ -199,6 +299,166 @@ impl RuskerApp {
             _ => {}
         }
         cx.notify();
+    }
+
+    pub(super) fn load_container_inspect(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_container.clone() else {
+            return;
+        };
+        let revision = self.container_tools.inspect_revision.advance();
+        self.container_tools.inspect_task = None;
+        self.container_tools.inspect_error = None;
+        let Some(engine) = self.engine.clone() else {
+            self.container_tools.inspect_loading = false;
+            self.container_tools.inspect_error = Some("容器引擎不可用，请连接引擎后重试。".into());
+            cx.notify();
+            return;
+        };
+        self.container_tools.inspect_loading = true;
+        let handle = engine.container_inspect(id.clone());
+        self.container_tools.inspect_task = Some(cx.spawn(async move |this, cx| {
+            let result = await_engine(handle).await;
+            _ = this.update(cx, |this, cx| {
+                if this.selected_container.as_ref() != Some(&id)
+                    || !this.container_tools.inspect_revision.is_current(revision)
+                {
+                    return;
+                }
+                this.container_tools.inspect_loading = false;
+                match result {
+                    Ok(json) => match inspect_fields(&json) {
+                        Ok(fields) => {
+                            this.container_tools.inspect_fields = Some(fields);
+                            this.container_tools.inspect_view =
+                                Some(cx.new(|_| crate::ui::json_view::JsonView::new(json)));
+                        }
+                        Err(error) => {
+                            this.container_tools.inspect_error =
+                                Some(format!("解析容器详情失败：{error}"))
+                        }
+                    },
+                    Err(error) => this.container_tools.inspect_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    pub(super) fn render_container_inspect_tab(&self, cx: &mut Context<Self>) -> Div {
+        let tools = &self.container_tools;
+        div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .when(tools.inspect_loading, |view| {
+                view.child(muted("正在读取容器详情…", cx).p_4())
+            })
+            .when_some(tools.inspect_error.as_ref(), |view, error| {
+                view.child(
+                    div()
+                        .p_4()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(error.clone()),
+                )
+            })
+            .when_some(tools.inspect_view.clone(), |view, json| view.child(json))
+    }
+
+    pub(super) fn render_container_inspect_fields(&self, cx: &mut Context<Self>) -> Div {
+        let tools = &self.container_tools;
+        let mut view = div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .when(tools.inspect_loading, |view| {
+                view.child(muted("正在读取容器详情…", cx))
+            })
+            .when_some(tools.inspect_error.as_ref(), |view, error| {
+                view.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(error.clone()),
+                )
+            });
+        let Some(fields) = &tools.inspect_fields else {
+            return view;
+        };
+        let header = |left: &'static str, right: &'static str| {
+            div()
+                .flex()
+                .gap_4()
+                .px_4()
+                .py_2()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(div().w(px(220.)).flex_shrink_0().child(left))
+                .child(div().flex_1().min_w_0().child(right))
+        };
+        let mut env = section_panel(cx)
+            .flex()
+            .flex_col()
+            .child(div().px_4().py_3().font_semibold().child("环境变量"))
+            .child(header("变量名", "变量值").child(div().w(px(32.))));
+        for (index, (name, value)) in fields.env.iter().enumerate() {
+            let entry = format!("{name}={value}");
+            env = env.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_4()
+                    .px_4()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .text_sm()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .child(div().w(px(220.)).flex_shrink_0().child(name.clone()))
+                    .child(div().flex_1().min_w_0().child(value.clone()))
+                    .child(
+                        button(("copy-inspect-env", index))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Copy)
+                            .tooltip("复制环境变量（名称=值）")
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(entry.clone()))
+                            }),
+                    ),
+            );
+        }
+        if fields.env.is_empty() {
+            env = env.child(muted("没有环境变量。", cx).px_4().py_3());
+        }
+        let mut ports = section_panel(cx)
+            .flex()
+            .flex_col()
+            .child(div().px_4().py_3().font_semibold().child("端口"))
+            .child(header("镜像暴露的端口", "绑定的端口"));
+        for (exposed, bound) in &fields.ports {
+            ports = ports.child(
+                div()
+                    .flex()
+                    .gap_4()
+                    .px_4()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .text_sm()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .child(div().w(px(220.)).flex_shrink_0().child(exposed.clone()))
+                    .child(div().flex_1().min_w_0().child(bound.clone())),
+            );
+        }
+        if fields.ports.is_empty() {
+            ports = ports.child(muted("没有暴露或绑定的端口。", cx).px_4().py_3());
+        }
+        view = view.child(env).child(ports);
+        view
     }
 
     fn selected_container_running(&self) -> bool {
@@ -901,6 +1161,62 @@ mod tests {
         assert!(
             cache.entries.iter().map(|entry| entry.bytes).sum::<usize>() <= DIRECTORY_CACHE_BYTES
         );
+    }
+
+    #[test]
+    fn inspect_fields_preserve_env_values_and_resolve_port_bindings() {
+        let fields = super::inspect_fields(&serde_json::json!({
+            "Config": {"Env": ["TOKEN=a=b", "EMPTY=", "BARE"], "ExposedPorts": {"80/tcp": {}, "53/udp": {}}},
+            "HostConfig": {"PortBindings": {"80/tcp": [{"HostIp": "", "HostPort": "0"}], "443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8443"}]}},
+            "NetworkSettings": {"Ports": {"80/tcp": [{"HostIp": "0.0.0.0", "HostPort": "32768"}, {"HostIp": "::", "HostPort": "32768"}], "53/udp": null}}
+        }).to_string()).unwrap();
+        assert_eq!(
+            fields.env,
+            [
+                ("TOKEN".into(), "a=b".into()),
+                ("EMPTY".into(), "".into()),
+                ("BARE".into(), "".into())
+            ]
+        );
+        assert!(fields
+            .ports
+            .contains(&("80/tcp".into(), "0.0.0.0:32768, [::]:32768".into())));
+        assert!(fields.ports.contains(&("53/udp".into(), "未绑定".into())));
+        assert!(fields
+            .ports
+            .contains(&("443/tcp".into(), "127.0.0.1:8443".into())));
+    }
+
+    #[test]
+    fn inspect_fields_handle_missing_data_and_pending_dynamic_ports() {
+        let fields = super::inspect_fields("{}").unwrap();
+        assert!(fields.env.is_empty());
+        assert!(fields.ports.is_empty());
+        let fields = super::inspect_fields(r#"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"","HostPort":""}]}},"NetworkSettings":{"Ports":{"80/tcp":null}}}"#).unwrap();
+        assert_eq!(fields.ports, [("80/tcp".into(), "0.0.0.0:自动分配".into())]);
+    }
+
+    #[test]
+    fn inspect_defaults_to_json_without_loading() {
+        let tools = super::ContainerTools::default();
+        assert!(!tools.inspect_summary);
+        assert!(!tools.inspect_loading);
+        assert!(tools.inspect_view.is_none());
+    }
+
+    #[test]
+    fn inspect_request_clock_survives_selection_reset() {
+        let mut tools = super::ContainerTools::default();
+        let old_request = tools.inspect_revision.advance();
+        let mut revision = tools.inspect_revision;
+        revision.advance();
+        tools = super::ContainerTools {
+            inspect_revision: revision,
+            ..Default::default()
+        };
+        let next_request = tools.inspect_revision.advance();
+        assert!(!tools.inspect_revision.is_current(old_request));
+        assert!(tools.inspect_revision.is_current(next_request));
     }
 
     #[test]

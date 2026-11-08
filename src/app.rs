@@ -2708,6 +2708,25 @@ impl RuskerApp {
                         }
                     }),
             )
+            .when(tab == 1, |tabs| {
+                tabs.child(
+                    Switch::new("container-inspect-json")
+                        .checked(!self.container_tools.inspect_summary)
+                        .label("Raw JSON")
+                        .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                            this.container_tools.inspect_summary = !*checked;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("refresh-container-inspect")
+                        .ghost()
+                        .small()
+                        .icon(IconName::RotateCw)
+                        .tooltip("刷新详情")
+                        .on_click(cx.listener(|this, _, _, cx| this.load_container_inspect(cx))),
+                )
+            })
             .when(tab == 0, |tabs| {
                 tabs.child(
                     button("copy-container-logs")
@@ -2736,6 +2755,9 @@ impl RuskerApp {
             });
 
         let content = match tab {
+            1 if !self.container_tools.inspect_summary => {
+                self.render_container_inspect_tab(cx).into_any_element()
+            }
             1 => self
                 .render_container_details_tab(container, cx)
                 .into_any_element(),
@@ -2947,6 +2969,9 @@ impl RuskerApp {
             .min_h_0()
             .overflow_y_scroll()
             .p_6()
+            .flex()
+            .flex_col()
+            .gap_4()
             .child(
                 section_panel(cx)
                     .p_5()
@@ -2965,6 +2990,7 @@ impl RuskerApp {
                     .child(detail_row("端口", format_ports(&container.ports), cx))
                     .child(detail_row("命名卷", volumes, cx)),
             )
+            .child(self.render_container_inspect_fields(cx))
     }
 
     fn render_container_mounts_tab(

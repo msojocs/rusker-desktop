@@ -1,3 +1,4 @@
+pub mod json_view;
 pub mod stats_chart;
 pub mod terminal;
 pub mod theme;

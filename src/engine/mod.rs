@@ -123,6 +123,11 @@ impl EngineService {
         })
     }
 
+    /// Full Docker inspect response as formatted JSON, also available for stopped containers.
+    pub fn container_inspect(&self, id: String) -> JoinHandle<Result<String, EngineError>> {
+        self.spawn_engine(move |engine| async move { engine.container_inspect(&id).await })
+    }
+
     pub fn container_logs(&self, id: String) -> JoinHandle<Result<String, EngineError>> {
         self.spawn_engine(move |engine| async move { engine.container_logs(&id).await })
     }

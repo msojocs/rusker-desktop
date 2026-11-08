@@ -20,7 +20,7 @@ bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 directories = "6"
 futures-util = "0.3"
-gpui-kit = "0.9.0"
+gpui-kit = { version = "0.9.0", features = ["tree-sitter"] }
 httparse = "1"
 regex = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
