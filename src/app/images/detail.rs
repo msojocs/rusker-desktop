@@ -378,6 +378,7 @@ impl RuskerApp {
             data.layers
                 .iter()
                 .enumerate()
+                .rev()
                 .map(|(index, layer)| self.render_image_layer(index, data.layers.len(), layer, cx)),
         )
     }
