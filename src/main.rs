@@ -34,7 +34,8 @@ gpui_kit::assets::icon_assets!(
         ArrowDown,
         Folder,
         ExternalLink,
-        TriangleAlert
+        TriangleAlert,
+        Trash
     ]
 );
 

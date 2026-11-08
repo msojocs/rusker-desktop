@@ -32,7 +32,9 @@ use rusker_desktop::{
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 
-use super::{await_engine, brand_color, form_field, Page, RuskerApp};
+use super::{
+    await_engine, brand_color, form_field, list_action_button, Page, PointerCursor as _, RuskerApp,
+};
 use crate::ui::{detail_row, empty_state, muted, page_header, section_panel};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -795,11 +797,13 @@ impl RuskerApp {
             .border_color(cx.theme().border)
             .flex()
             .items_center()
-            .text_xs()
+            .text_sm()
+            .font_semibold()
             .text_color(cx.theme().muted_foreground)
             .child(
                 div().w(px(32.)).flex_shrink_0().child(
                     Checkbox::new("check-all-volumes")
+                        .pointer(!visible_names.is_empty())
                         .checked(all_checked)
                         .tooltip("全选当前列表")
                         .disabled(visible_names.is_empty())
@@ -828,7 +832,10 @@ impl RuskerApp {
             )
             .child(div().w(px(92.)).flex_shrink_0().child("操作"));
 
-        let mut panel = section_panel(cx)
+        let mut panel = div()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
             .flex_1()
             .min_h_0()
             .flex()
@@ -859,11 +866,14 @@ impl RuskerApp {
                     .border_color(cx.theme().border)
                     .flex()
                     .items_center()
+                    .text_sm()
+                    .when(in_use, |row| row.font_semibold())
                     .when(is_checked, |row| row.bg(cx.theme().accent))
                     .hover(|row| row.bg(cx.theme().accent))
                     .child(
                         div().w(px(32.)).flex_shrink_0().child(
                             Checkbox::new(("check-volume", index))
+                                .pointer(true)
                                 .checked(is_checked)
                                 .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                                     if *checked {
@@ -906,8 +916,6 @@ impl RuskerApp {
                                 div()
                                     .w(px(DATE_COLUMN))
                                     .flex_shrink_0()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
                                     .child(format_timestamp(volume.created)),
                             )
                             .child(
@@ -925,10 +933,10 @@ impl RuskerApp {
                             .w(px(92.))
                             .flex_shrink_0()
                             .flex()
+                            .items_center()
                             .gap_1()
                             .child(
-                                Button::new(("clone-volume", index))
-                                    .ghost()
+                                list_action_button(("clone-volume", index), cx.theme().primary, cx)
                                     .small()
                                     .icon(IconName::Copy)
                                     .tooltip("克隆")
@@ -942,10 +950,9 @@ impl RuskerApp {
                                     })),
                             )
                             .child(
-                                Button::new(("remove-volume", index))
-                                    .ghost()
+                                list_action_button(("remove-volume", index), cx.theme().danger, cx)
                                     .small()
-                                    .icon(Icon::new(IconName::Delete).text_color(cx.theme().danger))
+                                    .icon(AssetIcon::Trash)
                                     .tooltip("删除")
                                     .disabled(busy)
                                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -986,7 +993,7 @@ impl RuskerApp {
                     .items_center()
                     .gap_3()
                     .child(
-                        div().w(px(420.)).child(
+                        div().w(px(320.)).child(
                             Input::new(&self.search_input)
                                 .prefix(Icon::new(IconName::Search).small())
                                 .cleanable(true),
@@ -996,8 +1003,7 @@ impl RuskerApp {
                     .when(!checked.is_empty(), |this| {
                         let count = checked.len();
                         this.child(
-                            Button::new("clear-volume-selection")
-                                .ghost()
+                            list_action_button("clear-volume-selection", cx.theme().foreground, cx)
                                 .label("取消选择")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.volumes.checked.clear();
@@ -1007,7 +1013,8 @@ impl RuskerApp {
                         .child(
                             Button::new("remove-checked-volumes")
                                 .danger()
-                                .icon(IconName::Delete)
+                                .pointer(!busy)
+                                .icon(AssetIcon::Trash)
                                 .label(format!("删除所选（{count}）"))
                                 .disabled(busy)
                                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -1018,6 +1025,7 @@ impl RuskerApp {
                     .child(
                         Button::new("prune-volumes")
                             .outline()
+                            .pointer(!busy && !unused.is_empty())
                             .icon(AssetIcon::BrushCleaning)
                             .label(format!("清理未使用（{}）", unused.len()))
                             .tooltip("删除所有未被任何容器挂载的卷")
@@ -1029,6 +1037,7 @@ impl RuskerApp {
                     .child(
                         Button::new("open-create-volume")
                             .primary()
+                            .pointer(!busy)
                             .icon(IconName::Plus)
                             .label("创建卷")
                             .disabled(busy)
@@ -1041,6 +1050,12 @@ impl RuskerApp {
                 this.child(muted(format!("卷大小统计失败：{error}"), cx))
             })
             .child(panel)
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .child(muted(format!("显示 {} 项", volumes.len()), cx)),
+            )
     }
 
     fn render_volume_detail(&self, volume: &VolumeSummary, cx: &mut Context<Self>) -> Div {
@@ -1173,7 +1188,7 @@ impl RuskerApp {
                     .child(
                         Button::new("remove-volume-detail")
                             .danger()
-                            .icon(IconName::Delete)
+                            .icon(AssetIcon::Trash)
                             .label("删除")
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {

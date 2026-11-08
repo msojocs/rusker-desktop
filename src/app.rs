@@ -15,8 +15,7 @@ use gpui_kit::component::{
     switch::Switch,
     tab::{Tab, TabBar},
     tooltip::Tooltip,
-    window_border, ActiveTheme as _, Icon, IconName, Sizable as _, Size, Theme, ThemeMode,
-    WindowExt as _,
+    window_border, ActiveTheme as _, Icon, IconName, Sizable as _, Size, ThemeMode, WindowExt as _,
 };
 use gpui_kit::{
     assets::IconName as AssetIcon,
@@ -51,6 +50,7 @@ use rusker_desktop::{
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 
+use crate::ui::theme::change_theme;
 use crate::ui::{detail_row, empty_state, message_banner, muted, section_panel, stat_card};
 
 mod images;
@@ -451,7 +451,7 @@ impl RuskerApp {
                 .unwrap_or(false);
             if follow_system {
                 let mode = ThemeMode::from(app_cx.window_appearance());
-                Theme::change(mode, None, app_cx);
+                change_theme(mode, app_cx);
             }
         });
         // The system / Engine proxy may have changed since the last run.
@@ -2086,7 +2086,7 @@ impl RuskerApp {
             )
             .child(div().flex_1())
             .child(
-                container_list_button("refresh-containers", container_action_blue(cx), cx)
+                list_action_button("refresh-containers", cx.theme().primary, cx)
                     .small()
                     .icon(IconName::RotateCw)
                     .tooltip("刷新")
@@ -2096,13 +2096,7 @@ impl RuskerApp {
             .child(
                 Button::new("open-create-container")
                     .pointer(true)
-                    .custom(
-                        ButtonCustomVariant::new(cx)
-                            .color(rgb(0x1D63ED).into())
-                            .foreground(gpui_kit::white())
-                            .hover(rgb(0x1A56D0).into())
-                            .active(rgb(0x1749B0).into()),
-                    )
+                    .primary()
                     .icon(IconName::Plus)
                     .label("创建")
                     .disabled(busy)
@@ -2153,22 +2147,18 @@ impl RuskerApp {
                 let count = checked.len();
                 let selected = selected_containers.clone();
                 this.child(
-                    container_list_button(
-                        "clear-container-selection",
-                        container_action_blue(cx),
-                        cx,
-                    )
-                    .label("取消选择")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.containers_checked.clear();
-                        cx.notify();
-                    })),
+                    list_action_button("clear-container-selection", cx.theme().primary, cx)
+                        .label("取消选择")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.containers_checked.clear();
+                            cx.notify();
+                        })),
                 )
                 .child(
                     Button::new("remove-checked-containers")
                         .pointer(true)
                         .danger()
-                        .icon(IconName::Delete)
+                        .icon(AssetIcon::Trash)
                         .label(format!("删除所选（{count}）"))
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -2436,7 +2426,7 @@ impl RuskerApp {
                         .min_w_0()
                         .truncate()
                         .cursor_pointer()
-                        .text_color(container_action_blue(cx))
+                        .text_color(cx.theme().primary)
                         .hover(|style| style.underline())
                         .tooltip(|window, cx| Tooltip::new("查看镜像详情").build(window, cx))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2475,60 +2465,46 @@ impl RuskerApp {
                     .items_center()
                     .gap_1()
                     .child(
-                        container_list_button(
-                            ("toggle-container", index),
-                            container_action_blue(cx),
-                            cx,
-                        )
-                        .small()
-                        .icon(if running {
-                            IconName::Square
-                        } else {
-                            IconName::Play
-                        })
-                        .tooltip(if running { "停止" } else { "启动" })
-                        .disabled(busy)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.start_container_action(
-                                toggle_id.clone(),
-                                if running {
-                                    ContainerAction::Stop
-                                } else {
-                                    ContainerAction::Start
-                                },
-                                cx,
-                            );
-                        })),
+                        list_action_button(("toggle-container", index), cx.theme().primary, cx)
+                            .small()
+                            .icon(if running {
+                                IconName::Square
+                            } else {
+                                IconName::Play
+                            })
+                            .tooltip(if running { "停止" } else { "启动" })
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.start_container_action(
+                                    toggle_id.clone(),
+                                    if running {
+                                        ContainerAction::Stop
+                                    } else {
+                                        ContainerAction::Start
+                                    },
+                                    cx,
+                                );
+                            })),
                     )
                     .child(
-                        container_list_button(
-                            ("container-more", index),
-                            container_action_blue(cx),
-                            cx,
-                        )
-                        .small()
-                        .icon(IconName::EllipsisVertical)
-                        .disabled(busy)
-                        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                            container_menu(menu, &menu_container, weak.clone())
-                        }),
+                        list_action_button(("container-more", index), cx.theme().primary, cx)
+                            .small()
+                            .icon(IconName::EllipsisVertical)
+                            .disabled(busy)
+                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                                container_menu(menu, &menu_container, weak.clone())
+                            }),
                     )
                     .child(
-                        container_list_button(
-                            ("remove-container-row", index),
-                            cx.theme().danger,
-                            cx,
-                        )
-                        .small()
-                        .icon(Icon::new(IconName::Delete).text_color(cx.theme().danger))
-                        .tooltip("删除")
-                        .disabled(busy)
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
+                        list_action_button(("remove-container-row", index), cx.theme().danger, cx)
+                            .small()
+                            .icon(Icon::new(AssetIcon::Trash).text_color(cx.theme().danger))
+                            .tooltip("删除")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.confirm_remove_container(&remove_container, window, cx);
-                            },
-                        )),
+                            })),
                     ),
             )
     }
@@ -2594,7 +2570,7 @@ impl RuskerApp {
             .child(
                 Button::new("remove-container")
                     .danger()
-                    .icon(IconName::Delete)
+                    .icon(AssetIcon::Trash)
                     .tooltip("删除")
                     .disabled(busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -4017,22 +3993,13 @@ impl RuskerApp {
     }
 }
 
-/// Use an explicit blue: the component theme's primary can be neutral.
-fn container_action_blue(cx: &App) -> Hsla {
-    if cx.theme().mode.is_dark() {
-        rgb(0x60A5FA).into()
-    } else {
-        rgb(0x1D63ED).into()
-    }
-}
-
-/// Transparent list action with distinct hover and pressed backgrounds.
-fn container_list_button(id: impl Into<ElementId>, color: Hsla, cx: &App) -> Button {
+/// Transparent list action using the shared theme's hover and pressed colors.
+fn list_action_button(id: impl Into<ElementId>, color: Hsla, cx: &App) -> Button {
     Button::new(id).pointer(true).custom(
         ButtonCustomVariant::new(cx)
             .foreground(color)
-            .hover(color.opacity(0.12))
-            .active(color.opacity(0.24)),
+            .hover(cx.theme().button_hover)
+            .active(cx.theme().button_active),
     )
 }
 
@@ -4531,15 +4498,15 @@ pub fn apply_theme(preference: ThemePreference, cx: &mut App) {
         ThemePreference::System => {
             cx.set_window_appearance(None);
             let mode = ThemeMode::from(cx.window_appearance());
-            Theme::change(mode, None, cx);
+            change_theme(mode, cx);
         }
         ThemePreference::Light => {
             cx.set_window_appearance(Some(WindowAppearance::Light));
-            Theme::change(ThemeMode::Light, None, cx);
+            change_theme(ThemeMode::Light, cx);
         }
         ThemePreference::Dark => {
             cx.set_window_appearance(Some(WindowAppearance::Dark));
-            Theme::change(ThemeMode::Dark, None, cx);
+            change_theme(ThemeMode::Dark, cx);
         }
     }
 }

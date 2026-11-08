@@ -29,7 +29,7 @@ use rusker_desktop::{
 };
 use time::OffsetDateTime;
 
-use super::{form_field, Page, PointerCursor as _, RuskerApp};
+use super::{form_field, list_action_button, Page, PointerCursor as _, RuskerApp};
 use crate::ui::{detail_row, empty_state, muted, section_panel};
 
 const CHECK_COLUMN: f32 = 32.;
@@ -503,8 +503,7 @@ impl RuskerApp {
                     }),
             )
             .child(
-                Button::new("refresh-images")
-                    .ghost()
+                list_action_button("refresh-images", cx.theme().foreground, cx)
                     .small()
                     .icon(IconName::RotateCw)
                     .tooltip("刷新")
@@ -527,8 +526,7 @@ impl RuskerApp {
                 ),
             )
             .child(
-                Button::new("image-filter")
-                    .ghost()
+                list_action_button("image-filter", cx.theme().foreground, cx)
                     .icon(Icon::new(AssetIcon::ListFilter))
                     .when(filter != ImageFilter::All, |button| {
                         button.label(filter.label())
@@ -555,8 +553,7 @@ impl RuskerApp {
             .when(!checked.is_empty(), |this| {
                 let count = checked.len();
                 this.child(
-                    Button::new("clear-image-selection")
-                        .ghost()
+                    list_action_button("clear-image-selection", cx.theme().foreground, cx)
                         .label("取消选择")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.images.checked.clear();
@@ -566,7 +563,8 @@ impl RuskerApp {
                 .child(
                     Button::new("remove-checked-images")
                         .danger()
-                        .icon(IconName::Delete)
+                        .pointer(!busy)
+                        .icon(AssetIcon::Trash)
                         .label(format!("删除所选（{count}）"))
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -577,6 +575,7 @@ impl RuskerApp {
             .child(
                 Button::new("prune-images")
                     .outline()
+                    .pointer(!busy && !unused.is_empty())
                     .icon(AssetIcon::BrushCleaning)
                     .label(format!("清理未使用（{}）", unused.len()))
                     .tooltip("删除所有未被任何容器使用的镜像")
@@ -588,6 +587,7 @@ impl RuskerApp {
             .child(
                 Button::new("open-pull-image")
                     .primary()
+                    .pointer(!busy)
                     .icon(IconName::ArrowDown)
                     .label("拉取镜像")
                     .disabled(busy)
@@ -739,7 +739,10 @@ impl RuskerApp {
             )
             .child(div().w(px(ACTIONS_COLUMN)).flex_shrink_0().child("操作"));
 
-        let panel = section_panel(cx)
+        let panel = div()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
             .flex_1()
             .min_h_0()
             .flex()
@@ -877,10 +880,9 @@ impl RuskerApp {
                     .items_center()
                     .gap_1()
                     .child(
-                        Button::new(("run-image", index))
-                            .ghost()
+                        list_action_button(("run-image", index), cx.theme().primary, cx)
                             .small()
-                            .icon(Icon::new(IconName::Play).text_color(cx.theme().primary))
+                            .icon(IconName::Play)
                             .tooltip("运行")
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -892,8 +894,7 @@ impl RuskerApp {
                             })),
                     )
                     .child(
-                        Button::new(("image-more", index))
-                            .ghost()
+                        list_action_button(("image-more", index), cx.theme().foreground, cx)
                             .small()
                             .icon(IconName::EllipsisVertical)
                             .disabled(busy)
@@ -902,10 +903,9 @@ impl RuskerApp {
                             }),
                     )
                     .child(
-                        Button::new(("remove-image", index))
-                            .ghost()
+                        list_action_button(("remove-image", index), cx.theme().danger, cx)
                             .small()
-                            .icon(Icon::new(IconName::Delete).text_color(cx.theme().danger))
+                            .icon(AssetIcon::Trash)
                             .tooltip("删除")
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -927,13 +927,15 @@ fn image_menu(
     let id = row.id.clone();
     let reference = row.reference.clone();
     menu.item(
-        PopupMenuItem::new(if row.in_use() {
-            format!("查看使用的容器（{}）", row.containers)
-        } else {
-            "查看使用的容器".into()
-        })
-        .icon(AssetIcon::Container)
-        .disabled(!row.in_use())
+        image_menu_item(
+            if row.in_use() {
+                format!("查看使用的容器（{}）", row.containers)
+            } else {
+                "查看使用的容器".into()
+            },
+            AssetIcon::Container,
+            row.in_use(),
+        )
         .on_click(move |_, window, cx| {
             _ = containers_weak.update(cx, |this, cx| {
                 this.show_image_containers(&containers_row, window, cx);
@@ -941,34 +943,59 @@ fn image_menu(
         }),
     )
     .item(
-        PopupMenuItem::new("拉取最新版本")
-            .icon(AssetIcon::Download)
-            .disabled(pull_reference.is_none())
-            .on_click(move |_, _, cx| {
-                if let Some(reference) = pull_reference.clone() {
-                    _ = weak.update(cx, |this, cx| this.pull_image(reference, cx));
-                }
-            }),
+        image_menu_item(
+            "拉取最新版本",
+            AssetIcon::Download,
+            pull_reference.is_some(),
+        )
+        .on_click(move |_, _, cx| {
+            if let Some(reference) = pull_reference.clone() {
+                _ = weak.update(cx, |this, cx| this.pull_image(reference, cx));
+            }
+        }),
     )
     .separator()
     .item(
-        PopupMenuItem::new("复制镜像 ID")
-            .icon(IconName::Copy)
-            .on_click(move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
-            }),
+        image_menu_item("复制镜像 ID", IconName::Copy, true).on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+        }),
     )
     .item(
-        PopupMenuItem::new("复制镜像引用")
-            .icon(IconName::Copy)
-            .disabled(reference.is_none())
-            .on_click(move |_, _, cx| {
+        image_menu_item("复制镜像引用", IconName::Copy, reference.is_some()).on_click(
+            move |_, _, cx| {
                 if let Some(reference) = reference.clone() {
                     cx.write_to_clipboard(ClipboardItem::new_string(reference));
                 }
-            }),
+            },
+        ),
     )
     .min_w(px(200.))
+}
+
+/// Custom content lets the cursor cover the icon, label and row padding;
+/// the popup menu still owns activation, keyboard navigation and dismissal.
+fn image_menu_item(
+    label: impl Into<SharedString>,
+    icon: impl Into<Icon>,
+    enabled: bool,
+) -> PopupMenuItem {
+    let label = label.into();
+    let icon = icon.into();
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .flex_1()
+            .h(px(26.))
+            .mx_neg_2()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .when(enabled, |this| this.cursor_pointer())
+            .when(!enabled, |this| this.cursor_default())
+            .child(icon.clone().xsmall())
+            .child(label.clone())
+    })
+    .disabled(!enabled)
 }
 
 fn usage_dot(in_use: bool, cx: &gpui_kit::App) -> Div {
