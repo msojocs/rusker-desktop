@@ -394,25 +394,32 @@ impl DockerEngine {
         if needs_default_tag(reference) {
             options = options.tag("latest");
         }
-        let stream = self.client.create_image(Some(options.build()), None, None);
+        // Bollard's timeout applies to waiting for response headers, not just
+        // connecting. Pulls may spend longer contacting the registry before
+        // responding; keep this override local to the pull client.
+        let client = self.client.clone().with_timeout(PULL_TIMEOUT);
+        let stream = client.create_image(Some(options.build()), None, None);
         pin_mut!(stream);
 
-        let result =
-            timeout(PULL_TIMEOUT, async {
-                while let Some(response) = stream.try_next().await.map_err(|error| {
-                    EngineError::operation(format!("拉取镜像 {reference}"), error)
-                })? {
-                    if let Some(detail) = &response.error_detail {
-                        return Err(EngineError::operation(
-                            format!("拉取镜像 {reference}"),
-                            detail.message.as_deref().unwrap_or("引擎返回未知错误"),
-                        ));
-                    }
-                    on_progress(response);
+        let result = timeout(PULL_TIMEOUT, async {
+            while let Some(response) = stream.try_next().await.map_err(|error| match error {
+                BollardError::RequestTimeoutError => EngineError::Timeout {
+                    action: format!("拉取镜像 {reference}：客户端等待容器引擎响应"),
+                    seconds: client.timeout().as_secs(),
+                },
+                error => EngineError::operation(format!("拉取镜像 {reference}"), error),
+            })? {
+                if let Some(detail) = &response.error_detail {
+                    return Err(EngineError::operation(
+                        format!("拉取镜像 {reference}"),
+                        detail.message.as_deref().unwrap_or("引擎返回未知错误"),
+                    ));
                 }
-                Ok(())
-            })
-            .await;
+                on_progress(response);
+            }
+            Ok(())
+        })
+        .await;
 
         match result {
             Ok(result) => result,
@@ -1047,10 +1054,59 @@ fn needs_default_tag(reference: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{image_detail_dto, needs_default_tag, nvidia_device_requests};
+    use super::{image_detail_dto, needs_default_tag, nvidia_device_requests, DockerEngine};
     use bollard::models::{ImageHistoryResponseItem, ImageInspect};
 
     use crate::model::{ImageDetail, ImageLayer};
+
+    #[tokio::test]
+    async fn pull_uses_its_own_timeout_without_changing_other_requests() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let length = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(length, 0);
+                request.extend_from_slice(&buffer[..length]);
+            }
+            assert!(String::from_utf8_lossy(&request).contains("/images/create?"));
+            // Exceed the original client's zero-second request timeout.
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let body = "{\"status\":\"Pull complete\"}\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let engine = DockerEngine {
+            client: bollard::Docker::connect_with_http(
+                &format!("http://{address}"),
+                0,
+                bollard::API_DEFAULT_VERSION,
+            )
+            .unwrap(),
+            managed_wsl: false,
+        };
+        let mut statuses = Vec::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            engine.pull_image_with_progress("alpine:latest", |response| {
+                statuses.push(response.status.unwrap_or_default());
+            }),
+        )
+        .await
+        .expect("mock pull should finish promptly");
+        result.unwrap();
+        assert_eq!(statuses, ["Pull complete"]);
+        assert_eq!(engine.client.timeout(), std::time::Duration::ZERO);
+        server.await.unwrap();
+    }
 
     #[test]
     fn maps_image_details_and_preserves_all_history_in_engine_order() {

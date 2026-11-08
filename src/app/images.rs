@@ -283,9 +283,15 @@ impl RuskerApp {
                 .upgrade()
                 .and_then(|this| this.read(cx).images.pull_error.clone());
             let submit = weak.clone();
+            let confirm = weak.clone();
             dialog
                 .title("拉取镜像")
                 .w(px(520.))
+                .on_ok(move |_, window, cx| {
+                    _ = confirm.update(cx, |this, cx| this.submit_pull(window, cx));
+                    // submit_pull closes only after validation succeeds.
+                    false
+                })
                 .child(
                     div()
                         .flex()

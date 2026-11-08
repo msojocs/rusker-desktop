@@ -428,9 +428,15 @@ impl RuskerApp {
                 .upgrade()
                 .and_then(|this| this.read(cx).volumes.dialog_error.clone());
             let submit = weak.clone();
+            let confirm = weak.clone();
             dialog
                 .title("创建卷")
                 .w(px(480.))
+                .on_ok(move |_, window, cx| {
+                    _ = confirm.update(cx, |this, cx| this.submit_create_volume(window, cx));
+                    // The submit handler closes only after validation succeeds.
+                    false
+                })
                 .child(
                     div()
                         .flex()
@@ -514,6 +520,8 @@ impl RuskerApp {
                 .and_then(|this| this.read(cx).volumes.dialog_error.clone());
             let submit = weak.clone();
             let submit_source = source.clone();
+            let confirm = weak.clone();
+            let confirm_source = source.clone();
             let mut hint = format!(
                 "创建新卷并通过临时 {HELPER_IMAGE} 容器复制全部数据，保留属主、权限和时间戳。"
             );
@@ -523,6 +531,14 @@ impl RuskerApp {
             dialog
                 .title(format!("克隆卷 {source}"))
                 .w(px(520.))
+                .on_ok(move |_, window, cx| {
+                    let source = confirm_source.clone();
+                    _ = confirm.update(cx, |this, cx| {
+                        this.submit_clone_volume(source, window, cx);
+                    });
+                    // The submit handler closes only after validation succeeds.
+                    false
+                })
                 .child(
                     div()
                         .flex()

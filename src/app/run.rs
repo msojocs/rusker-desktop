@@ -163,8 +163,16 @@ impl RuskerApp {
             let submitting = this.read(cx).run.submitting;
             let body = this.read(cx).render_run_form(weak.clone(), cx);
             let submit = weak.clone();
+            let confirm = weak.clone();
             dialog
                 .w(px(600.))
+                .on_ok(move |_, window, cx| {
+                    _ = confirm.update(cx, |this, cx| {
+                        this.submit_create_container(window, cx);
+                    });
+                    // Keep the form open through validation and async submission.
+                    false
+                })
                 .close_button(!submitting)
                 .overlay_closable(!submitting)
                 .child(body)
