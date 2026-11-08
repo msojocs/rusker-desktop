@@ -152,6 +152,10 @@ impl DockerEngine {
         })
     }
 
+    pub async fn sample_container_stats(&self) -> Result<super::ContainerStatsBatch, EngineError> {
+        super::container_detail::sample_all(&self.client).await
+    }
+
     pub async fn snapshot(&self) -> Result<EngineSnapshot, EngineError> {
         let containers_options = ListContainersOptionsBuilder::default().all(true).build();
         // Top-level images only (like `docker images`), without
@@ -1029,7 +1033,7 @@ fn volume_dto(volume: Volume) -> VolumeSummary {
     }
 }
 
-fn container_dto(container: ContainerSummary) -> ContainerDto {
+pub(super) fn container_dto(container: ContainerSummary) -> ContainerDto {
     let id = container.id.unwrap_or_default();
     let name = container
         .names

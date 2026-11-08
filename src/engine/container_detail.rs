@@ -1,6 +1,9 @@
 //! Container-detail backend. No UI state or Docker daemon is needed by the tests.
 
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
 
 use bollard::{
     container::LogOutput,
@@ -72,6 +75,13 @@ pub struct ContainerStats {
     pub block_read: u64,
     pub block_write: u64,
     pub pids: u64,
+}
+
+/// One background polling cycle; timestamps are captured at sample completion,
+/// not when the slowest container in the batch finishes.
+pub struct ContainerStatsBatch {
+    pub containers: Vec<crate::model::ContainerSummary>,
+    pub samples: Vec<(String, Result<super::StatsSample, EngineError>)>,
 }
 
 // Paths are positional arguments, never interpolated into either script.
@@ -501,6 +511,46 @@ fn parse_directory(bytes: &[u8]) -> Result<DirectoryListing, String> {
         .entries
         .sort_by_cached_key(|entry| (entry.name.to_lowercase(), entry.name.clone()));
     Ok(listing)
+}
+
+pub(super) async fn sample_all(client: &Docker) -> Result<ContainerStatsBatch, EngineError> {
+    use bollard::query_parameters::ListContainersOptionsBuilder;
+    let mut containers = with_timeout(
+        "读取统计采样容器列表",
+        REQUEST_TIMEOUT,
+        client.list_containers(Some(
+            ListContainersOptionsBuilder::default().all(true).build(),
+        )),
+    )
+    .await?
+    .into_iter()
+    .map(super::docker::container_dto)
+    .collect::<Vec<_>>();
+    containers.sort_by_cached_key(|container| container.name.to_lowercase());
+    let running_ids: Vec<String> = containers
+        .iter()
+        .filter(|container| container.is_running())
+        .map(|container| container.id.clone())
+        .collect();
+    let samples = futures_util::stream::iter(running_ids.into_iter().map(|id| {
+        let client = client.clone();
+        async move {
+            let result = stats(&client, &id).await.map(|stats| super::StatsSample {
+                at: Instant::now(),
+                timestamp: time::OffsetDateTime::now_utc().unix_timestamp(),
+                stats,
+                connected: false, // Computed by StatsCache against the preceding sample.
+            });
+            (id, result)
+        }
+    }))
+    .buffer_unordered(16)
+    .collect()
+    .await;
+    Ok(ContainerStatsBatch {
+        containers,
+        samples,
+    })
 }
 
 pub(super) async fn stats(client: &Docker, id: &str) -> Result<ContainerStats, EngineError> {

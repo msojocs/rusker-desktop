@@ -59,7 +59,7 @@ mod notifications;
 mod run;
 mod volumes;
 
-use container_detail::ContainerTools;
+use container_detail::{ContainerStatsState, ContainerTools};
 use images::ImageState;
 use run::RunForm;
 use volumes::VolumeState;
@@ -230,6 +230,7 @@ pub struct RuskerApp {
     /// Container detail tab: logs, details, mounts, exec, files, stats.
     container_tab: usize,
     container_tools: ContainerTools,
+    container_stats: ContainerStatsState,
     container_terminal: Option<Entity<crate::ui::terminal::TerminalView>>,
     /// Scroll state of the container log viewer.
     container_logs_scroll: ScrollHandle,
@@ -542,6 +543,7 @@ impl RuskerApp {
             container_removal: ContainerRemoval::default(),
             container_tab: 0,
             container_tools: ContainerTools::default(),
+            container_stats: ContainerStatsState::default(),
             container_terminal: None,
             container_logs_scroll: ScrollHandle::new(),
             logs: String::new(),
@@ -1054,6 +1056,7 @@ impl RuskerApp {
     }
 
     fn apply_snapshot(&mut self, snapshot: EngineSnapshot) {
+        self.reconcile_container_stats(&snapshot.containers);
         if let Some(selected) = self.selected_container.as_ref() {
             if !snapshot
                 .containers

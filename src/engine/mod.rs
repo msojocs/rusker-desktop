@@ -2,9 +2,11 @@ mod connection;
 mod container_detail;
 mod docker;
 mod pull;
+mod stats_history;
 
-pub use container_detail::{ContainerShell, ContainerStats};
+pub use container_detail::{ContainerShell, ContainerStats, ContainerStatsBatch};
 pub use pull::{ImagePullLayer, ImagePullProgress};
+pub use stats_history::{StatsCache, StatsHistory, StatsSample, STATS_SAMPLE_INTERVAL};
 
 use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
@@ -150,6 +152,11 @@ impl EngineService {
         self.spawn_engine(
             move |engine| async move { engine.list_container_directory(&id, &path).await },
         )
+    }
+
+    /// Lists all containers and concurrently samples those currently running.
+    pub fn sample_container_stats(&self) -> JoinHandle<Result<ContainerStatsBatch, EngineError>> {
+        self.spawn_engine(|engine| async move { engine.sample_container_stats().await })
     }
 
     /// Returns one non-streaming sample, with Docker's previous CPU sample.

@@ -3,7 +3,7 @@ use chrono::{Local, TimeZone as _};
 use gpui_kit as gpui;
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::{
-    canvas, component::ActiveTheme as _, div, fill, point, px, relative, size, App, Bounds, Font,
+    canvas, component::ActiveTheme as _, div, fill, point, px, size, App, Bounds, Entity, Font,
     Hsla, InteractiveElement as _, IntoElement, ParentElement as _, PathBuilder, Pixels, Point,
     RenderOnce, StatefulInteractiveElement as _, Styled as _, TextAlign, TextRun, Window,
 };
@@ -28,7 +28,6 @@ pub enum ChartUnit {
 /// `id` must be unique among charts in a view. `series` contains one or two
 /// stable labels and their already-formatted current values, in blue/orange order.
 /// Missing, negative and non-finite measurements are gaps, never invented zeroes.
-/// The parent supplies the accessible table view for the same history.
 pub fn stats_chart(
     id: &'static str,
     title: &'static str,
@@ -36,6 +35,7 @@ pub fn stats_chart(
     series: Vec<(&'static str, String)>,
     points: Vec<ChartPoint>,
     unit: ChartUnit,
+    hover: Entity<StatsHover>,
     _cx: &App,
 ) -> impl IntoElement {
     StatsChart {
@@ -45,6 +45,7 @@ pub fn stats_chart(
         series: series.into_iter().take(2).collect(),
         points,
         unit,
+        hover,
     }
 }
 
@@ -56,11 +57,26 @@ struct StatsChart {
     series: Vec<(&'static str, String)>,
     points: Vec<ChartPoint>,
     unit: ChartUnit,
+    hover: Entity<StatsHover>,
+}
+
+/// Shared by all charts in one statistics view. All charts use the same
+/// elapsed-time origin, which stays fixed while the view appends new points.
+#[derive(Default)]
+pub struct StatsHover {
+    selected: Option<f64>,
+    source: Option<&'static str>,
+}
+
+impl StatsHover {
+    pub fn clear(&mut self) {
+        self.selected = None;
+        self.source = None;
+    }
 }
 
 #[derive(Default)]
-struct HoverState {
-    cursor: Option<Point<Pixels>>,
+struct PlotGeometry {
     plot: Option<Bounds<Pixels>>,
 }
 
@@ -69,7 +85,7 @@ impl RenderOnce for StatsChart {
         let state = window.use_keyed_state(
             (gpui::ElementId::Name(self.id.into()), "stats-hover"),
             cx,
-            |_, _| HoverState::default(),
+            |_, _| PlotGeometry::default(),
         );
         let colors: [Hsla; 2] = if cx.theme().mode.is_dark() {
             [gpui::rgb(0x3987e5).into(), gpui::rgb(0xd95926).into()]
@@ -90,54 +106,29 @@ impl RenderOnce for StatsChart {
             ..Default::default()
         };
         let scale = Scale::new(&self.points, self.series.len(), self.unit);
-        let hovered = {
-            let hover = state.read(cx);
-            hover.cursor.zip(hover.plot).and_then(|(cursor, plot)| {
-                if !plot.contains(&cursor) {
-                    return None;
-                }
-                let fraction = f64::from((cursor.x - plot.left()) / plot.size.width);
-                nearest_point(
-                    &self.points,
-                    scale.start + fraction * (scale.end - scale.start),
-                )
-            })
-        };
-        let readout = hovered.map(|index| {
-            let sample = &self.points[index];
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_x_4()
-                .gap_y_1()
-                .child(div().text_color(muted).child(clock_label(sample.timestamp)))
-                .children(self.series.iter().enumerate().map(|(index, (label, _))| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(line_key(colors[index], index == 1))
-                        .child(
-                            div()
-                                .font_medium()
-                                .child(format_measurement(sample.values[index], self.unit)),
-                        )
-                        .child(div().text_color(muted).child(*label))
-                }))
-        });
+        let hovered = self
+            .hover
+            .read(cx)
+            .selected
+            .and_then(|seconds| nearest_point(&self.points, seconds));
+        let hover_times: Vec<f64> = self.points.iter().map(|sample| sample.seconds).collect();
         let labels: Vec<_> = self.series.iter().map(|(label, _)| *label).collect();
         let unit = self.unit;
         let points = self.points;
         let geometry_state = state.clone();
-        let move_state = state.clone();
-        let leave_state = state;
+        let move_geometry = state;
+        let move_state = self.hover.clone();
+        let leave_state = self.hover;
+        let chart_id = self.id;
+        let border = cx.theme().border;
 
         div()
             .id(self.id)
-            .flex_grow(1.)
-            .flex_basis(relative(0.45))
-            .min_w(px(300.))
-            .p_4()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .p_3()
             .rounded_lg()
             .border_1()
             .border_color(cx.theme().border)
@@ -177,11 +168,28 @@ impl RenderOnce for StatsChart {
                 div()
                     .id("plot")
                     .w_full()
-                    .h(px(222.))
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
                     .on_mouse_move(move |event, _, cx| {
+                        let selected = move_geometry.read(cx).plot.and_then(|plot| {
+                            if !plot.contains(&event.position) {
+                                return None;
+                            }
+                            let fraction =
+                                f64::from((event.position.x - plot.left()) / plot.size.width);
+                            nearest_time(
+                                &hover_times,
+                                scale.start + fraction * (scale.end - scale.start),
+                            )
+                        });
                         move_state.update(cx, |state, cx| {
-                            if state.cursor != Some(event.position) {
-                                state.cursor = Some(event.position);
+                            if state.selected != selected
+                                || (selected.is_some() && state.source != Some(chart_id))
+                            {
+                                state.selected = selected;
+                                state.source = selected.map(|_| chart_id);
                                 cx.notify();
                             }
                         });
@@ -189,7 +197,9 @@ impl RenderOnce for StatsChart {
                     .on_hover(move |inside, _, cx| {
                         if !inside {
                             leave_state.update(cx, |state, cx| {
-                                if state.cursor.take().is_some() {
+                                // A late leave event from one chart must not clear another.
+                                if state.source == Some(chart_id) {
+                                    state.clear();
                                     cx.notify();
                                 }
                             });
@@ -198,18 +208,19 @@ impl RenderOnce for StatsChart {
                     .child(
                         canvas(
                             move |bounds, _, cx| {
-                                // Include all axis bands in the canvas, with 6px clearance for dots.
-                                let plot = Bounds::new(
-                                    bounds.origin + point(px(70.), px(10.)),
-                                    size((bounds.size.width - px(142.)).max(px(1.)), px(158.)),
-                                );
+                                let plot = plot_bounds(bounds);
                                 geometry_state.update(cx, |state, _| state.plot = Some(plot));
                                 plot
                             },
                             move |bounds, plot, window, cx| {
-                                for tick in 0..=4 {
-                                    let value = scale.ceiling * tick as f64 / 4.;
-                                    let y = plot.bottom() - plot.size.height * (tick as f32 / 4.);
+                                if plot.size.width <= px(0.) || plot.size.height <= px(0.) {
+                                    return;
+                                }
+                                let y_ticks = if plot.size.height < px(100.) { 2 } else { 4 };
+                                for tick in 0..=y_ticks {
+                                    let value = scale.ceiling * tick as f64 / y_ticks as f64;
+                                    let y = plot.bottom()
+                                        - plot.size.height * (tick as f32 / y_ticks as f32);
                                     stroke_line(
                                         point(plot.left(), y),
                                         point(plot.right(), y),
@@ -229,8 +240,9 @@ impl RenderOnce for StatsChart {
                                     );
                                 }
                                 // Geometry uses monotonic elapsed time; labels show actual local time.
-                                for tick in 0..=2 {
-                                    let fraction = tick as f64 / 2.;
+                                let x_ticks = if plot.size.width < px(180.) { 1 } else { 2 };
+                                for tick in 0..=x_ticks {
+                                    let fraction = tick as f64 / x_ticks as f64;
                                     let seconds =
                                         scale.start + (scale.end - scale.start) * fraction;
                                     let x = plot.left() + plot.size.width * fraction as f32;
@@ -245,16 +257,6 @@ impl RenderOnce for StatsChart {
                                         cx,
                                     );
                                 }
-                                paint_text(
-                                    "本地时间（HH:mm）".into(),
-                                    point(plot.left(), plot.bottom() + px(30.)),
-                                    plot.size.width,
-                                    TextAlign::Center,
-                                    &font,
-                                    muted,
-                                    window,
-                                    cx,
-                                );
                                 let mut ends = Vec::new();
                                 for (series, label) in labels.iter().enumerate() {
                                     for segment in segments(&points, series) {
@@ -336,6 +338,10 @@ impl RenderOnce for StatsChart {
                                             );
                                         }
                                     }
+                                    paint_hover_readout(
+                                        sample, &labels, unit, plot, bounds, x, &font, foreground,
+                                        muted, surface, border, window, cx,
+                                    );
                                 }
                                 if !points.iter().any(|sample| {
                                     sample.seconds.is_finite()
@@ -361,13 +367,157 @@ impl RenderOnce for StatsChart {
                         .size_full(),
                     ),
             )
-            .child(
-                div().min_h(px(32.)).text_xs().children(readout).children(
-                    hovered
-                        .is_none()
-                        .then(|| div().text_color(muted).child("悬停查看各序列采样值")),
-                ),
-            )
+    }
+}
+
+fn plot_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    // Axis bands shrink with the card; the actual plot consumes all remaining
+    // width/height instead of imposing a fixed canvas size on the layout.
+    let horizontal = px(70.).min(bounds.size.width * 0.24);
+    let top = px(10.).min(bounds.size.height * 0.1);
+    let bottom = px(32.).min(bounds.size.height * 0.3);
+    Bounds::new(
+        bounds.origin + point(horizontal, top),
+        size(
+            (bounds.size.width - horizontal * 2.).max(px(0.)),
+            (bounds.size.height - top - bottom).max(px(0.)),
+        ),
+    )
+}
+
+fn nearest_time(times: &[f64], seconds: f64) -> Option<f64> {
+    times
+        .iter()
+        .copied()
+        .filter(|time| time.is_finite())
+        .min_by(|a, b| (a - seconds).abs().total_cmp(&(b - seconds).abs()))
+}
+
+fn hover_clock_label(timestamp: i64) -> String {
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|time| time.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "—".into())
+}
+
+/// Keep the readout inside this chart, flipping left at the right edge.
+fn readout_bounds(
+    bounds: Bounds<Pixels>,
+    x: Pixels,
+    top: Pixels,
+    width: Pixels,
+    height: Pixels,
+) -> Bounds<Pixels> {
+    let width = width.min((bounds.size.width - px(8.)).max(px(0.)));
+    let height = height.min((bounds.size.height - px(8.)).max(px(0.)));
+    let inset_x = px(4.).min(bounds.size.width / 2.);
+    let inset_y = px(4.).min(bounds.size.height / 2.);
+    let preferred = if x + px(12.) + width <= bounds.right() - inset_x {
+        x + px(12.)
+    } else {
+        x - px(12.) - width
+    };
+    let left = preferred
+        .max(bounds.left() + inset_x)
+        .min(bounds.right() - width - inset_x);
+    let top = top
+        .max(bounds.top() + inset_y)
+        .min(bounds.bottom() - height - inset_y);
+    Bounds::new(point(left, top), size(width, height))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_hover_readout(
+    sample: &ChartPoint,
+    labels: &[&str],
+    unit: ChartUnit,
+    plot: Bounds<Pixels>,
+    bounds: Bounds<Pixels>,
+    x: Pixels,
+    font: &Font,
+    foreground: Hsla,
+    muted: Hsla,
+    surface: Hsla,
+    border: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let rows: Vec<String> = labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            let value = format_measurement(sample.values[index], unit);
+            if labels.len() == 1 {
+                value
+            } else {
+                format!("{label}  {value}")
+            }
+        })
+        .collect();
+    let time = hover_clock_label(sample.timestamp);
+    let text_width = std::iter::once(&time)
+        .chain(rows.iter())
+        .map(|text| {
+            let run = TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: foreground,
+                ..Default::default()
+            };
+            window
+                .text_system()
+                .shape_line(text.clone().into(), px(11.), &[run], None)
+                .width
+        })
+        .fold(px(0.), |width, next| width.max(next));
+    let tooltip = readout_bounds(
+        bounds,
+        x,
+        plot.top() + px(8.),
+        text_width + px(24.),
+        px(20. * (rows.len() + 1) as f32 + 16.),
+    );
+    if tooltip.size.width < px(26.) || tooltip.size.height < px(18.) {
+        return;
+    }
+    // Painted after the crosshair and markers; no hitbox can steal hover events.
+    window.paint_quad(fill(tooltip, border).corner_radii(px(6.)));
+    window.paint_quad(
+        fill(
+            Bounds::new(
+                tooltip.origin + point(px(1.), px(1.)),
+                tooltip.size - size(px(2.), px(2.)),
+            ),
+            surface,
+        )
+        .corner_radii(px(5.)),
+    );
+    paint_text(
+        time,
+        tooltip.origin + point(px(12.), px(8.)),
+        tooltip.size.width - px(24.),
+        TextAlign::Left,
+        font,
+        muted,
+        window,
+        cx,
+    );
+    for (index, row) in rows.into_iter().enumerate() {
+        let offset = px(28. + 20. * index as f32);
+        if offset + px(16.) > tooltip.size.height - px(4.) {
+            break;
+        }
+        paint_text(
+            row,
+            tooltip.origin + point(px(12.), offset),
+            tooltip.size.width - px(24.),
+            TextAlign::Left,
+            font,
+            foreground,
+            window,
+            cx,
+        );
     }
 }
 
@@ -690,6 +840,102 @@ mod tests {
         let plot = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(100.)));
         assert_eq!(scale.position(1., 0., plot).x, px(10.));
         assert_eq!(nearest_point(&points, 6.), Some(2));
+    }
+
+    #[test]
+    fn plot_geometry_fills_available_space_without_overflow() {
+        for (width, height) in [
+            (0., 0.),
+            (100., 40.),
+            (268., 120.),
+            (600., 350.),
+            (1000., 700.),
+        ] {
+            let bounds = Bounds::new(point(px(100.), px(50.)), size(px(width), px(height)));
+            let plot = plot_bounds(bounds);
+            assert!(plot.size.width >= px(0.));
+            assert!(plot.size.height >= px(0.));
+            assert!(plot.left() >= bounds.left());
+            assert!(plot.top() >= bounds.top());
+            assert!(plot.right() <= bounds.right());
+            assert!(plot.bottom() <= bounds.bottom());
+        }
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(600.), px(350.)));
+        let plot = plot_bounds(bounds);
+        assert_eq!(plot.size.width, px(460.));
+        assert_eq!(plot.size.height, px(308.));
+    }
+
+    #[test]
+    fn readout_stays_within_short_and_narrow_charts() {
+        for (width, height) in [(0., 0.), (6., 6.), (100., 40.), (268., 120.)] {
+            let bounds = Bounds::new(point(px(100.), px(50.)), size(px(width), px(height)));
+            let tooltip = readout_bounds(
+                bounds,
+                bounds.right(),
+                bounds.top() + px(18.),
+                px(160.),
+                px(76.),
+            );
+            assert!(tooltip.left() >= bounds.left());
+            assert!(tooltip.right() <= bounds.right());
+            assert!(tooltip.top() >= bounds.top());
+            assert!(tooltip.bottom() <= bounds.bottom());
+        }
+    }
+
+    #[test]
+    fn shared_hover_selects_the_same_sample_in_all_four_charts() {
+        let selected = nearest_time(&[0., 10., 23., 30.], 21.).unwrap();
+        assert_eq!(selected, 23.);
+        for series in 0..4 {
+            let mut points = vec![
+                sample(0., Some(series as f64), None, false),
+                sample(10., None, None, true),
+                sample(23., Some(series as f64 + 2.), None, true),
+                sample(30., Some(series as f64 + 3.), None, true),
+            ];
+            assert_eq!(nearest_point(&points, selected), Some(2));
+            points.push(sample(40., Some(4.), None, true));
+            assert_eq!(nearest_point(&points, selected), Some(2));
+            assert_eq!(nearest_point(&points, 10.), Some(1)); // Missing values still have a time.
+        }
+        assert_eq!(nearest_time(&[], 0.), None);
+        assert_eq!(nearest_time(&[f64::NAN, 10.], 0.), Some(10.));
+    }
+
+    #[test]
+    fn readout_stays_inside_each_chart_and_flips_at_the_right_edge() {
+        for width in [268., 500., 900.] {
+            let bounds = Bounds::new(point(px(100.), px(50.)), size(px(width), px(222.)));
+            for x in [
+                bounds.left(),
+                bounds.left() + px(width / 2.),
+                bounds.right(),
+            ] {
+                let tooltip = readout_bounds(bounds, x, px(68.), px(160.), px(76.));
+                assert!(tooltip.left() >= bounds.left());
+                assert!(tooltip.right() <= bounds.right());
+                assert!(tooltip.top() >= bounds.top());
+                assert!(tooltip.bottom() <= bounds.bottom());
+                if x == bounds.right() {
+                    assert!(tooltip.right() < x);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hover_time_includes_seconds_and_clear_resets_the_shared_selection() {
+        let time = Local.with_ymd_and_hms(2026, 11, 8, 9, 7, 23).unwrap();
+        assert_eq!(hover_clock_label(time.timestamp()), "09:07:23");
+        let mut hover = StatsHover {
+            selected: Some(23.),
+            source: Some("cpu"),
+        };
+        hover.clear();
+        assert!(hover.selected.is_none());
+        assert!(hover.source.is_none());
     }
 
     #[test]

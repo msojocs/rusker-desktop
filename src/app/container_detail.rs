@@ -2,75 +2,43 @@
 use std::collections::VecDeque;
 
 use crate::ui::{
-    stats_chart::{stats_chart, ChartPoint, ChartUnit},
+    stats_chart::{stats_chart, ChartPoint, ChartUnit, StatsHover},
     terminal::TerminalView,
 };
 use gpui_kit::Context;
 use rusker_desktop::{
-    engine::ContainerStats,
+    engine::{StatsCache, StatsHistory, STATS_SAMPLE_INTERVAL},
     model::{Revision, VolumeEntryKind},
     volume::DirectoryListing,
 };
 
 use super::*;
 
-const STATS_HISTORY_LIMIT: usize = 300;
-const STATS_HISTORY_WINDOW: Duration = Duration::from_secs(10 * 60);
-
-#[derive(Clone)]
-struct StatsSample {
-    at: Instant,
-    timestamp: i64,
-    stats: ContainerStats,
-    connected: bool,
-}
-
+/// Independent of the selected container/page. Only the backend cache expires.
 #[derive(Default)]
-struct StatsHistory {
-    samples: VecDeque<StatsSample>,
-    interrupted: bool,
+pub(super) struct ContainerStatsState {
+    cache: StatsCache,
+    task: Option<Task<()>>,
+    revision: Revision,
 }
 
-impl StatsHistory {
-    fn push(&mut self, stats: ContainerStats, at: Instant, timestamp: i64) {
-        let connected = !self.interrupted
-            && self.samples.back().is_some_and(|previous| {
-                at.saturating_duration_since(previous.at) <= Duration::from_secs(10)
-                    && stats.network_rx >= previous.stats.network_rx
-                    && stats.network_tx >= previous.stats.network_tx
-                    && stats.block_read >= previous.stats.block_read
-                    && stats.block_write >= previous.stats.block_write
-            });
-        self.samples.push_back(StatsSample {
-            at,
-            timestamp,
-            stats,
-            connected,
-        });
-        self.interrupted = false;
-        while self.samples.len() > STATS_HISTORY_LIMIT
-            || self.samples.front().is_some_and(|sample| {
-                at.saturating_duration_since(sample.at) > STATS_HISTORY_WINDOW
-            })
-        {
-            self.samples.pop_front();
-        }
-    }
-
-    fn points(&self, values: impl Fn(&ContainerStats) -> [Option<f64>; 2]) -> Vec<ChartPoint> {
-        let Some(first) = self.samples.front() else {
-            return Vec::new();
-        };
-        self.samples
-            .iter()
-            .map(|sample| ChartPoint {
-                seconds: sample.at.saturating_duration_since(first.at).as_secs_f64(),
-                timestamp: sample.timestamp,
-                values: values(&sample.stats),
-                connected: sample.connected,
-            })
-            .collect()
-    }
+fn stats_points(
+    history: &StatsHistory,
+    values: impl Fn(&rusker_desktop::engine::ContainerStats) -> [Option<f64>; 2],
+) -> Vec<ChartPoint> {
+    let Some(first) = history.samples.front() else {
+        return Vec::new();
+    };
+    history
+        .samples
+        .iter()
+        .map(|sample| ChartPoint {
+            seconds: sample.at.saturating_duration_since(first.at).as_secs_f64(),
+            timestamp: sample.timestamp,
+            values: values(&sample.stats),
+            connected: sample.connected,
+        })
+        .collect()
 }
 
 const DIRECTORY_CACHE_LIMIT: usize = 8;
@@ -157,12 +125,9 @@ pub(super) struct ContainerTools {
     files_task: Option<Task<()>>,
     files_cache: DirectoryCache,
     files_cached: bool,
-    stats: Option<ContainerStats>,
     stats_error: Option<String>,
-    stats_updated: Option<Instant>,
-    stats_task: Option<Task<()>>,
     stats_history: StatsHistory,
-    stats_table: bool,
+    stats_hover: Option<Entity<StatsHover>>,
 }
 
 impl RuskerApp {
@@ -183,11 +148,9 @@ impl RuskerApp {
         let tools = &mut self.container_tools;
         tools.shell_task = None;
         tools.shell_connecting = false;
-        tools.stats_task = None;
-        tools.stats = None;
-        tools.stats_updated = None;
-        tools.stats_history = StatsHistory::default();
+        // Statistics belong to the cache/open view, not to the live shell/files.
         tools.stats_error = None;
+        tools.stats_hover = None;
         tools.files_revision.advance();
         tools.files_task = None;
         tools.files_loading = false;
@@ -198,6 +161,7 @@ impl RuskerApp {
     }
 
     pub(super) fn sync_container_tools(&mut self, cx: &mut Context<Self>) {
+        self.start_background_container_stats(cx);
         if !self.selected_container_running() {
             self.stop_container_live_tools();
         } else {
@@ -206,10 +170,20 @@ impl RuskerApp {
     }
 
     pub(super) fn select_container_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
-        self.container_tab = tab.min(5);
-        if tab != 5 {
-            self.container_tools.stats_task = None;
-            self.container_tools.stats_history.interrupted = true;
+        let tab = tab.min(5);
+        let entering_stats = tab == 5 && self.container_tab != 5;
+        self.container_tab = tab;
+        if tab == 5 && self.container_tools.stats_hover.is_none() {
+            let hover = cx.new(|_| StatsHover::default());
+            cx.observe(&hover, |_, _, cx| cx.notify()).detach();
+            self.container_tools.stats_hover = Some(hover);
+        }
+        if entering_stats {
+            self.load_cached_container_stats();
+        } else if tab != 5 {
+            self.container_tools.stats_hover = None;
+            self.container_tools.stats_history = StatsHistory::default();
+            self.container_tools.stats_error = None;
         }
         match tab {
             3 if self.container_tools.shell_task.is_none() => self.connect_container_shell(cx),
@@ -221,7 +195,7 @@ impl RuskerApp {
                 };
                 self.load_container_directory(path, cx);
             }
-            5 => self.start_container_stats(cx),
+            5 => self.start_background_container_stats(cx),
             _ => {}
         }
         cx.notify();
@@ -380,61 +354,147 @@ impl RuskerApp {
         cx.notify();
     }
 
-    fn start_container_stats(&mut self, cx: &mut Context<Self>) {
-        if self.container_tools.stats_task.is_some() || !self.selected_container_running() {
+    fn load_cached_container_stats(&mut self) {
+        self.container_stats.cache.prune(Instant::now());
+        self.container_tools.stats_history = self
+            .selected_container
+            .as_deref()
+            .and_then(|id| self.container_stats.cache.history(id))
+            .cloned()
+            .unwrap_or_default();
+        self.container_tools.stats_error = self
+            .selected_container
+            .as_deref()
+            .and_then(|id| self.container_stats.cache.error(id))
+            .map(str::to_owned);
+    }
+
+    /// Called for every authoritative snapshot, including deletion and stop actions.
+    pub(super) fn reconcile_container_stats(&mut self, containers: &[ContainerSummary]) {
+        self.container_stats.revision.advance();
+        self.container_stats
+            .cache
+            .reconcile(containers, Instant::now());
+    }
+
+    fn stats_view_open(&self) -> bool {
+        self.page == Page::Containers
+            && self.selected_container.is_some()
+            && self.container_tab == 5
+    }
+
+    fn can_sample_container_stats(&self) -> bool {
+        self.connected
+            && !self.quitting
+            && self.engine_transition.is_none()
+            && self.runtime_busy.is_none()
+            && !self.resource_saver_active()
+    }
+
+    fn start_background_container_stats(&mut self, cx: &mut Context<Self>) {
+        if self.container_stats.task.is_some() {
             return;
         }
-        let (Some(engine), Some(id)) = (self.engine.clone(), self.selected_container.clone())
-        else {
+        let Some(engine) = self.engine.clone() else {
             return;
         };
-        self.container_tools.stats_error = None;
-        self.container_tools.stats_task = Some(cx.spawn(async move |this, cx| loop {
-            let active = this
-                .update(cx, |this, _| {
-                    this.page == Page::Containers
-                        && this.container_tab == 5
-                        && this.selected_container.as_ref() == Some(&id)
-                        && this.selected_container_running()
-                })
-                .unwrap_or(false);
-            if !active {
-                break;
-            }
-            let result = await_engine(engine.container_stats(id.clone())).await;
-            let active = this
-                .update(cx, |this, cx| {
-                    if this.selected_container.as_ref() != Some(&id)
-                        || this.container_tab != 5
-                        || !this.selected_container_running()
-                    {
-                        return false;
-                    }
-                    match result {
-                        Ok(stats) => {
-                            let now = Instant::now();
-                            this.container_tools.stats_history.push(
-                                stats.clone(),
-                                now,
-                                OffsetDateTime::now_utc().unix_timestamp(),
-                            );
-                            this.container_tools.stats = Some(stats);
-                            this.container_tools.stats_error = None;
-                            this.container_tools.stats_updated = Some(now);
+        self.container_stats.task = Some(cx.spawn(async move |this, cx| loop {
+            let started = Instant::now();
+            let revision = match this.update(cx, |this, _| {
+                this.container_stats.cache.prune(started);
+                if this.can_sample_container_stats() {
+                    Some((
+                        this.container_stats.revision.current(),
+                        this.refresh_revision.current(),
+                    ))
+                } else {
+                    this.container_stats.cache.interrupt_all();
+                    None
+                }
+            }) {
+                Ok(revision) => revision,
+                Err(_) => return,
+            };
+            if let Some((revision, refresh_revision)) = revision {
+                let result = await_engine(engine.sample_container_stats()).await;
+                if this
+                    .update(cx, |this, cx| {
+                        // A mutation/refresh/lifecycle transition won the race. Do not let
+                        // an old list or delayed sample resurrect a removed/stopped container.
+                        if !this.container_stats.revision.is_current(revision)
+                            || !this.refresh_revision.is_current(refresh_revision)
+                            || !this.can_sample_container_stats()
+                        {
+                            this.container_stats.cache.interrupt_all();
+                            return;
                         }
-                        Err(error) => {
-                            this.container_tools.stats_error = Some(error.to_string());
-                            this.container_tools.stats_history.interrupted = true;
+                        let open = this.stats_view_open();
+                        match result {
+                            Ok(batch) => {
+                                if this.snapshot.containers != batch.containers {
+                                    let mut snapshot = this.snapshot.clone();
+                                    snapshot.containers = batch.containers;
+                                    this.apply_snapshot(snapshot);
+                                    this.sync_container_tools(cx);
+                                } else {
+                                    this.container_stats
+                                        .cache
+                                        .reconcile(&batch.containers, Instant::now());
+                                }
+                                for (id, result) in batch.samples {
+                                    match result {
+                                        Ok(sample) => {
+                                            if let Some(sample) = this.container_stats.cache.push(
+                                                &id,
+                                                sample.stats,
+                                                sample.at,
+                                                sample.timestamp,
+                                            ) {
+                                                if open
+                                                    && this.selected_container.as_ref() == Some(&id)
+                                                {
+                                                    this.container_tools
+                                                        .stats_history
+                                                        .append(sample);
+                                                    this.container_tools.stats_error = None;
+                                                }
+                                            }
+                                        }
+                                        Err(error) => {
+                                            this.container_stats.cache.fail(&id, error.to_string());
+                                            if open && this.selected_container.as_ref() == Some(&id)
+                                            {
+                                                this.container_tools.stats_error = this
+                                                    .container_stats
+                                                    .cache
+                                                    .error(&id)
+                                                    .map(str::to_owned);
+                                            }
+                                        }
+                                    }
+                                }
+                                // Requests can take long enough for earlier samples to expire.
+                                this.container_stats.cache.prune(Instant::now());
+                            }
+                            Err(error) => {
+                                this.container_stats.cache.interrupt_all();
+                                if open {
+                                    this.container_tools.stats_error = Some(error.to_string());
+                                }
+                            }
                         }
-                    }
-                    cx.notify();
-                    true
-                })
-                .unwrap_or(false);
-            if !active {
-                break;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
             }
-            cx.background_executor().timer(Duration::from_secs(2)).await;
+            // Fixed start-to-start cadence, not ten seconds after request completion.
+            // Slow requests skip missed ticks rather than accumulating overlapping IO.
+            cx.background_executor()
+                .timer(STATS_SAMPLE_INTERVAL.saturating_sub(started.elapsed()))
+                .await;
         }));
     }
 
@@ -717,49 +777,22 @@ impl RuskerApp {
     ) -> impl IntoElement {
         let tools = &self.container_tools;
         let mut view = div()
-            .id("container-stats-scroll")
+            .id("container-stats")
             .flex_1()
+            .min_w_0()
             .min_h_0()
-            .overflow_y_scroll()
-            .p_6()
+            .overflow_hidden()
+            .p_4()
             .flex()
             .flex_col()
             .gap_4();
         if !container.is_running() {
             return view.child(empty_state(
                 "容器未运行",
-                "启动容器后可查看实时资源使用情况。",
+                "启动容器后可查看资源统计。历史缓存仍按一小时规则保留和清理。",
                 cx,
             ));
         }
-        view = view.child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_3()
-                .child(
-                    muted(
-                        "最近 10 分钟 · 最多 300 个采样点 · 采样完成后间隔 2 秒更新",
-                        cx,
-                    )
-                    .flex_1(),
-                )
-                .child(
-                    button("container-stats-view")
-                        .outline()
-                        .small()
-                        .label(if tools.stats_table {
-                            "显示图表"
-                        } else {
-                            "采样数据"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.container_tools.stats_table = !this.container_tools.stats_table;
-                            cx.notify();
-                        })),
-                ),
-        );
         if let Some(error) = &tools.stats_error {
             view = view.child(
                 div()
@@ -768,115 +801,73 @@ impl RuskerApp {
                     .child(format!("采样失败（自动重试）：{error}")),
             );
         }
-        if let Some(stats) = &tools.stats {
+        if let Some(latest) = tools.stats_history.samples.back() {
+            let stats = &latest.stats;
             let cpu = format_cpu(stats.cpu_percent);
             let history = &tools.stats_history;
-            if tools.stats_table {
-                let mut table = div()
-                    .id("container-stats-table")
-                    .overflow_x_scroll()
-                    .flex()
-                    .flex_col()
-                    .child(stats_table_row(
-                        [
-                            "时间 (UTC)",
-                            "CPU",
-                            "内存",
-                            "磁盘读取",
-                            "磁盘写入",
-                            "网络接收",
-                            "网络发送",
-                            "PID",
-                        ]
-                        .map(str::to_owned),
+            let Some(hover) = &tools.stats_hover else {
+                return view;
+            };
+            view = view.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .grid()
+                    .grid_cols(2)
+                    .grid_rows(2)
+                    .gap_4()
+                    .child(stats_chart(
+                        "container-cpu-chart",
+                        "CPU 使用率",
+                        "100% 表示占用一个逻辑 CPU".into(),
+                        vec![("CPU", cpu)],
+                        stats_points(history, |s| [s.cpu_percent, None]),
+                        ChartUnit::Percent,
+                        hover.clone(),
                         cx,
-                    ));
-                for sample in history.samples.iter().rev() {
-                    let stats = &sample.stats;
-                    table = table.child(stats_table_row(
-                        [
-                            format_timestamp(sample.timestamp),
-                            format_cpu(stats.cpu_percent),
-                            format_bytes(stats.memory_bytes),
-                            format_bytes(stats.block_read),
-                            format_bytes(stats.block_write),
-                            format_bytes(stats.network_rx),
-                            format_bytes(stats.network_tx),
-                            stats.pids.to_string(),
+                    ))
+                    .child(stats_chart(
+                        "container-memory-chart",
+                        "内存使用量",
+                        format!("上限 {}", format_bytes(stats.memory_limit)),
+                        vec![("内存", format_bytes(stats.memory_bytes))],
+                        stats_points(history, |s| [Some(s.memory_bytes as f64), None]),
+                        ChartUnit::Bytes,
+                        hover.clone(),
+                        cx,
+                    ))
+                    .child(stats_chart(
+                        "container-disk-chart",
+                        "磁盘读写",
+                        "自容器启动以来的累计值".into(),
+                        vec![
+                            ("读取", format_bytes(stats.block_read)),
+                            ("写入", format_bytes(stats.block_write)),
                         ],
+                        stats_points(history, |s| {
+                            [Some(s.block_read as f64), Some(s.block_write as f64)]
+                        }),
+                        ChartUnit::Bytes,
+                        hover.clone(),
                         cx,
-                    ));
-                }
-                view = view.child(table);
-            } else {
-                view = view.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .flex_shrink_0()
-                        .gap_4()
-                        .child(stats_chart(
-                            "container-cpu-chart",
-                            "CPU 使用率",
-                            "100% 表示占用一个逻辑 CPU".into(),
-                            vec![("CPU", cpu)],
-                            history.points(|s| [s.cpu_percent, None]),
-                            ChartUnit::Percent,
-                            cx,
-                        ))
-                        .child(stats_chart(
-                            "container-memory-chart",
-                            "内存使用量",
-                            format!("上限 {}", format_bytes(stats.memory_limit)),
-                            vec![("内存", format_bytes(stats.memory_bytes))],
-                            history.points(|s| [Some(s.memory_bytes as f64), None]),
-                            ChartUnit::Bytes,
-                            cx,
-                        ))
-                        .child(stats_chart(
-                            "container-disk-chart",
-                            "磁盘读写",
-                            "自容器启动以来的累计值".into(),
-                            vec![
-                                ("读取", format_bytes(stats.block_read)),
-                                ("写入", format_bytes(stats.block_write)),
-                            ],
-                            history.points(|s| {
-                                [Some(s.block_read as f64), Some(s.block_write as f64)]
-                            }),
-                            ChartUnit::Bytes,
-                            cx,
-                        ))
-                        .child(stats_chart(
-                            "container-network-chart",
-                            "网络 I/O",
-                            "自容器启动以来的累计值".into(),
-                            vec![
-                                ("接收", format_bytes(stats.network_rx)),
-                                ("发送", format_bytes(stats.network_tx)),
-                            ],
-                            history
-                                .points(|s| [Some(s.network_rx as f64), Some(s.network_tx as f64)]),
-                            ChartUnit::Bytes,
-                            cx,
-                        )),
-                );
-            }
-            view = view.child(muted("网络和磁盘 I/O 为累计字节数，不是每秒速率。", cx));
-            view = view.child(muted(
-                format!(
-                    "当前 PID：{} · 保留 {} 个采样点 · 时间轴为本地时间（24 小时制） · 未采样区间断开",
-                    stats.pids,
-                    history.samples.len(),
-                ),
-                cx,
-            ));
-            if let Some(updated) = tools.stats_updated {
-                view = view.child(muted(
-                    format!("最近成功采样：{} 秒前", updated.elapsed().as_secs()),
-                    cx,
-                ));
-            }
+                    ))
+                    .child(stats_chart(
+                        "container-network-chart",
+                        "网络 I/O",
+                        "自容器启动以来的累计值".into(),
+                        vec![
+                            ("接收", format_bytes(stats.network_rx)),
+                            ("发送", format_bytes(stats.network_tx)),
+                        ],
+                        stats_points(history, |s| {
+                            [Some(s.network_rx as f64), Some(s.network_tx as f64)]
+                        }),
+                        ChartUnit::Bytes,
+                        hover.clone(),
+                        cx,
+                    )),
+            );
         } else if tools.stats_error.is_none() {
             view = view.child(muted("正在采集资源统计…", cx));
         }
@@ -890,23 +881,6 @@ fn format_cpu(value: Option<f64>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
-fn stats_table_row(cells: [String; 8], cx: &App) -> Div {
-    div()
-        .flex()
-        .min_w(px(1000.))
-        .py_2()
-        .border_b_1()
-        .border_color(cx.theme().border)
-        .text_xs()
-        .children(cells.into_iter().enumerate().map(|(index, text)| {
-            div()
-                .w(px(if index == 0 { 200. } else { 114. }))
-                .flex_shrink_0()
-                .px_2()
-                .child(text)
-        }))
-}
-
 fn directory_parent(path: &str) -> String {
     path.trim_end_matches('/')
         .rsplit_once('/')
@@ -918,8 +892,8 @@ fn directory_parent(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        directory_parent, DirectoryCache, StatsHistory, DIRECTORY_CACHE_BYTES,
-        DIRECTORY_CACHE_LIMIT, DIRECTORY_CACHE_TTL, STATS_HISTORY_LIMIT,
+        directory_parent, stats_points, DirectoryCache, StatsHistory, DIRECTORY_CACHE_BYTES,
+        DIRECTORY_CACHE_LIMIT, DIRECTORY_CACHE_TTL,
     };
     use rusker_desktop::{
         engine::ContainerStats,
@@ -996,27 +970,6 @@ mod tests {
     }
 
     #[test]
-    fn stats_history_bounds_memory_and_time() {
-        let start = Instant::now();
-        let mut history = StatsHistory::default();
-        for index in 0..400 {
-            history.push(
-                ContainerStats::default(),
-                start + Duration::from_secs(index),
-                index as i64,
-            );
-        }
-        assert_eq!(history.samples.len(), STATS_HISTORY_LIMIT);
-        history.push(
-            ContainerStats::default(),
-            start + Duration::from_secs(1100),
-            1100,
-        );
-        assert_eq!(history.samples.len(), 1);
-        assert!(!history.samples[0].connected);
-    }
-
-    #[test]
     fn stats_history_uses_real_spacing_and_preserves_missing_cpu() {
         let start = Instant::now();
         let mut history = StatsHistory::default();
@@ -1029,7 +982,7 @@ mod tests {
             start + Duration::from_secs(3),
             103,
         );
-        let points = history.points(|stats| [stats.cpu_percent, None]);
+        let points = stats_points(&history, |stats| [stats.cpu_percent, None]);
         assert_eq!(points[0].seconds, 0.);
         assert_eq!(points[0].values[0], None);
         assert_eq!(points[1].seconds, 3.);
@@ -1046,7 +999,7 @@ mod tests {
             ..Default::default()
         };
         history.push(stats.clone(), start, 100);
-        history.interrupted = true;
+        history.interrupt();
         history.push(stats.clone(), start + Duration::from_secs(2), 102);
         assert!(!history.samples[1].connected);
         history.push(stats, start + Duration::from_secs(4), 104);
