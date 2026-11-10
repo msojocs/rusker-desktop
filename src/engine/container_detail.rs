@@ -108,7 +108,8 @@ cd "$1" || exit 3
 { find . -mindepth 1 -maxdepth 1 -print0 2>/dev/null || printf '\000SCAN_ERROR\000'; } |
     tr '\000\012' '\012\000' | head -n "$2" | tr '\000\012' '\012\000' |
     {
-        xargs -0 -r -n 128 /bin/sh -c '
+        xargs -0 -n 128 /bin/sh -c '
+            [ "$#" -gt 0 ] || exit 0
             metadata=$(stat -c "%F|%s|%Y|%A" "$@" 2>/dev/null) || exit 4
             printf "%s\n" "$metadata" | {
                 for entry do
@@ -121,15 +122,15 @@ cd "$1" || exit 3
 "#;
 
 pub(super) async fn open_shell(client: &Docker, id: &str) -> Result<ContainerShell, EngineError> {
-    let action = "打开容器 Shell（需要 /bin/sh）";
+    let action = t!("engine.action.open_shell").into_owned();
     let created = with_timeout(
-        action,
+        &action,
         REQUEST_TIMEOUT,
         client.create_exec(id, shell_config()),
     )
     .await?;
     let attached = with_timeout(
-        action,
+        &action,
         REQUEST_TIMEOUT,
         client.start_exec(&created.id, Some(shell_attach_options())),
     )
@@ -139,14 +140,20 @@ pub(super) async fn open_shell(client: &Docker, id: &str) -> Result<ContainerShe
         mut input,
     } = attached
     else {
-        return Err(EngineError::operation(action, "引擎未返回 attached IO"));
+        return Err(EngineError::operation(
+            &action,
+            t!("engine.error.no_attached_io"),
+        ));
     };
     // Surface startup failures through the opening Result when already known.
-    let state = with_timeout(action, REQUEST_TIMEOUT, client.inspect_exec(&created.id)).await?;
+    let state = with_timeout(&action, REQUEST_TIMEOUT, client.inspect_exec(&created.id)).await?;
     if state.running == Some(false) && state.exit_code.is_some_and(|code| code != 0) {
         return Err(EngineError::operation(
-            action,
-            format!("/bin/sh -i 启动退出，退出码 {:?}", state.exit_code),
+            &action,
+            t!(
+                "engine.error.shell_start_exit",
+                code = format!("{:?}", state.exit_code)
+            ),
         ));
     }
 
@@ -160,23 +167,32 @@ pub(super) async fn open_shell(client: &Docker, id: &str) -> Result<ContainerShe
                 while let Some(command) = input_rx.recv().await {
                     if command.len() > MAX_SHELL_INPUT {
                         return Err(EngineError::operation(
-                            "写入容器 Shell",
-                            "单次输入超过 64 KiB",
+                            t!("engine.action.write_shell"),
+                            t!("engine.error.shell_input_too_large"),
                         ));
                     }
-                    with_io_timeout("写入容器 Shell", input.write_all(command.as_bytes())).await?;
-                    with_io_timeout("刷新容器 Shell", input.flush()).await?;
+                    with_io_timeout(
+                        &t!("engine.action.write_shell"),
+                        input.write_all(command.as_bytes()),
+                    )
+                    .await?;
+                    with_io_timeout(&t!("engine.action.flush_shell"), input.flush()).await?;
                 }
-                with_io_timeout("关闭容器 Shell", input.write_all(b"\nexit\n")).await?;
-                with_io_timeout("关闭容器 Shell", input.shutdown()).await
+                with_io_timeout(
+                    &t!("engine.action.close_shell"),
+                    input.write_all(b"\nexit\n"),
+                )
+                .await?;
+                with_io_timeout(&t!("engine.action.close_shell"), input.shutdown()).await
             };
             let reader = async {
                 // stdout and stderr can interleave between bytes of one character.
                 let mut stdout = Utf8Decoder::default();
                 let mut stderr = Utf8Decoder::default();
                 while let Some(frame) = output.next().await {
-                    let frame =
-                        frame.map_err(|error| EngineError::operation("读取容器 Shell", error))?;
+                    let frame = frame.map_err(|error| {
+                        EngineError::operation(t!("engine.action.read_shell"), error)
+                    })?;
                     let (decoder, bytes) = match &frame {
                         LogOutput::StdErr { message } => (&mut stderr, message),
                         LogOutput::StdOut { message } | LogOutput::Console { message } => {
@@ -200,7 +216,7 @@ pub(super) async fn open_shell(client: &Docker, id: &str) -> Result<ContainerShe
                         continue;
                     }
                     if let Err(error) = with_timeout(
-                        "调整容器 Shell 大小",
+                        &t!("engine.action.resize_shell"),
                         REQUEST_TIMEOUT,
                         client.resize_exec(&created.id, shell_resize_options(rows, cols)),
                     )
@@ -223,7 +239,7 @@ pub(super) async fn open_shell(client: &Docker, id: &str) -> Result<ContainerShe
                         Ok(()) => match timeout(REQUEST_TIMEOUT, &mut reader).await {
                             Ok(result) => result,
                             Err(_) => Err(EngineError::Timeout {
-                                action: "等待容器 Shell 退出".into(),
+                                action: t!("engine.action.wait_shell_exit").into_owned(),
                                 seconds: REQUEST_TIMEOUT.as_secs(),
                             }),
                         },
@@ -237,17 +253,23 @@ pub(super) async fn open_shell(client: &Docker, id: &str) -> Result<ContainerShe
         // All IO/resize futures belong to this task; abort/drop cannot leave
         // an independently spawned writer, reader or resizer behind.
         match result {
-            Ok(()) => match exec_exit_code(&client, &created.id, "检查容器 Shell 退出状态").await
-            {
-                Ok(code) => {
-                    let _ = output_tx
-                        .send(format!("\n[rusker: Shell 已退出，退出码 {code}]\n"))
-                        .await;
+            Ok(()) => {
+                match exec_exit_code(&client, &created.id, &t!("engine.action.check_shell_exit"))
+                    .await
+                {
+                    Ok(code) => {
+                        let _ = output_tx
+                            .send(format!(
+                                "\n[rusker: {}]\n",
+                                t!("engine.error.shell_exited", code = code)
+                            ))
+                            .await;
+                    }
+                    Err(error) => {
+                        let _ = output_tx.send(format!("\n[rusker: {error}]\n")).await;
+                    }
                 }
-                Err(error) => {
-                    let _ = output_tx.send(format!("\n[rusker: {error}]\n")).await;
-                }
-            },
+            }
             Err(error) => {
                 let _ = output_tx.send(format!("\n[rusker: {error}]\n")).await;
             }
@@ -302,10 +324,12 @@ fn attach_options() -> StartExecOptions {
 
 async fn send_text(output: &mpsc::Sender<String>, text: String) -> Result<(), EngineError> {
     if !text.is_empty() {
-        output
-            .send(text)
-            .await
-            .map_err(|_| EngineError::operation("读取容器 Shell", "输出通道已关闭"))?;
+        output.send(text).await.map_err(|_| {
+            EngineError::operation(
+                t!("engine.action.read_shell"),
+                t!("engine.error.output_channel_closed"),
+            )
+        })?;
     }
     Ok(())
 }
@@ -317,7 +341,7 @@ async fn with_io_timeout<T>(
     match timeout(REQUEST_TIMEOUT, future).await {
         Ok(result) => result.map_err(|error| EngineError::operation(action, error)),
         Err(_) => Err(EngineError::Timeout {
-            action: action.into(),
+            action: action.to_string(),
             seconds: REQUEST_TIMEOUT.as_secs(),
         }),
     }
@@ -334,11 +358,16 @@ async fn exec_exit_code(client: &Docker, id: &str, action: &str) -> Result<i64, 
             match state.running {
                 Some(true) => sleep(Duration::from_millis(25)).await,
                 Some(false) => {
-                    return state
-                        .exit_code
-                        .ok_or_else(|| EngineError::operation(action, "引擎未返回 exec 退出码"))
+                    return state.exit_code.ok_or_else(|| {
+                        EngineError::operation(action, t!("engine.error.no_exec_exit_code"))
+                    })
                 }
-                None => return Err(EngineError::operation(action, "引擎未返回 exec 运行状态")),
+                None => {
+                    return Err(EngineError::operation(
+                        action,
+                        t!("engine.error.no_exec_running_state"),
+                    ))
+                }
             }
         }
     })
@@ -358,8 +387,8 @@ pub(super) async fn list_directory(
     path: &str,
 ) -> Result<DirectoryListing, EngineError> {
     let _total = crate::diagnostics::PerfSpan::new("directory.total");
-    let action = "读取容器目录（需要 sh、find、stat、tr、head 和 xargs）";
-    let path = absolute_path(path).map_err(|error| EngineError::operation(action, error))?;
+    let action = t!("engine.action.read_container_directory").into_owned();
+    let path = absolute_path(path).map_err(|error| EngineError::operation(&action, error))?;
     let result = timeout(DIRECTORY_TIMEOUT, async {
         let create_span = crate::diagnostics::PerfSpan::new("directory.exec.create");
         let created = client
@@ -384,15 +413,18 @@ pub(super) async fn list_directory(
                 },
             )
             .await
-            .map_err(|error| EngineError::operation(action, error))?;
+            .map_err(|error| EngineError::operation(&action, error))?;
         drop(create_span);
         let start_span = crate::diagnostics::PerfSpan::new("directory.exec.start");
         let StartExecResults::Attached { mut output, input } = client
             .start_exec(&created.id, Some(attach_options()))
             .await
-            .map_err(|error| EngineError::operation(action, error))?
+            .map_err(|error| EngineError::operation(&action, error))?
         else {
-            return Err(EngineError::operation(action, "引擎未返回 attached IO"));
+            return Err(EngineError::operation(
+                &action,
+                t!("engine.error.no_attached_io"),
+            ));
         };
         drop(start_span);
         drop(input);
@@ -401,7 +433,7 @@ pub(super) async fn list_directory(
         let mut stderr = Vec::new();
         let mut output_bytes = 0usize;
         while let Some(frame) = output.next().await {
-            let frame = frame.map_err(|error| EngineError::operation(action, error))?;
+            let frame = frame.map_err(|error| EngineError::operation(&action, error))?;
             let (target, message) = match frame {
                 LogOutput::StdErr { message } => (&mut stderr, message),
                 LogOutput::StdOut { message } | LogOutput::Console { message } => {
@@ -410,41 +442,42 @@ pub(super) async fn list_directory(
                 LogOutput::StdIn { .. } => continue,
             };
             output_bytes = checked_output_size(output_bytes, message.len())
-                .map_err(|error| EngineError::operation(action, error))?;
+                .map_err(|error| EngineError::operation(&action, error))?;
             target.extend_from_slice(&message);
         }
         drop(output_span);
         let inspect_span = crate::diagnostics::PerfSpan::new("directory.exec.inspect");
-        let code = exec_exit_code(client, &created.id, action).await?;
+        let code = exec_exit_code(client, &created.id, &action).await?;
         drop(inspect_span);
         // POSIX sh has no pipefail. Any diagnostic is fatal, including stat or
         // xargs errors hidden by the final head. Never cache a partial success.
         if code != 0 || !stderr.is_empty() {
             return Err(EngineError::operation(
-                action,
-                format!(
-                    "exec 退出码 {code}：{}",
-                    crate::format::bound_logs(&String::from_utf8_lossy(&stderr))
+                &action,
+                t!(
+                    "engine.error.exec_exit_code",
+                    code = code,
+                    logs = crate::format::bound_logs(&String::from_utf8_lossy(&stderr))
                 ),
             ));
         }
-        parse_directory(&stdout).map_err(|error| EngineError::operation(action, error))
+        parse_directory(&stdout).map_err(|error| EngineError::operation(&action, error))
     })
     .await;
     match result {
         Ok(result) => result,
         Err(_) => Err(EngineError::Timeout {
-            action: action.into(),
+            action: action.clone(),
             seconds: DIRECTORY_TIMEOUT.as_secs(),
         }),
     }
 }
 
-fn checked_output_size(current: usize, extra: usize) -> Result<usize, &'static str> {
+fn checked_output_size(current: usize, extra: usize) -> Result<usize, String> {
     current
         .checked_add(extra)
         .filter(|size| *size <= MAX_DIRECTORY_OUTPUT)
-        .ok_or("目录输出超过 8 MiB 上限")
+        .ok_or_else(|| t!("engine.error.directory_output_limit").into_owned())
 }
 
 /// Validate a container POSIX path independently of the host OS. Do not
@@ -454,7 +487,7 @@ fn absolute_path(path: &str) -> Result<String, String> {
         || path.contains('\0')
         || path.split('/').any(|part| part == "." || part == "..")
     {
-        return Err("容器路径必须是绝对路径，且不能包含 NUL、. 或 .. 路径段".into());
+        return Err(t!("engine.error.invalid_container_path").into_owned());
     }
     let parts: Vec<_> = path.split('/').filter(|part| !part.is_empty()).collect();
     Ok(format!("/{}", parts.join("/")))
@@ -462,13 +495,13 @@ fn absolute_path(path: &str) -> Result<String, String> {
 
 fn parse_directory(bytes: &[u8]) -> Result<DirectoryListing, String> {
     let _parse = crate::diagnostics::PerfSpan::new("directory.parse");
-    checked_output_size(0, bytes.len()).map_err(str::to_string)?;
+    checked_output_size(0, bytes.len())?;
     let mut listing = DirectoryListing::default();
     if bytes.is_empty() {
         return Ok(listing);
     }
     if !bytes.ends_with(&[0]) {
-        return Err("目录输出被截断（缺少 NUL 记录结束符）".into());
+        return Err(t!("engine.error.directory_output_truncated").into_owned());
     }
     for record in bytes[..bytes.len() - 1].split(|byte| *byte == 0) {
         if listing.entries.len() == MAX_DIRECTORY_ENTRIES {
@@ -476,24 +509,30 @@ fn parse_directory(bytes: &[u8]) -> Result<DirectoryListing, String> {
             break;
         }
         let text = std::str::from_utf8(record)
-            .map_err(|_| "目录包含非 UTF-8 文件名，无法表示为 VolumeEntry".to_string())?;
-        let (metadata, name) = text.split_once('\n').ok_or("无效的 stat 元数据")?;
+            .map_err(|_| t!("engine.error.non_utf8_filename").into_owned())?;
+        let (metadata, name) = text
+            .split_once('\n')
+            .ok_or_else(|| t!("engine.error.invalid_stat_metadata").into_owned())?;
         let fields: Vec<_> = metadata.split('|').collect();
         if fields.len() != 4 {
-            return Err("无效的 stat 元数据字段".into());
+            return Err(t!("engine.error.invalid_stat_fields").into_owned());
         }
         let name = name
             .strip_prefix("./")
             .filter(|name| !name.is_empty() && !name.contains('/') && *name != "." && *name != "..")
-            .ok_or("无效的目录项名称")?;
+            .ok_or_else(|| t!("engine.error.invalid_entry_name").into_owned())?;
         let kind = match fields[0] {
             "directory" => VolumeEntryKind::Directory,
             "regular file" | "regular empty file" => VolumeEntryKind::File,
             "symbolic link" => VolumeEntryKind::Symlink,
             _ => VolumeEntryKind::Other,
         };
-        let size = fields[1].parse::<u64>().map_err(|_| "无效的文件大小")?;
-        let modified = fields[2].parse::<i64>().map_err(|_| "无效的修改时间")?;
+        let size = fields[1]
+            .parse::<u64>()
+            .map_err(|_| t!("engine.error.invalid_file_size").into_owned())?;
+        let modified = fields[2]
+            .parse::<i64>()
+            .map_err(|_| t!("engine.error.invalid_modified_time").into_owned())?;
         listing.entries.push(VolumeEntry {
             name: name.into(),
             // No recursive directory sizing (du); zero means unmeasured.
@@ -516,7 +555,7 @@ fn parse_directory(bytes: &[u8]) -> Result<DirectoryListing, String> {
 pub(super) async fn sample_all(client: &Docker) -> Result<ContainerStatsBatch, EngineError> {
     use bollard::query_parameters::ListContainersOptionsBuilder;
     let mut containers = with_timeout(
-        "读取统计采样容器列表",
+        &t!("engine.action.list_stats_containers"),
         REQUEST_TIMEOUT,
         client.list_containers(Some(
             ListContainersOptionsBuilder::default().all(true).build(),
@@ -554,7 +593,7 @@ pub(super) async fn sample_all(client: &Docker) -> Result<ContainerStatsBatch, E
 }
 
 pub(super) async fn stats(client: &Docker, id: &str) -> Result<ContainerStats, EngineError> {
-    let action = "读取容器资源统计";
+    let action = t!("engine.action.read_container_stats").into_owned();
     // one_shot=true skips the previous sample and breaks CPU delta calculation.
     let options = StatsOptionsBuilder::default()
         .stream(false)
@@ -564,10 +603,13 @@ pub(super) async fn stats(client: &Docker, id: &str) -> Result<ContainerStats, E
     tokio::pin!(stream);
     match timeout(REQUEST_TIMEOUT, stream.next()).await {
         Ok(Some(Ok(sample))) => Ok(stats_from_sample(&sample)),
-        Ok(Some(Err(error))) => Err(EngineError::operation(action, error)),
-        Ok(None) => Err(EngineError::operation(action, "引擎未返回统计采样")),
+        Ok(Some(Err(error))) => Err(EngineError::operation(&action, error)),
+        Ok(None) => Err(EngineError::operation(
+            &action,
+            t!("engine.error.no_stats_sample"),
+        )),
         Err(_) => Err(EngineError::Timeout {
-            action: action.into(),
+            action,
             seconds: REQUEST_TIMEOUT.as_secs(),
         }),
     }
@@ -840,7 +882,7 @@ for tool in find stat tr head xargs; do ln -s "$busybox" "$root/tools/$tool"; do
 PATH="$root/tools:$PATH"
 "#
         } else {
-            ""
+            "stat -c '%F|%s|%Y|%A' . >/dev/null 2>&1 || exit 77"
         };
         let script = format!(
             r#"set -eu
@@ -869,7 +911,7 @@ list_directory "$root/data" {limit} {output_limit}
             .unwrap();
         let output = child.wait_with_output().unwrap();
         if output.status.code() == Some(77) {
-            eprintln!("BusyBox not installed; script test skipped");
+            eprintln!("Compatible GNU/BusyBox tools not installed; script test skipped");
             return None;
         }
         Some(output)
@@ -964,6 +1006,10 @@ trap 'lines=$(wc -l < "$root/batches"); [ "$lines" -le 40 ] || printf "too many 
             let output = run_directory_fixture(busybox, ": > \"$root/data/file\"", 10, 7).unwrap();
             assert_eq!(output.stdout.len(), 7);
             assert!(parse_directory(&output.stdout).is_err());
+            let output = run_directory_fixture(busybox, ":", 10, 1000).unwrap();
+            assert!(output.status.success(), "{:?}", output);
+            assert!(output.stderr.is_empty(), "{:?}", output);
+            assert!(output.stdout.is_empty(), "{:?}", output);
             let output = run_directory_fixture(busybox, "rmdir \"$root/data\"", 10, 1000).unwrap();
             assert!(!output.status.success());
         }

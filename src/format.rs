@@ -46,12 +46,12 @@ pub fn format_relative(timestamp: i64, now: i64) -> String {
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;
     match seconds {
-        s if s < MINUTE => "刚刚".into(),
-        s if s < HOUR => format!("{} 分钟前", s / MINUTE),
-        s if s < DAY => format!("{} 小时前", s / HOUR),
-        s if s < 30 * DAY => format!("{} 天前", s / DAY),
-        s if s < 365 * DAY => format!("{} 个月前", s / (30 * DAY)),
-        s => format!("{} 年前", s / (365 * DAY)),
+        s if s < MINUTE => t!("format.just_now").into_owned(),
+        s if s < HOUR => t!("format.minutes_ago", count = s / MINUTE).into_owned(),
+        s if s < DAY => t!("format.hours_ago", count = s / HOUR).into_owned(),
+        s if s < 30 * DAY => t!("format.days_ago", count = s / DAY).into_owned(),
+        s if s < 365 * DAY => t!("format.months_ago", count = s / (30 * DAY)).into_owned(),
+        s => t!("format.years_ago", count = s / (365 * DAY)).into_owned(),
     }
 }
 
@@ -152,7 +152,7 @@ pub fn bound_logs(logs: &str) -> String {
     while !logs.is_char_boundary(start) {
         start += 1;
     }
-    format!("… 较早日志已截断 …\n{}", &logs[start..])
+    format!("{}\n{}", t!("format.logs_truncated"), &logs[start..])
 }
 
 #[cfg(test)]
@@ -257,7 +257,7 @@ mod tests {
     fn logs_are_bounded_without_splitting_utf8() {
         let logs = "测".repeat(MAX_LOG_BYTES);
         let bounded = bound_logs(&logs);
-        assert!(bounded.starts_with("… 较早日志已截断 …\n"));
+        assert!(bounded.starts_with("... Earlier logs truncated ...\n"));
         assert!(bounded.len() <= MAX_LOG_BYTES + 64);
         assert_eq!(bound_logs("a\0b"), "a�b");
     }
@@ -266,13 +266,13 @@ mod tests {
     fn formats_relative_ages() {
         let now = 1_000_000_000;
         assert_eq!(format_relative(0, now), "—");
-        assert_eq!(format_relative(now - 5, now), "刚刚");
-        assert_eq!(format_relative(now + 100, now), "刚刚");
-        assert_eq!(format_relative(now - 3 * 60, now), "3 分钟前");
-        assert_eq!(format_relative(now - 3 * 3600, now), "3 小时前");
-        assert_eq!(format_relative(now - 3 * 86400, now), "3 天前");
-        assert_eq!(format_relative(now - 65 * 86400, now), "2 个月前");
-        assert_eq!(format_relative(now - 800 * 86400, now), "2 年前");
+        assert_eq!(format_relative(now - 5, now), "Just now");
+        assert_eq!(format_relative(now + 100, now), "Just now");
+        assert_eq!(format_relative(now - 3 * 60, now), "3 minutes ago");
+        assert_eq!(format_relative(now - 3 * 3600, now), "3 hours ago");
+        assert_eq!(format_relative(now - 3 * 86400, now), "3 days ago");
+        assert_eq!(format_relative(now - 65 * 86400, now), "2 months ago");
+        assert_eq!(format_relative(now - 800 * 86400, now), "2 years ago");
     }
 
     #[test]

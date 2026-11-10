@@ -78,11 +78,15 @@ pub fn use_rusker_context(config_path: &Path, host: &str) -> Result<(), String> 
         "Metadata": { "Description": "Rusker Desktop", PREVIOUS_KEY: previous },
         "Endpoints": { "docker": { "Host": host, "SkipTLSVerify": false } },
     });
-    write_json(&meta_path, &meta, "Docker 上下文")?;
+    write_json(&meta_path, &meta, &t!("docker_context.what.context"))?;
 
     if document.get("currentContext").and_then(Value::as_str) != Some(RUSKER_CONTEXT) {
         document.insert("currentContext".into(), RUSKER_CONTEXT.into());
-        write_json(config_path, &Value::Object(document), "Docker 客户端配置")?;
+        write_json(
+            config_path,
+            &Value::Object(document),
+            &t!("docker_context.what.client_config"),
+        )?;
     }
     Ok(())
 }
@@ -99,7 +103,11 @@ pub fn restore_previous_context(config_path: &Path) -> Result<String, String> {
     } else {
         document.insert("currentContext".into(), previous.clone().into());
     }
-    write_json(config_path, &Value::Object(document), "Docker 客户端配置")?;
+    write_json(
+        config_path,
+        &Value::Object(document),
+        &t!("docker_context.what.client_config"),
+    )?;
     Ok(previous)
 }
 
@@ -130,9 +138,13 @@ fn previous_context(config_path: &Path) -> String {
 
 /// `contexts/meta/<sha256 hex of name>/meta.json` beside `config.json`.
 fn context_meta_path(config_path: &Path, name: &str) -> Result<PathBuf, String> {
-    let directory = config_path
-        .parent()
-        .ok_or_else(|| format!("无法确定 {} 所在目录", config_path.display()))?;
+    let directory = config_path.parent().ok_or_else(|| {
+        t!(
+            "docker_context.error.no_parent_dir",
+            path = config_path.display()
+        )
+        .into_owned()
+    })?;
     let digest: String = Sha256::digest(name.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -158,26 +170,56 @@ fn read_config(path: &Path) -> Result<Map<String, Value>, String> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(format!("读取 {} 失败：{error}", path.display())),
+        Err(error) => {
+            return Err(t!(
+                "docker_context.error.read_failed",
+                path = path.display(),
+                error = error
+            )
+            .into_owned())
+        }
     };
     if content.trim().is_empty() {
         return Ok(Map::new());
     }
     match serde_json::from_str::<Value>(&content) {
         Ok(Value::Object(map)) => Ok(map),
-        Ok(_) => Err(format!("{} 不是 JSON 对象，未修改", path.display())),
-        Err(error) => Err(format!("{} 格式无效，未修改：{error}", path.display())),
+        Ok(_) => Err(t!(
+            "docker_context.error.not_json_object",
+            path = path.display()
+        )
+        .into_owned()),
+        Err(error) => Err(t!(
+            "docker_context.error.invalid_json",
+            path = path.display(),
+            error = error
+        )
+        .into_owned()),
     }
 }
 
 fn write_json(path: &Path, value: &Value, what: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("创建{what}目录 {} 失败：{error}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            t!(
+                "docker_context.error.create_dir_failed",
+                what = what,
+                path = parent.display(),
+                error = error
+            )
+            .into_owned()
+        })?;
     }
     let formatted = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
-    fs::write(path, format!("{formatted}\n"))
-        .map_err(|error| format!("写入{what} {} 失败：{error}", path.display()))
+    fs::write(path, format!("{formatted}\n")).map_err(|error| {
+        t!(
+            "docker_context.error.write_failed",
+            what = what,
+            path = path.display(),
+            error = error
+        )
+        .into_owned()
+    })
 }
 
 #[cfg(test)]

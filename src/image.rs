@@ -53,12 +53,12 @@ pub enum ImageFilter {
 impl ImageFilter {
     pub const ALL: [Self; 4] = [Self::All, Self::InUse, Self::Unused, Self::Dangling];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::All => "全部镜像",
-            Self::InUse => "使用中",
-            Self::Unused => "未使用",
-            Self::Dangling => "悬空（无标签）",
+            Self::All => t!("image.filter.all"),
+            Self::InUse => t!("image.filter.in_use"),
+            Self::Unused => t!("image.filter.unused"),
+            Self::Dangling => t!("image.filter.dangling"),
         }
     }
 

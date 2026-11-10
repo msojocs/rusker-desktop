@@ -67,13 +67,13 @@ impl RuskerApp {
             || self.quitting
     }
 
-    fn desktop_import_unavailable(&self) -> Option<&'static str> {
+    fn desktop_import_unavailable(&self) -> Option<String> {
         if !self.manages_engine() {
-            Some("仅支持导入到 Rusker 管理的 Engine；请取消 DOCKER_HOST 后重新启动 Rusker。")
+            Some(t!("desktop_import.unavailable.not_managed").into_owned())
         } else if !self.connected {
-            Some("目标 Engine 尚未连接。可以先扫描来源；连接 Rusker Engine 后才能导入。")
+            Some(t!("desktop_import.unavailable.not_connected").into_owned())
         } else if self.desktop_import_conflict() {
-            Some("扫描、导入或其他操作正在进行，请等待完成后再导入。")
+            Some(t!("desktop_import.unavailable.busy").into_owned())
         } else {
             None
         }
@@ -84,10 +84,13 @@ impl RuskerApp {
             return Some(reason.clone());
         }
         if !matches!(container.state.as_str(), "created" | "exited") {
-            return Some(format!(
-                "请先在 {} 中停止此容器，再重新扫描。",
-                self.desktop_import.source.label()
-            ));
+            return Some(
+                t!(
+                    "desktop_import.blocked.stop_first",
+                    source = self.desktop_import.source.label()
+                )
+                .into_owned(),
+            );
         }
         if self.connected
             && self
@@ -96,7 +99,7 @@ impl RuskerApp {
                 .iter()
                 .any(|target| target.name == container.name)
         {
-            return Some("目标 Engine 已有同名容器，不会覆盖；请先处理名称冲突。".into());
+            return Some(t!("desktop_import.blocked.name_conflict").into_owned());
         }
         None
     }
@@ -119,7 +122,8 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.desktop_import.error = Some("容器引擎服务不可用，请重启 Rusker".into());
+            self.desktop_import.error =
+                Some(t!("desktop_import.error.engine_unavailable").into_owned());
             cx.notify();
             return;
         };
@@ -140,11 +144,15 @@ impl RuskerApp {
                         this.desktop_import.scanned = true;
                     }
                     Err(error) => {
-                        this.desktop_import.error = Some(format!(
-                            "扫描 {} 失败：{error}。{}。",
-                            source.label(),
-                            source.connection_hint()
-                        ));
+                        this.desktop_import.error = Some(
+                            t!(
+                                "desktop_import.error.scan_failed",
+                                source = source.label(),
+                                error = error,
+                                hint = desktop_source_hint(source)
+                            )
+                            .into_owned(),
+                        );
                     }
                 }
                 cx.notify();
@@ -170,10 +178,13 @@ impl RuskerApp {
             .collect::<Vec<_>>()
             .join("\n");
         let source = self.desktop_import.source;
-        let title = format!("导入 {} 个 {} 容器？", ids.len(), source.label());
-        let description = format!(
-            "{names}\n\n将复制容器 rootfs、配置及本地卷数据到 Rusker，可能耗时较长。目标磁盘和用于 rootfs 临时归档的系统盘均需足够空间。文件系统镜像会被扁平化，不保留原镜像分层历史。\n\n源容器必须保持停止，源容器与原卷数据不会被修改；卷复制会创建并清理只读辅助容器，可能准备 busybox 镜像。正在被其他运行中容器使用的源卷会阻止导入。同批共享源卷映射为同一个新卷。\n\n不会覆盖目标同名容器，新容器不会自动启动。bind 目录、自定义网络或容器依赖不受支持，会阻止导入。导入期间不能退出 Rusker、修改目标 Engine 或应用设置。"
-        );
+        let title = t!(
+            "desktop_import.confirm.title",
+            count = ids.len(),
+            source = source.label()
+        )
+        .into_owned();
+        let description = t!("desktop_import.confirm.description", names = names).into_owned();
         let weak = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, cx| {
             let ids = ids.clone();
@@ -182,9 +193,13 @@ impl RuskerApp {
                 .title(title.clone())
                 .description(description.clone())
                 .confirm()
-                .ok_text("确认导入")
-                .cancel_text("取消")
-                .footer(confirmation_footer("确认导入", ButtonVariant::Primary, cx))
+                .ok_text(t!("desktop_import.confirm.ok"))
+                .cancel_text(t!("desktop_import.confirm.cancel"))
+                .footer(confirmation_footer(
+                    t!("desktop_import.confirm.ok"),
+                    ButtonVariant::Primary,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     _ = weak.update(cx, |this, cx| {
                         this.start_desktop_import(source, ids.clone(), cx)
@@ -201,20 +216,22 @@ impl RuskerApp {
         cx: &mut Context<Self>,
     ) {
         if source != self.desktop_import.source {
-            self.desktop_import.error = Some("导入来源已变化，请重新扫描并确认。".into());
+            self.desktop_import.error =
+                Some(t!("desktop_import.error.source_changed").into_owned());
             cx.notify();
             return;
         }
         // Recheck after the confirmation dialog: runtime/connection/selection
         // may have changed while it was open. The backend validates again too.
         if let Some(reason) = self.desktop_import_unavailable() {
-            self.desktop_import.error = Some(reason.into());
+            self.desktop_import.error = Some(reason);
             cx.notify();
             return;
         }
         let eligible = self.selected_desktop_containers();
         if ids.is_empty() || ids.iter().any(|id| !eligible.contains(id)) {
-            self.desktop_import.error = Some("所选容器状态已变化，请重新扫描并选择。".into());
+            self.desktop_import.error =
+                Some(t!("desktop_import.error.selection_changed").into_owned());
             cx.notify();
             return;
         }
@@ -226,8 +243,14 @@ impl RuskerApp {
         self.desktop_import.running = true;
         self.desktop_import.error = None;
         self.desktop_import.report = None;
-        self.desktop_import.progress = "正在准备导入…".into();
-        self.busy = Some(format!("正在从 {} 导入容器…", source.label()));
+        self.desktop_import.progress = t!("desktop_import.progress.preparing").into_owned();
+        self.busy = Some(
+            t!(
+                "desktop_import.progress.importing_from",
+                source = source.label()
+            )
+            .into_owned(),
+        );
         let (sender, mut receiver) = tokio::sync::watch::channel(String::new());
         let handle = engine.import_from_desktop(source, ids, sender);
         self.desktop_import.import_task = Some(cx.spawn(async move |this, cx| {
@@ -257,26 +280,34 @@ impl RuskerApp {
                 this.desktop_import.containers.clear();
                 match result {
                     Ok(report) => {
-                        let summary = format!(
-                            "导入完成：{} 项成功，{} 项失败",
-                            report.imported.len(),
-                            report.failures.len()
-                        );
+                        let summary = t!(
+                            "desktop_import.result.summary",
+                            succeeded = report.imported.len(),
+                            failed = report.failures.len()
+                        )
+                        .into_owned();
                         this.desktop_import.progress = summary.clone();
                         if report.failures.is_empty() {
                             this.notify_success(summary, cx);
                         } else {
-                            this.notify_error(format!("{summary}；请在设置中查看完整逐项结果"), cx);
+                            this.notify_error(
+                                t!("desktop_import.result.see_details", summary = summary),
+                                cx,
+                            );
                         }
                         this.desktop_import.report = Some(report);
                     }
                     Err(error) => {
-                        this.desktop_import.progress = "导入已结束".into();
-                        this.desktop_import.error = Some(format!(
-                            "导入失败：{error}。目标可能已有部分数据，请查看目标容器和卷后再重试。"
-                        ));
+                        this.desktop_import.progress =
+                            t!("desktop_import.progress.finished").into_owned();
+                        this.desktop_import.error = Some(
+                            t!("desktop_import.error.import_failed", error = error).into_owned(),
+                        );
                         this.notify_error(
-                            format!("{} 导入失败，请在设置中查看详情", source.label()),
+                            t!(
+                                "desktop_import.error.import_failed_short",
+                                source = source.label()
+                            ),
                             cx,
                         );
                     }
@@ -307,9 +338,9 @@ impl RuskerApp {
             .flex()
             .flex_col()
             .gap_4()
-            .child(muted("从 Docker Desktop 或 Rancher Desktop 的 Linux Engine 复制已停止的容器到 Rusker。扫描只读取源信息，不要求目标 Engine 已连接。", cx))
+            .child(muted(t!("desktop_import.intro"), cx))
             .child(div().flex().flex_wrap().items_center().gap_3()
-                .child(muted("导入来源", cx))
+                .child(muted(t!("desktop_import.source_label"), cx))
                 .children([DesktopImportSource::DockerDesktop, DesktopImportSource::RancherDesktop].into_iter().enumerate().map(|(index, source)| {
                     button(("desktop-import-source", index))
                         .outline()
@@ -317,38 +348,42 @@ impl RuskerApp {
                         .disabled(self.desktop_import_conflict())
                         .on_click(cx.listener(move |this, _, _, cx| this.select_desktop_source(source, cx)))
                 })))
-            .child(muted(state.source.connection_hint(), cx))
+            .child(muted(desktop_source_hint(state.source), cx))
             .child(callout(
                 CalloutKind::Warning,
-                "复制导入，不是迁移或同步",
-                muted("复制 rootfs、配置与本地卷；文件系统镜像会扁平化，不保留原镜像分层历史。源容器与原卷数据保持不变；卷复制会创建/清理只读辅助容器，可能准备 busybox 镜像。请为目标数据及系统盘上的 rootfs 临时归档预留空间。目标同名容器不会被覆盖，新容器保持停止。bind 目录、自定义网络、容器依赖，以及其他运行中容器正在使用的源卷会阻止导入。同批共享源卷映射到同一个新卷。导入期间保持源容器停止。", cx),
+                t!("desktop_import.callout.title"),
+                muted(t!("desktop_import.callout.body"), cx),
                 cx,
             ))
             .child(div().flex().flex_wrap().items_center().gap_3()
                 .child(button("scan-desktop-containers")
                     .outline()
                     .icon(IconName::RefreshCw)
-                    .label(if state.scanning { "扫描中…".to_string() } else { format!("扫描 {}", state.source.label()) })
+                    .label(if state.scanning {
+                        t!("desktop_import.action.scanning").into_owned()
+                    } else {
+                        t!("desktop_import.action.scan", source = state.source.label()).into_owned()
+                    })
                     .disabled(scan_blocked)
                     .pointer(!scan_blocked)
                     .on_click(cx.listener(|this, _, _, cx| this.scan_desktop_containers(cx))))
                 .child(button("import-desktop-containers")
                     .primary()
-                    .label(format!("导入所选（{}）", selected.len()))
+                    .label(t!("desktop_import.action.import_selected", count = selected.len()))
                     .disabled(import_blocked)
                     .pointer(!import_blocked)
                     .on_click(cx.listener(|this, _, window, cx| this.confirm_desktop_import(window, cx)))))
             .when_some(unavailable, |this, reason| this.child(muted(reason, cx)))
             .when(state.scanning, |this| this.child(div().flex().items_center().gap_2()
                 .child(self.loading_ring(px(16.), None))
-                .child(muted(format!("正在读取 {} 容器…", state.source.label()), cx))))
+                .child(muted(t!("desktop_import.progress.reading", source = state.source.label()), cx))))
             .when(state.scanned && state.containers.is_empty(), |this| {
-                this.child(muted(format!("{} 中没有容器。", state.source.label()), cx))
+                this.child(muted(t!("desktop_import.empty", source = state.source.label()), cx))
             })
             .when(!state.containers.is_empty(), |this| {
                 this.child(div().flex().flex_col().gap_3()
                     .child(Checkbox::new("check-all-desktop-containers")
-                        .label("全选可导入容器")
+                        .label(t!("desktop_import.select_all").into_owned())
                         .checked(all_checked)
                         .disabled(eligible.is_empty() || state.running || state.scanning)
                         .on_click(cx.listener(move |this, checked: &bool, _, cx| {
@@ -389,32 +424,46 @@ impl RuskerApp {
                                         }
                                         cx.notify();
                                     })))
-                                .child(muted(format!("镜像：{} · 状态：{}", container.image, container.state), cx))
-                                .child(muted(format!("源 ID：{}", container.id), cx))
+                                .child(muted(t!("desktop_import.container.meta", image = container.image, state = container.state), cx))
+                                .child(muted(t!("desktop_import.container.source_id", id = container.id), cx))
                                 .when_some(blocked, |this, reason| this.child(div().text_sm()
-                                    .text_color(cx.theme().warning).child(format!("不能导入：{reason}"))))
+                                    .text_color(cx.theme().warning).child(t!("desktop_import.container.blocked", reason = reason).to_string())))
                         })))))
             })
             .when(state.running, |this| this.child(div().flex().flex_col().gap_2()
                 .child(div().flex().items_center().gap_2()
                     .child(self.loading_ring(px(16.), None))
-                    .child("正在导入，请勿退出 Rusker 或启动源容器"))
+                    .child(t!("desktop_import.running.notice").to_string()))
                 .child(div().text_sm().child(state.progress.clone()))))
             .when_some(state.error.clone(), |this, error| this.child(div().text_sm()
                 .text_color(cx.theme().danger).child(error)))
             .when_some(state.report.as_ref(), |this, report| {
                 this.child(div().flex().flex_col().gap_3()
-                    .child(div().font_semibold().child(format!(
-                        "最近一次导入结果：{} 项成功，{} 项失败", report.imported.len(), report.failures.len()
-                    )))
-                    .child(muted("成功创建的容器不会自动启动；请到容器页检查后手动启动。以下为完整逐项结果，仅在本次会话保留。", cx))
+                    .child(div().font_semibold().child(
+                        t!(
+                            "desktop_import.report.title",
+                            succeeded = report.imported.len(),
+                            failed = report.failures.len()
+                        )
+                        .to_string(),
+                    ))
+                    .child(muted(t!("desktop_import.report.hint"), cx))
                     .child(div().on_scroll(|_, _, cx| cx.stop_propagation())
                         .child(div().id("desktop-import-results").max_h(px(400.)).overflow_y_scroll()
                         .flex().flex_col().gap_2()
                         .children(report.imported.iter().map(|item| div().text_sm()
-                            .text_color(cx.theme().success).child(format!("成功：{item}"))))
+                            .text_color(cx.theme().success).child(t!("desktop_import.report.success", item = item).to_string())))
                         .children(report.failures.iter().map(|item| div().text_sm()
-                            .text_color(cx.theme().danger).child(format!("失败：{item}")))))))
+                            .text_color(cx.theme().danger).child(t!("desktop_import.report.failure", item = item).to_string()))))))
             })
+    }
+}
+
+/// Localized connection hint for a desktop import source. The engine-side
+/// `connection_hint()` returns a fixed Chinese string; this maps to i18n keys.
+fn desktop_source_hint(source: DesktopImportSource) -> std::borrow::Cow<'static, str> {
+    match source {
+        DesktopImportSource::DockerDesktop => t!("desktop_import.hint.docker_desktop"),
+        DesktopImportSource::RancherDesktop => t!("desktop_import.hint.rancher_desktop"),
     }
 }

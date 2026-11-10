@@ -1,0 +1,52 @@
+_version: 2
+docker_context_ui.error.config_dir:
+  en: "Unable to determine the Docker client config directory"
+  zh-CN: "无法确定 Docker 客户端配置目录"
+docker_context_ui.error.switch_failed:
+  en: "Failed to switch Docker CLI context: %{error}"
+  zh-CN: "切换 Docker CLI 上下文失败：%{error}"
+docker_context_ui.error.restore_failed:
+  en: "Failed to switch Docker CLI context back: %{error}"
+  zh-CN: "切回 Docker CLI 上下文失败：%{error}"
+docker_context_ui.prompt.title:
+  en: "Switch Docker CLI to Rusker?"
+  zh-CN: "将 Docker CLI 切换到 Rusker？"
+docker_context_ui.prompt.description:
+  en: "Docker CLI currently uses the \"%{current}\" context, so docker commands will not connect to Rusker's Engine.\n\nSwitching creates and uses the \"%{context}\" context (%{host}). This affects all Docker CLI for the current Windows user, including docker.exe bundled with other software; you can run docker context use %{current} at any time to switch back."
+  zh-CN: "Docker CLI 当前使用“%{current}”上下文，docker 命令不会连接 Rusker 的 Engine。\n\n切换后将创建并使用“%{context}”上下文（%{host}）。这对当前 Windows 用户的所有 Docker CLI 生效，包括其他软件自带的 docker.exe；可随时执行 docker context use %{current} 切回。"
+docker_context_ui.prompt.dont_ask:
+  en: "Don't ask again"
+  zh-CN: "不再提示"
+docker_context_ui.prompt.later:
+  en: "Not now"
+  zh-CN: "暂不"
+docker_context_ui.prompt.switch:
+  en: "Switch"
+  zh-CN: "切换"
+docker_context_ui.notice.switched:
+  en: "Docker CLI switched to the \"%{context}\" context"
+  zh-CN: "Docker CLI 已切换到“%{context}”上下文"
+docker_context_ui.notice.restored:
+  en: "Docker CLI switched back to the \"%{context}\" context"
+  zh-CN: "Docker CLI 已切回“%{context}”上下文"
+docker_context_ui.status.loading:
+  en: "Reading…"
+  zh-CN: "读取中…"
+docker_context_ui.status.using_rusker:
+  en: "docker commands are using the \"%{context}\" context to connect to Rusker."
+  zh-CN: "docker 命令已使用“%{context}”上下文连接 Rusker。"
+docker_context_ui.status.using_other:
+  en: "docker commands currently use the \"%{current}\" context and will not connect to Rusker."
+  zh-CN: "docker 命令当前使用“%{current}”上下文，不会连接 Rusker。"
+docker_context_ui.status.overridden:
+  en: "The %{variable} environment variable determines which Engine docker commands connect to; switching the context will not take effect."
+  zh-CN: "环境变量 %{variable} 决定 docker 命令连接的 Engine，切换上下文不会生效。"
+docker_context_ui.setting.label:
+  en: "Docker CLI context"
+  zh-CN: "Docker CLI 上下文"
+docker_context_ui.action.switch_to:
+  en: "Switch to %{context}"
+  zh-CN: "切换到 %{context}"
+docker_context_ui.action.restore:
+  en: "Switch back to %{context}"
+  zh-CN: "切回 %{context}"

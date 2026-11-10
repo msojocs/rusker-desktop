@@ -1,0 +1,418 @@
+_version: 2
+engine.error.connect:
+  en: "Cannot connect to the container engine: %{detail}"
+  zh-CN: 无法连接容器引擎：%{detail}
+engine.error.timeout:
+  en: "%{action} timed out (%{seconds}s)"
+  zh-CN: "%{action}超时（%{seconds} 秒）"
+engine.error.operation:
+  en: "%{action} failed: %{message}"
+  zh-CN: "%{action}失败：%{message}"
+engine.error.runtime:
+  en: "Cannot create the background runtime: %{detail}"
+  zh-CN: "无法创建后台运行时：%{detail}"
+engine.error.task:
+  en: "The background task ended unexpectedly: %{detail}"
+  zh-CN: "后台任务异常结束：%{detail}"
+engine.error.connect_managed:
+  en: "Cannot connect to the Rusker WSL2 managed engine. Install and start the runtime in Settings: %{error}"
+  zh-CN: "无法连接 Rusker WSL2 受管 Engine，请在设置中安装并启动运行环境：%{error}"
+engine.error.new_container_cleaned:
+  en: "The new container has been cleaned up"
+  zh-CN: "新建容器已清理"
+engine.error.new_container_cleanup_failed:
+  en: "Failed to clean up the new container %{id}: %{error}"
+  zh-CN: "新建容器 %{id} 清理失败：%{error}"
+engine.error.with_cleanup:
+  en: "%{error}; %{cleanup}"
+  zh-CN: "%{error}；%{cleanup}"
+engine.error.unknown_engine_error:
+  en: "The engine returned an unknown error"
+  zh-CN: "引擎返回未知错误"
+engine.error.removed_incomplete_volume:
+  en: "Removed the incomplete volume %{target}"
+  zh-CN: "已删除未完成的卷 %{target}"
+engine.error.incomplete_volume_remove_failed:
+  en: "Failed to delete the incomplete volume %{target}: %{error}"
+  zh-CN: "未完成的卷 %{target} 删除失败：%{error}"
+engine.error.volume_directory_unavailable:
+  en: "The directory /%{relative} does not exist or cannot be accessed"
+  zh-CN: "目录 /%{relative} 不存在或无法访问"
+engine.error.cannot_read_file:
+  en: "Cannot read %{path}: %{error}"
+  zh-CN: "无法读取 %{path}：%{error}"
+engine.error.cannot_create_file:
+  en: "Cannot create %{path}: %{error}"
+  zh-CN: "无法创建 %{path}：%{error}"
+engine.error.export_write_failed:
+  en: "Failed to write the export file: %{error}"
+  zh-CN: "写入导出文件失败：%{error}"
+engine.error.cannot_save_file:
+  en: "Cannot save to %{path}: %{error}"
+  zh-CN: "无法保存到 %{path}：%{error}"
+engine.error.volume_exists:
+  en: "Volume %{name} already exists"
+  zh-CN: "卷 %{name} 已存在"
+engine.error.helper_image_pull_failed:
+  en: "Volume operations require the %{image} image and pulling it automatically failed: %{error}"
+  zh-CN: "卷操作需要 %{image} 镜像，自动拉取失败：%{error}"
+engine.error.helper_no_exit_status:
+  en: "The helper container did not return an exit status"
+  zh-CN: "辅助容器未返回退出状态"
+engine.error.helper_output_too_large:
+  en: "The helper container output is too large"
+  zh-CN: "辅助容器输出过大"
+engine.error.helper_exit_code:
+  en: "The helper container exited with code %{code}"
+  zh-CN: "辅助容器退出码 %{code}"
+engine.error.helper_exit_code_logs:
+  en: "The helper container exited with code %{code}: %{logs}"
+  zh-CN: "辅助容器退出码 %{code}：%{logs}"
+engine.error.no_attached_io:
+  en: "The engine did not return attached IO"
+  zh-CN: "引擎未返回 attached IO"
+engine.error.shell_start_exit:
+  en: "/bin/sh -i exited at startup with exit code %{code}"
+  zh-CN: "/bin/sh -i 启动退出，退出码 %{code}"
+engine.error.shell_input_too_large:
+  en: "A single input exceeds 64 KiB"
+  zh-CN: "单次输入超过 64 KiB"
+engine.error.shell_exited:
+  en: "Shell exited with code %{code}"
+  zh-CN: "Shell 已退出，退出码 %{code}"
+engine.error.output_channel_closed:
+  en: "The output channel is closed"
+  zh-CN: "输出通道已关闭"
+engine.error.no_exec_exit_code:
+  en: "The engine did not return an exec exit code"
+  zh-CN: "引擎未返回 exec 退出码"
+engine.error.no_exec_running_state:
+  en: "The engine did not return an exec running state"
+  zh-CN: "引擎未返回 exec 运行状态"
+engine.error.exec_exit_code:
+  en: "exec exited with code %{code}: %{logs}"
+  zh-CN: "exec 退出码 %{code}：%{logs}"
+engine.error.directory_output_limit:
+  en: "Directory output exceeds the 8 MiB limit"
+  zh-CN: "目录输出超过 8 MiB 上限"
+engine.error.invalid_container_path:
+  en: "The container path must be absolute and cannot contain NUL, ., or .. segments"
+  zh-CN: "容器路径必须是绝对路径，且不能包含 NUL、. 或 .. 路径段"
+engine.error.directory_output_truncated:
+  en: "Directory output is truncated (missing the NUL record terminator)"
+  zh-CN: "目录输出被截断（缺少 NUL 记录结束符）"
+engine.error.non_utf8_filename:
+  en: "The directory contains non-UTF-8 file names that cannot be represented as VolumeEntry"
+  zh-CN: "目录包含非 UTF-8 文件名，无法表示为 VolumeEntry"
+engine.error.invalid_stat_metadata:
+  en: "Invalid stat metadata"
+  zh-CN: "无效的 stat 元数据"
+engine.error.invalid_stat_fields:
+  en: "Invalid stat metadata fields"
+  zh-CN: "无效的 stat 元数据字段"
+engine.error.invalid_entry_name:
+  en: "Invalid directory entry name"
+  zh-CN: "无效的目录项名称"
+engine.error.invalid_file_size:
+  en: "Invalid file size"
+  zh-CN: "无效的文件大小"
+engine.error.invalid_modified_time:
+  en: "Invalid modification time"
+  zh-CN: "无效的修改时间"
+engine.error.no_stats_sample:
+  en: "The engine did not return a stats sample"
+  zh-CN: "引擎未返回统计采样"
+engine.info.local_engine:
+  en: "Local engine"
+  zh-CN: "本地引擎"
+engine.info.unknown:
+  en: "Unknown"
+  zh-CN: "未知"
+engine.info.unknown_image:
+  en: "Unknown image"
+  zh-CN: "未知镜像"
+engine.action.connect_engine:
+  en: "Connect to the container engine"
+  zh-CN: "连接容器引擎"
+engine.action.read_engine_version:
+  en: "Read the engine version"
+  zh-CN: "读取引擎版本"
+engine.action.read_engine_info:
+  en: "Read the engine information"
+  zh-CN: "读取引擎信息"
+engine.action.list_containers:
+  en: "List containers"
+  zh-CN: "读取容器列表"
+engine.action.list_images:
+  en: "List images"
+  zh-CN: "读取镜像列表"
+engine.action.list_volumes:
+  en: "List volumes"
+  zh-CN: "读取卷列表"
+engine.action.validate_container_config:
+  en: "Validate the container configuration"
+  zh-CN: "校验容器配置"
+engine.action.create_container:
+  en: "Create the container"
+  zh-CN: "创建容器"
+engine.action.start_new_container:
+  en: "Start the new container"
+  zh-CN: "启动新容器"
+engine.action.cleanup_new_container:
+  en: "Clean up the new container that did not start"
+  zh-CN: "清理未启动的新容器"
+engine.action.create_and_run_container:
+  en: "Create and run the container"
+  zh-CN: "创建并运行容器"
+engine.action.read_container_detail:
+  en: "Read the container details"
+  zh-CN: "读取容器详情"
+engine.action.format_container_detail:
+  en: "Format the container details"
+  zh-CN: "格式化容器详情"
+engine.action.read_container_logs:
+  en: "Read the container logs"
+  zh-CN: "读取容器日志"
+engine.action.read_image_detail:
+  en: "Read the image details"
+  zh-CN: "读取镜像详情"
+engine.action.read_image_history:
+  en: "Read the image history"
+  zh-CN: "读取镜像历史"
+engine.action.remove_image:
+  en: "Delete the image"
+  zh-CN: "删除镜像"
+engine.action.pull_image:
+  en: "Pull image %{reference}"
+  zh-CN: "拉取镜像 %{reference}"
+engine.action.pull_image_wait:
+  en: "Pull image %{reference}: the client is waiting for the container engine to respond"
+  zh-CN: "拉取镜像 %{reference}：客户端等待容器引擎响应"
+engine.action.volume_disk_usage:
+  en: "Measure volume sizes"
+  zh-CN: "统计卷大小"
+engine.action.create_volume:
+  en: "Create the volume"
+  zh-CN: "创建卷"
+engine.action.remove_volume:
+  en: "Delete volume %{name}"
+  zh-CN: "删除卷 %{name}"
+engine.action.clone_volume:
+  en: "Clone volume %{source}"
+  zh-CN: "克隆卷 %{source}"
+engine.action.empty_volume:
+  en: "Empty volume %{name}"
+  zh-CN: "清空卷 %{name}"
+engine.action.read_volume_content:
+  en: "Read the volume contents"
+  zh-CN: "读取卷内容"
+engine.action.import_volume:
+  en: "Import data into volume %{name}"
+  zh-CN: "导入数据到卷 %{name}"
+engine.action.export_volume:
+  en: "Export volume %{name}"
+  zh-CN: "导出卷 %{name}"
+engine.action.prepare_helper_image:
+  en: "Prepare the volume helper image"
+  zh-CN: "准备卷辅助镜像"
+engine.action.open_shell:
+  en: "Open the container shell (requires /bin/sh)"
+  zh-CN: "打开容器 Shell（需要 /bin/sh）"
+engine.action.write_shell:
+  en: "Write to the container shell"
+  zh-CN: "写入容器 Shell"
+engine.action.flush_shell:
+  en: "Flush the container shell"
+  zh-CN: "刷新容器 Shell"
+engine.action.close_shell:
+  en: "Close the container shell"
+  zh-CN: "关闭容器 Shell"
+engine.action.read_shell:
+  en: "Read the container shell"
+  zh-CN: "读取容器 Shell"
+engine.action.resize_shell:
+  en: "Resize the container shell"
+  zh-CN: "调整容器 Shell 大小"
+engine.action.wait_shell_exit:
+  en: "Wait for the container shell to exit"
+  zh-CN: "等待容器 Shell 退出"
+engine.action.check_shell_exit:
+  en: "Check the container shell exit status"
+  zh-CN: "检查容器 Shell 退出状态"
+engine.action.read_container_directory:
+  en: "Read the container directory (requires sh, find, stat, tr, head, and xargs)"
+  zh-CN: "读取容器目录（需要 sh、find、stat、tr、head 和 xargs）"
+engine.action.list_stats_containers:
+  en: "List containers for stats sampling"
+  zh-CN: "读取统计采样容器列表"
+engine.action.read_container_stats:
+  en: "Read the container resource stats"
+  zh-CN: "读取容器资源统计"
+engine.desktop.hint_docker_desktop:
+  en: "Start Docker Desktop and switch to Linux containers first"
+  zh-CN: "请先启动 Docker Desktop 并切换到 Linux 容器"
+engine.desktop.hint_rancher_desktop:
+  en: "Start Rancher Desktop and select dockerd (moby) first; the containerd/nerdctl backend is not supported"
+  zh-CN: "请先启动 Rancher Desktop 并选择 dockerd (moby)；不支持 containerd/nerdctl 后端"
+engine.desktop.connect_source:
+  en: "Connect to %{source} (%{hint})"
+  zh-CN: "连接 %{source}（%{hint}）"
+engine.desktop.connect_source_plain:
+  en: "Connect to %{source}"
+  zh-CN: "连接 %{source}"
+engine.desktop.windows_only:
+  en: "Only the Linux container backend on Windows is currently supported"
+  zh-CN: "目前仅支持 Windows 的 Linux 容器后端"
+engine.desktop.verify_rancher_identity:
+  en: "Verify the Rancher Desktop engine identity"
+  zh-CN: "验证 Rancher Desktop 引擎身份"
+engine.desktop.verify_rancher_pipe:
+  en: "Verify the Rancher Desktop pipe"
+  zh-CN: "验证 Rancher Desktop 管道"
+engine.desktop.hint_with_stderr:
+  en: "%{hint}; %{stderr}"
+  zh-CN: "%{hint}；%{stderr}"
+engine.desktop.scan_source_containers:
+  en: "Scan containers on the source engine"
+  zh-CN: "扫描源引擎容器"
+engine.desktop.read_source_container_config:
+  en: "Read the source container configuration"
+  zh-CN: "读取源容器配置"
+engine.desktop.import_desktop_containers:
+  en: "Import desktop engine containers"
+  zh-CN: "导入桌面引擎容器"
+engine.desktop.target_must_be_managed:
+  en: "The target must be the Rusker managed engine; remove the DOCKER_HOST override"
+  zh-CN: "目标必须是 Rusker 受管 Engine，请取消 DOCKER_HOST 覆盖"
+engine.desktop.check_source_engine:
+  en: "Check the source engine"
+  zh-CN: "检查源引擎"
+engine.desktop.check_target_engine:
+  en: "Check the target engine"
+  zh-CN: "检查目标引擎"
+engine.desktop.same_engine:
+  en: "The source and target engines are the same, or the source engine identity cannot be confirmed"
+  zh-CN: "源与目标引擎相同或无法确认源引擎身份"
+engine.desktop.prepare_scratch:
+  en: "Prepare a temporary import directory"
+  zh-CN: "准备导入临时目录"
+engine.desktop.importing_progress:
+  en: "Importing %{index}/%{total}: %{id}"
+  zh-CN: "正在导入 %{index}/%{total}：%{id}"
+engine.desktop.id_detail:
+  en: "%{id}: %{error}"
+  zh-CN: "%{id}：%{error}"
+engine.desktop.leftover_volume_cleanup_failed:
+  en: "; failed to clean up the leftover volume %{target}: %{error}"
+  zh-CN: "；残留卷 %{target} 清理失败：%{error}"
+engine.desktop.interrupted_hint:
+  en: "; if the transfer was interrupted, check the target container and the imported image %{image}"
+  zh-CN: "；如传输中断，请检查目标容器及导入镜像 %{image}"
+engine.desktop.read_source_container:
+  en: "Read the source container"
+  zh-CN: "读取源容器"
+engine.desktop.import_container:
+  en: "Import the container"
+  zh-CN: "导入容器"
+engine.desktop.source_container_unnamed:
+  en: "The source container has no name"
+  zh-CN: "源容器没有名称"
+engine.desktop.check_target_container_name:
+  en: "Check the target container name"
+  zh-CN: "检查目标容器名称"
+engine.desktop.target_container_exists:
+  en: "The target container %{name} already exists and will not be overwritten"
+  zh-CN: "目标容器 %{name} 已存在，不会覆盖"
+engine.desktop.check_source_volume:
+  en: "Check the source volume"
+  zh-CN: "检查源卷"
+engine.desktop.import_volume:
+  en: "Import the volume"
+  zh-CN: "导入卷"
+engine.desktop.volume_not_plain_local:
+  en: "Volume %{name} is not a plain local volume and cannot be copied safely"
+  zh-CN: "卷 %{name} 不是普通本地卷，无法安全复制"
+engine.desktop.copy_volume_progress:
+  en: "%{name}: copying data volume %{volume}"
+  zh-CN: "%{name}：复制数据卷 %{volume}"
+engine.desktop.cleanup_temp_volume_archive:
+  en: "Clean up the temporary volume archive"
+  zh-CN: "清理临时卷归档"
+engine.desktop.copy_rootfs_progress:
+  en: "%{name}: copying the container filesystem (excluding image history)"
+  zh-CN: "%{name}：复制容器文件系统（不包含镜像历史）"
+engine.desktop.create_temp_archive:
+  en: "Create a temporary archive"
+  zh-CN: "创建临时归档"
+engine.desktop.export_container_fs:
+  en: "Export the container filesystem"
+  zh-CN: "导出容器文件系统"
+engine.desktop.write_temp_archive:
+  en: "Write to the temporary archive"
+  zh-CN: "写入临时归档"
+engine.desktop.read_source_image_platform:
+  en: "Read the source image platform"
+  zh-CN: "读取源镜像平台"
+engine.desktop.read_temp_archive:
+  en: "Read the temporary archive"
+  zh-CN: "读取临时归档"
+engine.desktop.import_fs_image:
+  en: "Import the filesystem image"
+  zh-CN: "导入文件系统镜像"
+engine.desktop.cleanup_temp_container_archive:
+  en: "Clean up the temporary container archive"
+  zh-CN: "清理临时容器归档"
+engine.desktop.recheck_source_state:
+  en: "Recheck the source container state"
+  zh-CN: "复核源容器状态"
+engine.desktop.create_target_progress:
+  en: "%{name}: creating the target container (kept stopped)"
+  zh-CN: "%{name}：创建目标容器（保持停止）"
+engine.desktop.create_imported_container:
+  en: "Create the imported container"
+  zh-CN: "创建导入容器"
+engine.desktop.check_source_volume_usage:
+  en: "Check source volume usage"
+  zh-CN: "检查源卷使用状态"
+engine.desktop.volume_in_use:
+  en: "Volume %{name} is still used by running source containers; stop all of them first"
+  zh-CN: "卷 %{name} 仍被运行中的源容器使用，请先停止所有使用者"
+engine.desktop.rancher_identity_mismatch:
+  en: "The docker_engine pipe does not belong to Rancher Desktop or its identity cannot be confirmed; close other desktop engines using the pipe and make sure Rancher Desktop uses dockerd (moby)"
+  zh-CN: "docker_engine 管道不属于 Rancher Desktop 或无法确认身份；请关闭占用管道的其他桌面引擎，并确认 Rancher Desktop 使用 dockerd (moby)"
+engine.desktop.import_source_container:
+  en: "Import the source container"
+  zh-CN: "导入源容器"
+engine.desktop.stop_source_first:
+  en: "Stop the container in the source desktop engine first, then scan again"
+  zh-CN: "请先在源桌面引擎中停止容器，再重新扫描"
+engine.desktop.linux_only:
+  en: "Only Linux containers are currently supported"
+  zh-CN: "目前仅支持 Linux 容器"
+engine.desktop.missing_container_config:
+  en: "The container configuration is missing"
+  zh-CN: "缺少容器配置"
+engine.desktop.unsupported_mounts:
+  en: "It contains host bind directories or unsupported mounts; migrate it manually and recreate it"
+  zh-CN: "包含宿主机绑定目录或不支持的挂载，请手动迁移后重建"
+engine.desktop.unresolved_mounts:
+  en: "A mount has not been resolved to a local volume; check the source container mount configuration first"
+  zh-CN: "挂载尚未解析为本地卷，请先核对源容器挂载配置"
+engine.desktop.custom_network_deps:
+  en: "It contains custom networks or cross-container dependencies; migrate it manually and recreate it"
+  zh-CN: "包含自定义网络或跨容器依赖，请手动迁移后重建"
+engine.desktop.host_devices:
+  en: "It contains host device paths; migrate it manually and recreate it"
+  zh-CN: "包含宿主机设备路径，请手动迁移后重建"
+engine.desktop.volume_subpath:
+  en: "It contains volume subdirectory mounts; migrate it manually and recreate it"
+  zh-CN: "包含卷子目录挂载，请手动迁移后重建"
+engine.desktop.custom_network:
+  en: "It contains a custom network; migrate it manually and recreate it"
+  zh-CN: "包含自定义网络，请手动迁移后重建"
+engine.desktop.convert_container_config:
+  en: "Convert the container configuration"
+  zh-CN: "转换容器配置"
+engine.desktop.imported_name:
+  en: "%{name} (%{id})"
+  zh-CN: "%{name}（%{id}）"

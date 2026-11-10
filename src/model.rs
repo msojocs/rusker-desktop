@@ -164,12 +164,12 @@ pub enum ContainerAction {
 }
 
 impl ContainerAction {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Start => "启动容器",
-            Self::Stop => "停止容器",
-            Self::Restart => "重启容器",
-            Self::Remove => "删除容器",
+            Self::Start => t!("model.action.start"),
+            Self::Stop => t!("model.action.stop"),
+            Self::Restart => t!("model.action.restart"),
+            Self::Remove => t!("model.action.remove"),
         }
     }
 }

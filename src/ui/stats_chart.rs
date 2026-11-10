@@ -5,7 +5,8 @@ use gpui_kit::base::StyledExt as _;
 use gpui_kit::{
     canvas, component::ActiveTheme as _, div, fill, point, px, size, App, Bounds, Entity, Font,
     Hsla, InteractiveElement as _, IntoElement, ParentElement as _, PathBuilder, Pixels, Point,
-    RenderOnce, StatefulInteractiveElement as _, Styled as _, TextAlign, TextRun, Window,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, TextAlign, TextRun,
+    Window,
 };
 
 #[derive(Clone)]
@@ -30,16 +31,16 @@ pub enum ChartUnit {
 /// Missing, negative and non-finite measurements are gaps, never invented zeroes.
 pub fn stats_chart(
     id: &'static str,
-    title: &'static str,
+    title: impl Into<SharedString>,
     subtitle: String,
-    series: Vec<(&'static str, String)>,
+    series: Vec<(SharedString, String)>,
     points: Vec<ChartPoint>,
     unit: ChartUnit,
     hover: Entity<StatsHover>,
 ) -> impl IntoElement {
     StatsChart {
         id,
-        title,
+        title: title.into(),
         subtitle,
         series: series.into_iter().take(2).collect(),
         points,
@@ -51,9 +52,9 @@ pub fn stats_chart(
 #[derive(IntoElement)]
 struct StatsChart {
     id: &'static str,
-    title: &'static str,
+    title: SharedString,
     subtitle: String,
-    series: Vec<(&'static str, String)>,
+    series: Vec<(SharedString, String)>,
     points: Vec<ChartPoint>,
     unit: ChartUnit,
     hover: Entity<StatsHover>,
@@ -111,7 +112,7 @@ impl RenderOnce for StatsChart {
             .selected
             .and_then(|seconds| nearest_point(&self.points, seconds));
         let hover_times: Vec<f64> = self.points.iter().map(|sample| sample.seconds).collect();
-        let labels: Vec<_> = self.series.iter().map(|(label, _)| *label).collect();
+        let labels: Vec<_> = self.series.iter().map(|(label, _)| label.clone()).collect();
         let unit = self.unit;
         let points = self.points;
         let geometry_state = state.clone();
@@ -293,7 +294,7 @@ impl RenderOnce for StatsChart {
                                             if sample.seconds.is_finite() {
                                                 ends.push((
                                                     scale.position(sample.seconds, value, plot),
-                                                    *label,
+                                                    label.clone(),
                                                 ));
                                             }
                                         }
@@ -351,7 +352,7 @@ impl RenderOnce for StatsChart {
                                             .any(|value| valid_value(*value).is_some())
                                 }) {
                                     paint_text(
-                                        "等待采样".into(),
+                                        t!("ui.waiting_for_samples").into(),
                                         point(plot.left(), plot.top() + px(65.)),
                                         plot.size.width,
                                         TextAlign::Center,
@@ -429,7 +430,7 @@ fn readout_bounds(
 #[allow(clippy::too_many_arguments)]
 fn paint_hover_readout(
     sample: &ChartPoint,
-    labels: &[&str],
+    labels: &[SharedString],
     unit: ChartUnit,
     plot: Bounds<Pixels>,
     bounds: Bounds<Pixels>,

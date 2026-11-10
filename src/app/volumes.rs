@@ -186,20 +186,18 @@ impl RuskerApp {
             listed.push("…");
         }
         let mut description = if unused_only {
-            "以下卷未被任何容器（包括已停止的容器）挂载，将被永久删除：\n".to_string()
+            t!("volumes.prune.description").into_owned()
         } else {
-            "以下卷及其数据将被永久删除，此操作不可撤销：\n".to_string()
+            t!("volumes.remove_many.description").into_owned()
         };
         description.push_str(&listed.join("\n"));
         if in_use > 0 {
-            description.push_str(&format!(
-                "\n其中 {in_use} 个卷正被容器挂载，Engine 会拒绝删除它们，其余卷照常删除。"
-            ));
+            description.push_str(&t!("volumes.remove_many.in_use_note", count = in_use));
         }
         let title = if unused_only {
-            format!("清理 {} 个未使用的卷？", names.len())
+            t!("volumes.prune.title", count = names.len()).into_owned()
         } else {
-            format!("删除 {} 个卷？", names.len())
+            t!("volumes.remove_many.title", count = names.len()).into_owned()
         };
         let weak = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, cx| {
@@ -209,10 +207,14 @@ impl RuskerApp {
                 .title(title.clone())
                 .description(description.clone())
                 .confirm()
-                .ok_text("删除")
-                .cancel_text("取消")
+                .ok_text(t!("volumes.action.delete"))
+                .cancel_text(t!("volumes.action.cancel"))
                 .ok_variant(ButtonVariant::Danger)
-                .footer(confirmation_footer("删除", ButtonVariant::Danger, cx))
+                .footer(confirmation_footer(
+                    t!("volumes.action.delete"),
+                    ButtonVariant::Danger,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let names = names.clone();
                     _ = weak.update(cx, |this, cx| this.remove_volumes(names, cx));
@@ -223,27 +225,27 @@ impl RuskerApp {
 
     fn remove_volumes(&mut self, names: Vec<String>, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.clone() else {
-            self.notify_error("容器引擎不可用", cx);
+            self.notify_error(t!("volumes.error.engine_unavailable"), cx);
             cx.notify();
             return;
         };
         let total = names.len();
         let handle = engine.remove_volumes(names);
         self.run_volume_task(
-            format!("删除 {total} 个卷"),
+            t!("volumes.task.remove_many", count = total).into_owned(),
             handle,
             move |this, (snapshot, failures), cx| {
                 this.connected = true;
                 this.apply_snapshot(snapshot);
                 if failures.is_empty() {
-                    this.notify_success(format!("已删除 {total} 个卷"), cx);
+                    this.notify_success(t!("volumes.notice.removed_many", count = total), cx);
                 } else {
                     this.notify_error(
-                        format!(
-                            "已删除 {} 个卷，{} 个失败：\n{}",
-                            total - failures.len(),
-                            failures.len(),
-                            failures.join("\n")
+                        t!(
+                            "volumes.notice.removed_partial",
+                            removed = total - failures.len(),
+                            failed = failures.len(),
+                            details = failures.join("\n")
                         ),
                         cx,
                     );
@@ -273,7 +275,7 @@ impl RuskerApp {
                 Ok(Ok(path)) => path,
                 Ok(Err(error)) => {
                     _ = this.update(cx, |this, cx| {
-                        this.notify_error(format!("无法打开保存对话框：{error}"), cx);
+                        this.notify_error(t!("volumes.error.save_dialog", error = error), cx);
                         cx.notify();
                     });
                     None
@@ -288,20 +290,21 @@ impl RuskerApp {
 
     fn export_volume(&mut self, name: String, path: PathBuf, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.clone() else {
-            self.notify_error("容器引擎不可用", cx);
+            self.notify_error(t!("volumes.error.engine_unavailable"), cx);
             cx.notify();
             return;
         };
         let handle = engine.export_volume(name.clone(), path.clone());
         self.run_volume_task(
-            format!("导出卷 {name}"),
+            t!("volumes.task.export", name = name).into_owned(),
             handle,
             move |this, size, cx| {
                 this.notify_success(
-                    format!(
-                        "已导出卷 {name} 到 {}（{}）",
-                        path.display(),
-                        format_bytes(size)
+                    t!(
+                        "volumes.notice.exported",
+                        name = name,
+                        path = path.display(),
+                        size = format_bytes(size)
                     ),
                     cx,
                 );
@@ -433,7 +436,7 @@ impl RuskerApp {
             let submit = weak.clone();
             let confirm = weak.clone();
             dialog
-                .title("创建卷")
+                .title(t!("volumes.create.title"))
                 .w(px(480.))
                 .on_ok(move |_, window, cx| {
                     _ = confirm.update(cx, |this, cx| this.submit_create_volume(window, cx));
@@ -446,16 +449,16 @@ impl RuskerApp {
                         .flex_col()
                         .gap_4()
                         .child(form_field(
-                            "卷名称",
+                            t!("volumes.create.name_label"),
                             &input,
-                            "留空则由 Engine 生成随机名称。可包含字母、数字、下划线、点和连字符。",
+                            t!("volumes.create.name_hint"),
                             cx,
                         ))
                         .when_some(error, |this, error| this.child(dialog_error(error, cx))),
                 )
                 .footer(dialog_footer(
                     "submit-create-volume",
-                    "创建",
+                    t!("volumes.action.create"),
                     IconName::Plus,
                     move |window, cx| {
                         _ = submit.update(cx, |this, cx| this.submit_create_volume(window, cx));
@@ -482,20 +485,21 @@ impl RuskerApp {
                 .iter()
                 .any(|volume| &volume.name == name)
             {
-                self.volumes.dialog_error = Some(format!("卷 {name} 已存在"));
+                self.volumes.dialog_error =
+                    Some(t!("volumes.error.exists", name = name).into_owned());
                 cx.notify();
                 return;
             }
         }
         let Some(engine) = self.engine.clone() else {
-            self.volumes.dialog_error = Some("容器引擎不可用".into());
+            self.volumes.dialog_error = Some(t!("volumes.error.engine_unavailable").into_owned());
             cx.notify();
             return;
         };
         window.close_dialog(cx);
         let label = match &name {
-            Some(name) => format!("创建卷 {name}"),
-            None => "创建卷".into(),
+            Some(name) => t!("volumes.task.create_named", name = name).into_owned(),
+            None => t!("volumes.create.title").into_owned(),
         };
         let handle = engine.create_volume(name);
         self.run_snapshot_operation(label, handle, cx);
@@ -525,14 +529,12 @@ impl RuskerApp {
             let submit_source = source.clone();
             let confirm = weak.clone();
             let confirm_source = source.clone();
-            let mut hint = format!(
-                "创建新卷并通过临时 {HELPER_IMAGE} 容器复制全部数据，保留属主、权限和时间戳。"
-            );
+            let mut hint = t!("volumes.clone.hint", image = HELPER_IMAGE).into_owned();
             if in_use {
-                hint.push_str("该卷正被容器使用，建议先停止相关容器以保证数据一致。");
+                hint.push_str(&t!("volumes.clone.in_use_hint"));
             }
             dialog
-                .title(format!("克隆卷 {source}"))
+                .title(t!("volumes.clone.title", name = source))
                 .w(px(520.))
                 .on_ok(move |_, window, cx| {
                     let source = confirm_source.clone();
@@ -548,9 +550,9 @@ impl RuskerApp {
                         .flex_col()
                         .gap_4()
                         .child(form_field(
-                            "新卷名称 *",
+                            t!("volumes.clone.name_label"),
                             &input,
-                            "可包含字母、数字、下划线、点和连字符。",
+                            t!("volumes.clone.name_hint"),
                             cx,
                         ))
                         .child(muted(hint, cx))
@@ -558,7 +560,7 @@ impl RuskerApp {
                 )
                 .footer(dialog_footer(
                     "submit-clone-volume",
-                    "克隆",
+                    t!("volumes.action.clone"),
                     IconName::Copy,
                     move |window, cx| {
                         let source = submit_source.clone();
@@ -585,17 +587,18 @@ impl RuskerApp {
             .iter()
             .any(|volume| volume.name == target)
         {
-            self.volumes.dialog_error = Some(format!("卷 {target} 已存在"));
+            self.volumes.dialog_error =
+                Some(t!("volumes.error.exists", name = target).into_owned());
             cx.notify();
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.volumes.dialog_error = Some("容器引擎不可用".into());
+            self.volumes.dialog_error = Some(t!("volumes.error.engine_unavailable").into_owned());
             cx.notify();
             return;
         };
         window.close_dialog(cx);
-        let label = format!("克隆卷 {source} 为 {target}");
+        let label = t!("volumes.task.clone", source = source, target = target).into_owned();
         let handle = engine.clone_volume(source, target);
         self.run_snapshot_operation(label, handle, cx);
     }
@@ -603,13 +606,11 @@ impl RuskerApp {
     fn confirm_remove_volume(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let users = self.snapshot.volume_users(&name).len();
         let description = if users > 0 {
-            format!(
-                "该卷正被 {users} 个容器挂载（含已停止的容器）。Engine 会拒绝删除仍被引用的卷，请先删除这些容器。"
-            )
+            t!("volumes.remove.in_use", count = users).into_owned()
         } else {
-            "此操作不可撤销，卷中的全部数据将被永久删除。".to_string()
+            t!("volumes.remove.description").into_owned()
         };
-        let title = format!("删除卷 {name}？");
+        let title = t!("volumes.remove.title", name = name).into_owned();
         let weak = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, cx| {
             let name = name.clone();
@@ -618,10 +619,14 @@ impl RuskerApp {
                 .title(title.clone())
                 .description(description.clone())
                 .confirm()
-                .ok_text("删除")
-                .cancel_text("取消")
+                .ok_text(t!("volumes.action.delete"))
+                .cancel_text(t!("volumes.action.cancel"))
                 .ok_variant(ButtonVariant::Danger)
-                .footer(confirmation_footer("删除", ButtonVariant::Danger, cx))
+                .footer(confirmation_footer(
+                    t!("volumes.action.delete"),
+                    ButtonVariant::Danger,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let name = name.clone();
                     _ = weak.update(cx, |this, cx| this.remove_volume(name, cx));
@@ -635,11 +640,11 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.notify_error("容器引擎不可用", cx);
+            self.notify_error(t!("volumes.error.engine_unavailable"), cx);
             cx.notify();
             return;
         };
-        let label = format!("删除卷 {name}");
+        let label = t!("volumes.task.remove", name = name).into_owned();
         let handle = engine.remove_volume(name);
         self.run_snapshot_operation(label, handle, cx);
     }
@@ -651,14 +656,11 @@ impl RuskerApp {
             .iter()
             .filter(|container| container.is_running())
             .count();
-        let mut description =
-            "将永久删除卷内的全部文件和目录，卷本身保留。此操作不可撤销。".to_string();
+        let mut description = t!("volumes.empty.description").into_owned();
         if running > 0 {
-            description.push_str(&format!(
-                "\n该卷正被 {running} 个运行中的容器使用，清空可能导致这些容器异常，建议先停止。"
-            ));
+            description.push_str(&t!("volumes.empty.running_note", count = running));
         }
-        let title = format!("清空卷 {name}？");
+        let title = t!("volumes.empty.title", name = name).into_owned();
         let weak = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, cx| {
             let name = name.clone();
@@ -667,10 +669,14 @@ impl RuskerApp {
                 .title(title.clone())
                 .description(description.clone())
                 .confirm()
-                .ok_text("清空")
-                .cancel_text("取消")
+                .ok_text(t!("volumes.action.empty"))
+                .cancel_text(t!("volumes.action.cancel"))
                 .ok_variant(ButtonVariant::Danger)
-                .footer(confirmation_footer("清空", ButtonVariant::Danger, cx))
+                .footer(confirmation_footer(
+                    t!("volumes.action.empty"),
+                    ButtonVariant::Danger,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let name = name.clone();
                     _ = weak.update(cx, |this, cx| this.empty_volume(name, cx));
@@ -684,11 +690,11 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.notify_error("容器引擎不可用", cx);
+            self.notify_error(t!("volumes.error.engine_unavailable"), cx);
             cx.notify();
             return;
         };
-        let label = format!("清空卷 {name}");
+        let label = t!("volumes.task.empty", name = name).into_owned();
         let handle = engine.empty_volume(name);
         self.run_snapshot_operation(label, handle, cx);
     }
@@ -702,14 +708,14 @@ impl RuskerApp {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("导入".into()),
+            prompt: Some(t!("volumes.action.import").into_owned().into()),
         });
         self.volumes.prompt_task = Some(cx.spawn_in(window, async move |this, cx| {
             let path = match paths.await {
                 Ok(Ok(Some(paths))) => paths.into_iter().next(),
                 Ok(Err(error)) => {
                     _ = this.update(cx, |this, cx| {
-                        this.notify_error(format!("无法打开文件选择器：{error}"), cx);
+                        this.notify_error(t!("volumes.error.file_picker", error = error), cx);
                         cx.notify();
                     });
                     None
@@ -732,11 +738,8 @@ impl RuskerApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let description = format!(
-            "将 {} 解压到卷根目录。支持 tar、tar.gz、tar.bz2 和 tar.xz；同名文件会被覆盖，其他已有文件保留；归档中的属主与权限会保留。",
-            archive.display()
-        );
-        let title = format!("导入数据到卷 {name}？");
+        let description = t!("volumes.import.description", path = archive.display()).into_owned();
+        let title = t!("volumes.import.title", name = name).into_owned();
         let weak = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, cx| {
             let name = name.clone();
@@ -746,9 +749,13 @@ impl RuskerApp {
                 .title(title.clone())
                 .description(description.clone())
                 .confirm()
-                .ok_text("导入")
-                .cancel_text("取消")
-                .footer(confirmation_footer("导入", ButtonVariant::Primary, cx))
+                .ok_text(t!("volumes.action.import"))
+                .cancel_text(t!("volumes.action.cancel"))
+                .footer(confirmation_footer(
+                    t!("volumes.action.import"),
+                    ButtonVariant::Primary,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let name = name.clone();
                     let archive = archive.clone();
@@ -763,11 +770,11 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.notify_error("容器引擎不可用", cx);
+            self.notify_error(t!("volumes.error.engine_unavailable"), cx);
             cx.notify();
             return;
         };
-        let label = format!("导入数据到卷 {name}");
+        let label = t!("volumes.task.import", name = name).into_owned();
         let handle = engine.import_volume(name, archive);
         self.run_snapshot_operation(label, handle, cx);
     }
@@ -790,7 +797,7 @@ impl RuskerApp {
     fn volume_size_label(&self, name: &str) -> String {
         match self.volumes.sizes.get(name) {
             Some(size) => format_bytes(*size),
-            None if self.volumes.sizes_loading => "统计中…".into(),
+            None if self.volumes.sizes_loading => t!("volumes.size.calculating").into_owned(),
             None => "—".into(),
         }
     }
@@ -831,7 +838,7 @@ impl RuskerApp {
                     Checkbox::new("check-all-volumes")
                         .pointer(!visible_names.is_empty())
                         .checked(all_checked)
-                        .tooltip("全选当前列表")
+                        .tooltip(t!("volumes.list.select_all"))
                         .disabled(visible_names.is_empty())
                         .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                             for name in &visible_names {
@@ -846,17 +853,32 @@ impl RuskerApp {
                 ),
             )
             .child(div().w(px(28.)).flex_shrink_0())
-            .child(div().flex_1().min_w_0().child("名称"))
-            .child(div().w(px(DATE_COLUMN)).flex_shrink_0().child("创建时间"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(t!("volumes.column.name").to_string()),
+            )
+            .child(
+                div()
+                    .w(px(DATE_COLUMN))
+                    .flex_shrink_0()
+                    .child(t!("volumes.column.created").to_string()),
+            )
             .child(
                 div()
                     .w(px(SIZE_COLUMN))
                     .flex_shrink_0()
                     .text_right()
                     .pr_4()
-                    .child("大小"),
+                    .child(t!("volumes.column.size").to_string()),
             )
-            .child(div().w(px(92.)).flex_shrink_0().child("操作"));
+            .child(
+                div()
+                    .w(px(92.))
+                    .flex_shrink_0()
+                    .child(t!("volumes.column.actions").to_string()),
+            );
 
         let mut panel = div()
             .rounded_lg()
@@ -871,11 +893,11 @@ impl RuskerApp {
         if volumes.is_empty() {
             panel = panel.child(empty_state(
                 if self.snapshot.volumes.is_empty() {
-                    "还没有卷"
+                    t!("volumes.list.empty")
                 } else {
-                    "没有匹配的卷"
+                    t!("volumes.list.no_match")
                 },
-                "点击“创建卷”新建一个，或调整搜索条件。",
+                t!("volumes.list.empty_hint"),
                 cx,
             ));
         } else {
@@ -965,7 +987,7 @@ impl RuskerApp {
                                 list_action_button(("clone-volume", index), cx.theme().primary, cx)
                                     .small()
                                     .icon(IconName::Copy)
-                                    .tooltip("克隆")
+                                    .tooltip(t!("volumes.action.clone"))
                                     .disabled(busy)
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.open_clone_volume_dialog(
@@ -979,7 +1001,7 @@ impl RuskerApp {
                                 list_action_button(("remove-volume", index), cx.theme().danger, cx)
                                     .small()
                                     .icon(AssetIcon::Trash)
-                                    .tooltip("删除")
+                                    .tooltip(t!("volumes.action.delete"))
                                     .disabled(busy)
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.confirm_remove_volume(remove_name.clone(), window, cx);
@@ -1005,11 +1027,11 @@ impl RuskerApp {
             .flex_col()
             .gap_4()
             .child(page_header(
-                "卷",
-                format!(
-                    "共 {} 个，当前显示 {} 个。实心圆点表示正被容器使用。",
-                    self.snapshot.volumes.len(),
-                    volumes.len()
+                t!("volumes.title"),
+                t!(
+                    "volumes.list.summary",
+                    total = self.snapshot.volumes.len(),
+                    shown = volumes.len()
                 ),
                 cx,
             ))
@@ -1030,7 +1052,7 @@ impl RuskerApp {
                         let count = checked.len();
                         this.child(
                             list_action_button("clear-volume-selection", cx.theme().foreground, cx)
-                                .label("取消选择")
+                                .label(t!("volumes.list.clear_selection"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.volumes.checked.clear();
                                     cx.notify();
@@ -1041,7 +1063,7 @@ impl RuskerApp {
                                 .danger()
                                 .pointer(!busy)
                                 .icon(AssetIcon::Trash)
-                                .label(format!("删除所选（{count}）"))
+                                .label(t!("volumes.list.remove_selected", count = count))
                                 .disabled(busy)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.confirm_remove_volumes(checked.clone(), false, window, cx);
@@ -1053,8 +1075,8 @@ impl RuskerApp {
                             .outline()
                             .pointer(!busy && !unused.is_empty())
                             .icon(AssetIcon::BrushCleaning)
-                            .label(format!("清理未使用（{}）", unused.len()))
-                            .tooltip("删除所有未被任何容器挂载的卷")
+                            .label(t!("volumes.list.prune", count = unused.len()))
+                            .tooltip(t!("volumes.list.prune_tooltip"))
                             .disabled(busy || unused.is_empty())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.confirm_remove_volumes(unused.clone(), true, window, cx);
@@ -1065,7 +1087,7 @@ impl RuskerApp {
                             .primary()
                             .pointer(!busy)
                             .icon(IconName::Plus)
-                            .label("创建卷")
+                            .label(t!("volumes.create.title"))
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_create_volume_dialog(window, cx);
@@ -1073,14 +1095,14 @@ impl RuskerApp {
                     ),
             )
             .when_some(self.volumes.sizes_error.clone(), |this, error| {
-                this.child(muted(format!("卷大小统计失败：{error}"), cx))
+                this.child(muted(t!("volumes.list.size_error", error = error), cx))
             })
             .child(panel)
             .child(
                 div()
                     .flex()
                     .justify_end()
-                    .child(muted(format!("显示 {} 项", volumes.len()), cx)),
+                    .child(muted(t!("volumes.list.showing", count = volumes.len()), cx)),
             )
     }
 
@@ -1088,9 +1110,9 @@ impl RuskerApp {
         let users = self.snapshot.volume_users(&volume.name);
         let busy = self.busy.is_some();
         let status = if users.is_empty() {
-            "未使用".to_string()
+            t!("volumes.status.unused").into_owned()
         } else {
-            format!("使用中（{} 个容器）", users.len())
+            t!("volumes.status.in_use", count = users.len()).into_owned()
         };
         let accent = brand_color(cx);
         let delete_name = volume.name.clone();
@@ -1114,7 +1136,7 @@ impl RuskerApp {
                     .cursor_pointer()
                     .hover(|style| style.underline())
                     .child(Icon::new(IconName::ArrowLeft).small())
-                    .child("卷")
+                    .child(t!("volumes.title").to_string())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.close_volume();
                         cx.notify();
@@ -1175,7 +1197,7 @@ impl RuskerApp {
                         button("clone-volume-detail")
                             .outline()
                             .icon(IconName::Copy)
-                            .label("克隆")
+                            .label(t!("volumes.action.clone"))
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_clone_volume_dialog(clone_name.clone(), window, cx);
@@ -1185,7 +1207,7 @@ impl RuskerApp {
                         button("empty-volume")
                             .outline()
                             .icon(AssetIcon::Eraser)
-                            .label("清空")
+                            .label(t!("volumes.action.empty"))
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.confirm_empty_volume(empty_name.clone(), window, cx);
@@ -1195,7 +1217,7 @@ impl RuskerApp {
                         button("export-volume")
                             .outline()
                             .icon(AssetIcon::Download)
-                            .label("导出")
+                            .label(t!("volumes.action.export"))
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.prompt_export_volume(export_name.clone(), window, cx);
@@ -1205,7 +1227,7 @@ impl RuskerApp {
                         button("import-volume")
                             .primary()
                             .icon(AssetIcon::Upload)
-                            .label("导入")
+                            .label(t!("volumes.action.import"))
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.prompt_import_volume(import_name.clone(), window, cx);
@@ -1215,7 +1237,7 @@ impl RuskerApp {
                         button("remove-volume-detail")
                             .danger()
                             .icon(AssetIcon::Trash)
-                            .label("删除")
+                            .label(t!("volumes.action.delete"))
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.confirm_remove_volume(delete_name.clone(), window, cx);
@@ -1227,10 +1249,26 @@ impl RuskerApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(detail_row("驱动", volume.driver.clone(), cx))
-            .child(detail_row("大小", self.volume_size_label(&volume.name), cx))
-            .child(detail_row("创建于", format_timestamp(volume.created), cx))
-            .child(detail_row("挂载点", volume.mountpoint.clone(), cx));
+            .child(detail_row(
+                t!("volumes.detail.driver"),
+                volume.driver.clone(),
+                cx,
+            ))
+            .child(detail_row(
+                t!("volumes.column.size"),
+                self.volume_size_label(&volume.name),
+                cx,
+            ))
+            .child(detail_row(
+                t!("volumes.detail.created"),
+                format_timestamp(volume.created),
+                cx,
+            ))
+            .child(detail_row(
+                t!("volumes.detail.mountpoint"),
+                volume.mountpoint.clone(),
+                cx,
+            ));
         if !volume.labels.is_empty() {
             let labels = volume
                 .labels
@@ -1238,7 +1276,7 @@ impl RuskerApp {
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            info = info.child(detail_row("标签", labels, cx));
+            info = info.child(detail_row(t!("volumes.detail.labels"), labels, cx));
         }
 
         let tabs = div()
@@ -1246,18 +1284,19 @@ impl RuskerApp {
             .gap_6()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(self.volume_tab(VolumeTab::Data, "存储数据".into(), cx))
+            .child(self.volume_tab(VolumeTab::Data, t!("volumes.tab.data").into(), cx))
             .child(self.volume_tab(
                 VolumeTab::Containers,
-                format!("使用中的容器（{}）", users.len()).into(),
+                t!("volumes.tab.containers", count = users.len()).into(),
                 cx,
             ))
             .child(
                 self.volume_tab(
                     VolumeTab::Exports,
-                    format!(
-                        "导出（{}）",
-                        self.volumes
+                    t!(
+                        "volumes.tab.exports",
+                        count = self
+                            .volumes
                             .exports
                             .iter()
                             .filter(|record| record.volume == volume.name)
@@ -1307,8 +1346,8 @@ impl RuskerApp {
         let mut panel = section_panel(cx).flex_1().min_h_0().flex().flex_col();
         if records.is_empty() {
             panel = panel.child(empty_state(
-                "还没有导出记录",
-                "导出完成后会在这里列出文件，可在文件夹中定位。",
+                t!("volumes.exports.empty"),
+                t!("volumes.exports.empty_hint"),
                 cx,
             ));
         } else {
@@ -1351,7 +1390,7 @@ impl RuskerApp {
                             .ghost()
                             .small()
                             .icon(IconName::FolderOpen)
-                            .tooltip("在文件夹中显示")
+                            .tooltip(t!("volumes.exports.reveal"))
                             .on_click(move |_, _, cx| cx.reveal_path(&path)),
                     )
             });
@@ -1365,11 +1404,9 @@ impl RuskerApp {
             );
         }
 
-        let mut hint = "导出为未压缩的 tar 文件，条目相对卷根目录并保留属主、权限和时间戳，可通过“导入”恢复到任意卷。记录只保留在本次运行期间。".to_string();
+        let mut hint = t!("volumes.exports.hint").into_owned();
         if running > 0 {
-            hint.push_str(&format!(
-                "该卷正被 {running} 个运行中的容器使用，导出时若仍在写入，数据可能不一致，建议先停止。"
-            ));
+            hint.push_str(&t!("volumes.exports.running_note", count = running));
         }
         div()
             .flex_1()
@@ -1388,7 +1425,7 @@ impl RuskerApp {
                             .outline()
                             .small()
                             .icon(AssetIcon::Download)
-                            .label("导出到文件…")
+                            .label(t!("volumes.exports.export_to_file"))
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.prompt_export_volume(export_name.clone(), window, cx);
@@ -1436,17 +1473,32 @@ impl RuskerApp {
             .items_center()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .child(div().flex_1().min_w(px(NAME_COLUMN_MIN)).child("名称"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(NAME_COLUMN_MIN))
+                    .child(t!("volumes.column.name").to_string()),
+            )
             .child(
                 div()
                     .w(px(SIZE_COLUMN))
                     .flex_shrink_0()
                     .text_right()
                     .pr_4()
-                    .child("大小"),
+                    .child(t!("volumes.column.size").to_string()),
             )
-            .child(div().w(px(DATE_COLUMN)).flex_shrink_0().child("修改时间"))
-            .child(div().w(px(MODE_COLUMN)).flex_shrink_0().child("权限"));
+            .child(
+                div()
+                    .w(px(DATE_COLUMN))
+                    .flex_shrink_0()
+                    .child(t!("volumes.data.modified").to_string()),
+            )
+            .child(
+                div()
+                    .w(px(MODE_COLUMN))
+                    .flex_shrink_0()
+                    .child(t!("volumes.data.mode").to_string()),
+            );
 
         let mut rows = Vec::new();
         self.collect_tree_rows("", 0, &mut rows);
@@ -1455,13 +1507,14 @@ impl RuskerApp {
         let body: AnyElement = if rows.is_empty() {
             if root_loading {
                 empty_state(
-                    "正在读取卷内容…",
-                    format!("首次使用会拉取 {HELPER_IMAGE} 辅助镜像。"),
+                    t!("volumes.data.loading"),
+                    t!("volumes.data.loading_hint", image = HELPER_IMAGE),
                     cx,
                 )
                 .into_any_element()
             } else {
-                empty_state("卷是空的", "点击“导入”从 tar 归档写入数据。", cx).into_any_element()
+                empty_state(t!("volumes.data.empty"), t!("volumes.data.empty_hint"), cx)
+                    .into_any_element()
             }
         } else {
             div()
@@ -1494,17 +1547,20 @@ impl RuskerApp {
                     .items_center()
                     .gap_3()
                     .child(
-                        div().flex_1().child(muted(
-                            format!("卷以只读方式挂载到临时 {HELPER_IMAGE} 容器中读取，目录大小为磁盘占用。"),
-                            cx,
-                        )),
+                        div()
+                            .flex_1()
+                            .child(muted(t!("volumes.data.hint", image = HELPER_IMAGE), cx)),
                     )
                     .child(
                         button("reload-volume-tree")
                             .ghost()
                             .small()
                             .icon(IconName::RefreshCw)
-                            .label(if refreshing { "读取中" } else { "刷新内容" })
+                            .label(if refreshing {
+                                t!("volumes.data.reading")
+                            } else {
+                                t!("volumes.data.refresh")
+                            })
                             .disabled(refreshing)
                             .on_click(cx.listener(|this, _, _, cx| this.reload_volume_tree(cx))),
                     ),
@@ -1526,7 +1582,7 @@ impl RuskerApp {
                 if depth > 0 {
                     rows.push(TreeRow::Message {
                         depth,
-                        text: "读取中…".into(),
+                        text: t!("volumes.data.reading_ellipsis").into_owned(),
                         is_error: false,
                     });
                 }
@@ -1540,7 +1596,7 @@ impl RuskerApp {
                 if listing.entries.is_empty() && depth > 0 {
                     rows.push(TreeRow::Message {
                         depth,
-                        text: "空目录".into(),
+                        text: t!("volumes.data.empty_dir").into_owned(),
                         is_error: false,
                     });
                 }
@@ -1561,7 +1617,8 @@ impl RuskerApp {
                 if listing.truncated {
                     rows.push(TreeRow::Message {
                         depth,
-                        text: format!("仅显示前 {MAX_DIRECTORY_ENTRIES} 项"),
+                        text: t!("volumes.data.truncated", count = MAX_DIRECTORY_ENTRIES)
+                            .into_owned(),
                         is_error: false,
                     });
                 }
@@ -1686,8 +1743,8 @@ impl RuskerApp {
         let panel = section_panel(cx).flex_1().min_h_0().flex().flex_col();
         if users.is_empty() {
             return panel.child(empty_state(
-                "没有容器使用此卷",
-                "卷未被任何容器（包括已停止的容器）挂载。",
+                t!("volumes.users.empty"),
+                t!("volumes.users.empty_hint"),
                 cx,
             ));
         }
@@ -1772,7 +1829,7 @@ fn dialog_error(error: String, cx: &gpui_kit::App) -> Div {
 
 fn dialog_footer(
     submit_id: &'static str,
-    submit_label: &'static str,
+    submit_label: impl Into<SharedString>,
     icon: IconName,
     on_submit: impl Fn(&mut Window, &mut gpui_kit::App) + 'static,
 ) -> Div {
@@ -1783,7 +1840,7 @@ fn dialog_footer(
         .child(
             button(SharedString::from(format!("{submit_id}-cancel")))
                 .outline()
-                .label("取消")
+                .label(t!("volumes.action.cancel"))
                 .on_click(|_, window, cx| window.close_dialog(cx)),
         )
         .child(

@@ -196,9 +196,13 @@ mod relay {
         let (version, path) = vm_proxy_path();
         let mut check = managed_command("root");
         check.args(["/usr/bin/test", "-x", path]);
-        if execute(check, "检查 Engine 代理转发程序", COMMAND_TIMEOUT)
-            .await
-            .is_ok()
+        if execute(
+            check,
+            t!("runtime_host.action.check_engine_proxy_relay"),
+            COMMAND_TIMEOUT,
+        )
+        .await
+        .is_ok()
         {
             return Ok(path);
         }
@@ -209,7 +213,7 @@ mod relay {
         execute_with_input(
             install,
             VM_PROXY,
-            "安装 Engine 代理转发程序",
+            t!("runtime_host.action.install_engine_proxy_relay"),
             COMMAND_TIMEOUT,
         )
         .await
@@ -251,10 +255,14 @@ mod relay {
             .stderr(Stdio::piped());
         let mut child = match command.spawn() {
             Ok(child) => child,
-            Err(error) => return Some(format!("无法启动 Engine 代理转发：{error}")),
+            Err(error) => {
+                return Some(
+                    t!("runtime_host.error.start_engine_proxy_relay", error = error).into_owned(),
+                );
+            }
         };
         let (Some(stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            return Some("无法连接 Engine 代理转发的标准输入输出".into());
+            return Some(t!("runtime_host.error.engine_proxy_stdio_unavailable").into_owned());
         };
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(256);
         let writer = tokio::spawn(async move {
@@ -319,9 +327,9 @@ mod relay {
         let stderr = finish(child).await;
         unexpected.then(|| {
             if stderr.is_empty() {
-                "Engine 代理转发进程意外退出".into()
+                t!("runtime_host.error.engine_proxy_unexpected_exit").into_owned()
             } else {
-                format!("Engine 代理转发进程退出：{stderr}")
+                t!("runtime_host.error.engine_proxy_exited", stderr = stderr).into_owned()
             }
         })
     }
@@ -341,7 +349,10 @@ mod relay {
         reader.read_exact(&mut header).await?;
         let (kind, id, len) = parse_header(&header);
         if len > MAX_PAYLOAD {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "帧过大"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                t!("runtime_host.error.frame_too_large").into_owned(),
+            ));
         }
         let mut payload = vec![0; len];
         reader.read_exact(&mut payload).await?;

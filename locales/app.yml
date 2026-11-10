@@ -1,0 +1,772 @@
+_version: 2
+app.settings.language:
+  en: Language
+  zh-CN: 语言
+app.placeholder.search:
+  en: Search name, ID, image or status
+  zh-CN: 搜索名称、ID、镜像或状态
+app.placeholder.pull_image:
+  en: "e.g. nginx:1.29 or docker.io/library/nginx:latest"
+  zh-CN: 例如：nginx:1.29 或 docker.io/library/nginx:latest
+app.placeholder.create_image:
+  en: "e.g. alpine:3.23 or nginx:1.29"
+  zh-CN: 例如：alpine:3.23 或 nginx:1.29
+app.placeholder.create_name:
+  en: Leave empty to let the Engine pick a name
+  zh-CN: 留空则由 Engine 自动命名
+app.placeholder.create_command:
+  en: 'e.g. sh -c "echo hello; sleep 60"'
+  zh-CN: '例如：sh -c "echo hello; sleep 60"'
+app.placeholder.create_ports:
+  en: "e.g. 8080:80, 8443:443"
+  zh-CN: 例如：8080:80, 8443:443
+app.placeholder.volume_name:
+  en: "e.g. postgres-data"
+  zh-CN: 例如：postgres-data
+app.placeholder.http_proxy:
+  en: "e.g. http://127.0.0.1:8080"
+  zh-CN: 例如：http://127.0.0.1:8080
+app.placeholder.https_proxy:
+  en: Usually the same as the HTTP proxy
+  zh-CN: 通常与 HTTP 代理地址相同
+app.placeholder.container_http_proxy:
+  en: "e.g. http://192.168.1.10:7890"
+  zh-CN: 例如：http://192.168.1.10:7890
+app.placeholder.subnet:
+  en: "%{subnet} (Docker default)"
+  zh-CN: "%{subnet}（Docker 默认）"
+app.page.overview:
+  en: "Overview"
+  zh-CN: "概览"
+app.page.containers:
+  en: "Containers"
+  zh-CN: "容器"
+app.page.images:
+  en: "Images"
+  zh-CN: "镜像"
+app.page.volumes:
+  en: "Volumes"
+  zh-CN: "卷"
+app.page.settings:
+  en: "Settings"
+  zh-CN: "设置"
+app.settings_section.general:
+  en: "General"
+  zh-CN: "常规"
+app.settings_section.vm_resources:
+  en: "VM Resources"
+  zh-CN: "VM 资源"
+app.settings_section.resource_saver:
+  en: "Resource Saver"
+  zh-CN: "资源节省"
+app.settings_section.proxies:
+  en: "Proxies"
+  zh-CN: "代理"
+app.settings_section.network:
+  en: "Network"
+  zh-CN: "网络"
+app.settings_section.wsl_integration:
+  en: "WSL Integration"
+  zh-CN: "WSL 集成"
+app.settings_section.desktop_import:
+  en: "Container Import"
+  zh-CN: "容器导入"
+app.runtime_op.install:
+  en: "Install/repair WSL2 environment"
+  zh-CN: "安装/修复 WSL2 环境"
+app.runtime_op.start:
+  en: "Start WSL2 environment"
+  zh-CN: "启动 WSL2 环境"
+app.runtime_op.stop:
+  en: "Stop WSL2 environment"
+  zh-CN: "停止 WSL2 环境"
+app.operation_progress:
+  en: "%{operation}…"
+  zh-CN: "%{operation}…"
+app.operation_done:
+  en: "%{operation} done"
+  zh-CN: "%{operation}完成"
+app.transition.starting:
+  en: "Starting Docker Engine…"
+  zh-CN: "正在启动 Docker Engine…"
+app.transition.connecting:
+  en: "Connecting to Docker Engine…"
+  zh-CN: "正在连接 Docker Engine…"
+app.transition.stopping:
+  en: "Stopping Docker Engine…"
+  zh-CN: "正在停止 Docker Engine…"
+app.transition.recovering:
+  en: "Engine exited unexpectedly, restarting automatically…"
+  zh-CN: "Engine 意外退出，正在自动重启…"
+app.transition.quitting:
+  en: "Stopping Docker Engine and quitting…"
+  zh-CN: "正在停止 Docker Engine 并退出…"
+app.transition.description.starting:
+  en: "Docker Engine is the underlying technology that runs containers"
+  zh-CN: "Docker Engine 是运行容器的底层技术"
+app.transition.description.stopping:
+  en: "Running containers will be stopped. You can restart the Engine in Settings after it shuts down."
+  zh-CN: "运行中的容器将被停止，Engine 关闭后可在设置中重新启动"
+app.transition.description.recovering:
+  en: "WSL was shut down or the Engine crashed. Containers with a restart policy will resume with the Engine."
+  zh-CN: "WSL 被关闭或 Engine 崩溃。设置了重启策略的容器会随 Engine 一起恢复"
+app.error.quit_importing:
+  en: "Containers are being imported. Please wait for it to finish before quitting to avoid interrupting the data copy."
+  zh-CN: "正在导入容器，请等待完成后再退出，避免中断数据复制"
+app.busy.preparing_wsl:
+  en: "Preparing WSL2 environment (installed automatically if missing)…"
+  zh-CN: "正在准备 WSL2 环境（未安装时自动安装）…"
+app.busy.reading_wsl:
+  en: "Reading WSL2 environment status…"
+  zh-CN: "读取 WSL2 环境状态…"
+app.error.runtime_unavailable:
+  en: "WSL2 background runtime is unavailable"
+  zh-CN: "WSL2 后台运行时不可用"
+app.error.backend_unavailable:
+  en: "Background runtime is unavailable. Please restart the app."
+  zh-CN: "后台运行时不可用，请重启应用"
+app.error.engine_unavailable:
+  en: "Container engine is unavailable"
+  zh-CN: "容器引擎不可用"
+app.op.remove_image:
+  en: "Remove image"
+  zh-CN: "删除镜像"
+app.error.threshold_integer:
+  en: "Resource Saver threshold must be a whole number of seconds"
+  zh-CN: "资源节省阈值必须是整数秒"
+app.not_available:
+  en: "Not available"
+  zh-CN: "不可用"
+app.select:
+  en: "Select"
+  zh-CN: "选择"
+app.error.settings_importing:
+  en: "Containers are being imported. Please finish before applying settings."
+  zh-CN: "正在导入容器，请完成后再应用设置"
+app.error.config_dir_settings:
+  en: "Could not determine the config directory. Settings were not saved."
+  zh-CN: "无法确定配置目录，设置未保存"
+app.error.runtime_unavailable_settings:
+  en: "WSL2 background runtime is unavailable. Settings were not saved."
+  zh-CN: "WSL2 后台运行时不可用，设置未保存"
+app.error.runtime_busy:
+  en: "The runtime is busy. Please apply again later."
+  zh-CN: "运行环境正忙，请稍后再应用"
+app.busy.applying_wsl:
+  en: "Applying WSL integration…"
+  zh-CN: "正在应用 WSL 集成…"
+app.warning.wsl_partial:
+  en: "Some WSL integrations did not take effect: %{errors}"
+  zh-CN: "部分 WSL 集成未生效：%{errors}"
+app.error.apply_wsl_failed:
+  en: "Failed to apply WSL integration. Settings were not saved: %{error}"
+  zh-CN: "应用 WSL 集成失败，设置未保存：%{error}"
+app.busy.moving_disk:
+  en: "Moving disk image…"
+  zh-CN: "正在移动磁盘镜像…"
+app.notice.moving_disk:
+  en: "Moving the disk image. The Engine will stop temporarily…"
+  zh-CN: "正在移动磁盘镜像，Engine 会暂时停止…"
+app.error.move_disk_failed:
+  en: "Failed to move the disk image. Settings were not saved: %{error}"
+  zh-CN: "移动磁盘镜像失败，设置未保存：%{error}"
+app.notice.settings_saved:
+  en: "Settings saved"
+  zh-CN: "设置已保存"
+app.error.saved_but:
+  en: "Settings saved, but %{error}"
+  zh-CN: "设置已保存，但%{error}"
+app.notice.settings_saved_external:
+  en: "Settings saved. The current Engine is not managed by Rusker (not Windows, or DOCKER_HOST is set). Export the Engine JSON and apply it on that Engine."
+  zh-CN: "设置已保存。当前 Engine 不由 Rusker 管理（非 Windows 或设置了 DOCKER_HOST），请导出 Engine JSON 并在该 Engine 上应用"
+app.busy.applying_engine:
+  en: "Applying Engine configuration…"
+  zh-CN: "正在应用 Engine 配置…"
+app.notice.settings_saved_applying:
+  en: "Settings saved. Applying Engine configuration…"
+  zh-CN: "设置已保存，正在应用 Engine 配置…"
+app.notice.applied_restarted:
+  en: "Applied: the Engine restarted with the new configuration"
+  zh-CN: "已生效：Engine 已按新配置重启"
+app.notice.applied_unchanged:
+  en: "Applied (no change to the Engine configuration)"
+  zh-CN: "已生效（Engine 配置无变化）"
+app.notice.applied_deferred:
+  en: "Settings saved. The Engine configuration will take effect when the Engine starts."
+  zh-CN: "设置已保存，Engine 配置将在 Engine 启动时自动生效"
+app.error.apply_engine_failed:
+  en: "Settings saved, but applying the Engine configuration failed: %{error}"
+  zh-CN: "设置已保存，但应用 Engine 配置失败：%{error}"
+app.error.config_dir_proxy:
+  en: "Could not determine the config directory. Proxy configuration was not exported."
+  zh-CN: "无法确定配置目录，代理配置未导出"
+app.notice.proxy_exported:
+  en: "Exported %{path}. Merge it into daemon.json manually and restart the Engine."
+  zh-CN: "已导出 %{path}。请手动合并到 daemon.json 并重启 Engine"
+app.dialog.remove_container.title:
+  en: "Remove container %{name}?"
+  zh-CN: "删除容器 %{name}？"
+app.dialog.remove_container.description:
+  en: "This action cannot be undone. Associated volumes are not deleted; a running container must be stopped first."
+  zh-CN: "此操作不可撤销。关联卷不会被删除；运行中的容器需先停止。"
+app.dialog.remove_containers.title:
+  en: "Remove %{count} containers?"
+  zh-CN: "删除 %{count} 个容器？"
+app.dialog.remove_containers.description:
+  en: "This action cannot be undone. Associated volumes are not deleted; running containers will be rejected by the Engine.\n%{containers}"
+  zh-CN: "此操作不可撤销。关联卷不会被删除；运行中的容器会被 Engine 拒绝。\n%{containers}"
+app.cancel:
+  en: "Cancel"
+  zh-CN: "取消"
+app.delete:
+  en: "Remove"
+  zh-CN: "删除"
+app.deleting:
+  en: "Removing..."
+  zh-CN: "删除中..."
+app.notice.containers_removed:
+  en: "Removed %{count} containers"
+  zh-CN: "已删除 %{count} 个容器"
+app.error.containers_partial:
+  en: "Removed %{removed} containers, %{failed} failed:\n%{errors}"
+  zh-CN: "已删除 %{removed} 个容器，%{failed} 个失败：\n%{errors}"
+app.sidebar.expand:
+  en: "Expand menu"
+  zh-CN: "展开菜单"
+app.sidebar.collapse:
+  en: "Collapse menu"
+  zh-CN: "收起菜单"
+app.refresh:
+  en: "Refresh"
+  zh-CN: "刷新"
+app.refreshing:
+  en: "Refreshing"
+  zh-CN: "刷新中"
+app.overview.heading:
+  en: "Container overview"
+  zh-CN: "容器运行概览"
+app.overview.all_containers:
+  en: "All containers"
+  zh-CN: "全部容器"
+app.overview.all_containers_detail:
+  en: "Running and stopped"
+  zh-CN: "包括运行中和已停止"
+app.overview.running:
+  en: "Running"
+  zh-CN: "运行中"
+app.overview.not_running:
+  en: "%{count} not running"
+  zh-CN: "%{count} 个未运行"
+app.overview.images:
+  en: "Local images"
+  zh-CN: "本地镜像"
+app.overview.images_detail:
+  en: "Including untagged images"
+  zh-CN: "包含无标签镜像"
+app.overview.volumes:
+  en: "Volumes"
+  zh-CN: "卷"
+app.overview.volumes_in_use:
+  en: "%{count} used by containers"
+  zh-CN: "%{count} 个正被容器使用"
+app.overview.engine_info:
+  en: "Engine information"
+  zh-CN: "引擎信息"
+app.name:
+  en: "Name"
+  zh-CN: "名称"
+app.os:
+  en: "Operating system"
+  zh-CN: "操作系统"
+app.arch:
+  en: "Architecture"
+  zh-CN: "架构"
+app.containers.usage_none:
+  en: "No containers are running."
+  zh-CN: "暂无运行中的容器。"
+app.containers.usage_running:
+  en: "%{running} containers running. Live stats are not supported yet."
+  zh-CN: "%{running} 个容器运行中，实时统计尚未支持。"
+app.containers.summary:
+  en: "%{running} running · %{total} total"
+  zh-CN: "%{running} 个运行中 · 共 %{total} 个"
+app.create:
+  en: "Create"
+  zh-CN: "创建"
+app.containers.cpu_usage:
+  en: "Container CPU usage"
+  zh-CN: "容器 CPU 使用率"
+app.containers.memory_usage:
+  en: "Container memory usage"
+  zh-CN: "容器内存使用率"
+app.containers.stats_unavailable:
+  en: "Requires live stats support from the Engine, which this version does not provide."
+  zh-CN: "需要 Engine 实时统计支持，当前版本暂未提供。"
+app.containers.running_only:
+  en: "Only show running containers"
+  zh-CN: "仅显示运行中的容器"
+app.clear_selection:
+  en: "Clear selection"
+  zh-CN: "取消选择"
+app.remove_selected:
+  en: "Remove selected (%{count})"
+  zh-CN: "删除所选（%{count}）"
+app.select_all:
+  en: "Select all in the current list"
+  zh-CN: "全选当前列表"
+app.container_id:
+  en: "Container ID"
+  zh-CN: "容器 ID"
+app.image:
+  en: "Image"
+  zh-CN: "镜像"
+app.ports:
+  en: "Ports"
+  zh-CN: "端口"
+app.created:
+  en: "Created"
+  zh-CN: "创建时间"
+app.actions:
+  en: "Actions"
+  zh-CN: "操作"
+app.containers.shown:
+  en: "Showing %{count}"
+  zh-CN: "显示 %{count} 个"
+app.empty.no_containers:
+  en: "No containers yet"
+  zh-CN: "还没有容器"
+app.empty.no_containers_hint:
+  en: "Click \"Create\" in the top right to run your first container from an image."
+  zh-CN: "点击右上角“创建”，从镜像运行第一个容器。"
+app.empty.no_running:
+  en: "No running containers"
+  zh-CN: "没有运行中的容器"
+app.empty.no_running_hint:
+  en: "Turn off \"Only show running containers\" to see all containers."
+  zh-CN: "关闭“仅显示运行中的容器”可查看全部容器。"
+app.empty.no_matches:
+  en: "No matching containers"
+  zh-CN: "没有匹配的容器"
+app.empty.no_matches_hint:
+  en: "Adjust your search or filters."
+  zh-CN: "调整搜索条件或筛选方式。"
+app.copy_container_id:
+  en: "Copy container ID"
+  zh-CN: "复制容器 ID"
+app.copy_image_ref:
+  en: "Copy image reference"
+  zh-CN: "复制镜像引用"
+app.view_image:
+  en: "View image details"
+  zh-CN: "查看镜像详情"
+app.view_details:
+  en: "View details"
+  zh-CN: "查看详情"
+app.start:
+  en: "Start"
+  zh-CN: "启动"
+app.stop:
+  en: "Stop"
+  zh-CN: "停止"
+app.restart:
+  en: "Restart"
+  zh-CN: "重启"
+app.tab.logs:
+  en: "Logs"
+  zh-CN: "日志"
+app.tab.inspect:
+  en: "Inspect"
+  zh-CN: "详情"
+app.tab.mounts:
+  en: "Mounts"
+  zh-CN: "挂载"
+app.tab.terminal:
+  en: "Terminal"
+  zh-CN: "命令行"
+app.tab.files:
+  en: "Files"
+  zh-CN: "文件"
+app.tab.stats:
+  en: "Stats"
+  zh-CN: "统计"
+app.refresh_inspect:
+  en: "Refresh details"
+  zh-CN: "刷新详情"
+app.copy_logs:
+  en: "Copy logs"
+  zh-CN: "复制日志"
+app.refresh_logs:
+  en: "Refresh logs"
+  zh-CN: "刷新日志"
+app.back_to_containers:
+  en: "Back to container list"
+  zh-CN: "返回容器列表"
+app.status:
+  en: "Status"
+  zh-CN: "状态"
+app.logs.loading:
+  en: "Reading logs…"
+  zh-CN: "正在读取日志…"
+app.logs.empty:
+  en: "This container has no recent stdout/stderr logs."
+  zh-CN: "该容器最近没有 stdout/stderr 日志。"
+app.scroll_to_bottom:
+  en: "Scroll to bottom"
+  zh-CN: "滚动到底部"
+app.empty.no_mounts:
+  en: "No named volume mounts"
+  zh-CN: "没有命名卷挂载"
+app.empty.no_mounts_hint:
+  en: "This container has no named volumes mounted."
+  zh-CN: "该容器没有挂载命名卷。"
+app.runtime.not_installed:
+  en: "Not installed"
+  zh-CN: "未安装"
+app.status.engine_running:
+  en: "Engine running"
+  zh-CN: "Engine 运行中"
+app.runtime.saver_active_status:
+  en: "Resource Saver mode (Engine paused; resumes automatically on client connection)"
+  zh-CN: "资源节省模式（Engine 已暂停，有客户端连接时自动恢复）"
+app.runtime.distro_running:
+  en: "Distribution running, Engine not ready"
+  zh-CN: "发行版运行中，Engine 未就绪"
+app.runtime.stopped:
+  en: "Stopped"
+  zh-CN: "已停止"
+app.runtime.detecting_gpu:
+  en: "Detecting NVIDIA GPU and runtime"
+  zh-CN: "正在检测 NVIDIA GPU 与 runtime"
+app.runtime.wsl_environment:
+  en: "WSL2 environment"
+  zh-CN: "WSL2 运行环境"
+app.runtime.distro:
+  en: "Dedicated distribution"
+  zh-CN: "专用发行版"
+app.runtime.state:
+  en: "State"
+  zh-CN: "运行状态"
+app.runtime.windows_endpoint:
+  en: "Windows endpoint"
+  zh-CN: "Windows 端点"
+app.runtime.wsl_endpoint:
+  en: "WSL2 endpoint"
+  zh-CN: "WSL2 端点"
+app.runtime.repair:
+  en: "Repair environment"
+  zh-CN: "修复环境"
+app.runtime.install:
+  en: "Install environment"
+  zh-CN: "安装环境"
+app.refresh_status:
+  en: "Refresh status"
+  zh-CN: "刷新状态"
+app.runtime.engine_hint:
+  en: "The Engine does not listen on TCP. On Windows, run: docker context create rusker --docker host=npipe:////./pipe/rusker_engine. Quitting Rusker stops the Engine. Installing or repairing may take a few minutes; Engine logs are in the dedicated distribution at /var/log/rusker-dockerd.log."
+  zh-CN: "Engine 不监听 TCP 端口。Windows 工具可执行：docker context create rusker --docker host=npipe:////./pipe/rusker_engine。退出 Rusker 时会停止 Engine。安装或修复可能需要数分钟，Engine 日志位于专用发行版的 /var/log/rusker-dockerd.log。"
+app.daemon.intro_prefix:
+  en: "Configure the Engine by editing the Docker daemon"
+  zh-CN: "通过编辑 JSON 格式的 Docker daemon"
+app.daemon.config_file_link:
+  en: "configuration file"
+  zh-CN: "配置文件"
+app.daemon.intro_suffix:
+  en: "in JSON format."
+  zh-CN: "来配置 Engine。"
+app.daemon.advanced_title:
+  en: "Advanced settings"
+  zh-CN: "高级设置"
+app.daemon.advanced_body:
+  en: "Incorrect configuration may prevent Docker from starting, so edit with care. It is validated with dockerd --validate before applying; applying restarts the Engine and stops running containers. proxies is managed by the \"Proxies\" settings, and network options such as bip, ip and ipv6 by the \"Network\" settings; they are not shown here."
+  zh-CN: "错误的配置可能导致 Docker 无法启动，请谨慎修改。应用前会用 dockerd --validate 校验，应用后 Engine 会重启，运行中的容器会被停止。proxies 由“代理”设置管理，bip、ip、ipv6 等网络配置由“网络”设置管理，不在此显示。"
+app.daemon.file_label:
+  en: "Daemon configuration file"
+  zh-CN: "Daemon 配置文件"
+app.daemon.reading:
+  en: "Reading…"
+  zh-CN: "读取中…"
+app.daemon.reload:
+  en: "Reload"
+  zh-CN: "重新读取"
+app.daemon.unmanaged_hint:
+  en: "The current Engine is not managed by Rusker (DOCKER_HOST is set). Edit that Engine's daemon.json directly."
+  zh-CN: "当前 Engine 不由 Rusker 管理（设置了 DOCKER_HOST），请直接编辑该 Engine 的 daemon.json。"
+app.wsl.integration_hint:
+  en: "The toggle installs or removes the Rusker-marked Docker CLI wrapper and Compose/Buildx plugins, which connect to the shared socket by default; it is not a security boundary against manual access."
+  zh-CN: "开关安装或移除 Rusker 标记的 Docker CLI 包装器及 Compose/Buildx 插件，默认连接共享 socket；它不是防止手动访问的安全边界。"
+app.wsl.no_distros:
+  en: "No other WSL2 distributions found to integrate."
+  zh-CN: "没有发现可集成的其他 WSL2 发行版。"
+app.wsl.default_distro:
+  en: "%{name} (default)"
+  zh-CN: "%{name}（默认）"
+app.wsl.apply_hint:
+  en: "Integrations take effect after you click \"Apply\". In Resource Saver mode, docker commands inside a WSL distribution cannot wake the Engine; use the Windows endpoint or Rusker to resume it."
+  zh-CN: "点击“应用”后集成才会生效。资源节省模式下 WSL 发行版内的 docker 命令无法唤醒 Engine，请通过 Windows 端点或 Rusker 恢复。"
+app.settings_warning:
+  en: "Settings warning"
+  zh-CN: "设置警告"
+app.applying_settings:
+  en: "Applying settings"
+  zh-CN: "正在应用设置"
+app.applying_settings_progress:
+  en: "Applying settings…"
+  zh-CN: "正在应用设置…"
+app.unsaved_changes:
+  en: "You have unsaved changes"
+  zh-CN: "有未保存的更改"
+app.no_unsaved_changes:
+  en: "No unsaved changes"
+  zh-CN: "没有未保存的更改"
+app.discard_changes:
+  en: "Discard changes"
+  zh-CN: "放弃更改"
+app.apply:
+  en: "Apply"
+  zh-CN: "应用"
+app.general.appearance:
+  en: "Appearance"
+  zh-CN: "外观"
+app.general.theme_hint:
+  en: "Theme and language preview immediately and are saved when you click \"Apply\"."
+  zh-CN: "主题和语言立即预览，点击“应用”后保存。"
+app.general.config_path:
+  en: "Rusker config file: %{path}"
+  zh-CN: "Rusker 配置文件：%{path}"
+app.vm.external_title:
+  en: "External Engine"
+  zh-CN: "外部 Engine"
+app.vm.external_body:
+  en: "The current Engine is not managed by Rusker (not Windows, or DOCKER_HOST is set). CPU, memory and disk are configured by that Engine."
+  zh-CN: "当前 Engine 不由 Rusker 管理（非 Windows 或设置了 DOCKER_HOST），CPU、内存和磁盘由该 Engine 自行配置。"
+app.vm.wsl_backend_title:
+  en: "WSL 2 backend"
+  zh-CN: "WSL 2 后端"
+app.vm.wsl_backend_body:
+  en: "You are using the WSL 2 backend; resource limits are managed by Windows."
+  zh-CN: "你正在使用 WSL 2 后端，资源限制由 Windows 管理。"
+app.vm.wslconfig_prefix:
+  en: "You can configure the memory, CPU and swap limits available to WSL 2 in the"
+  zh-CN: "可以在"
+app.vm.wslconfig_file:
+  en: ".wslconfig file"
+  zh-CN: ".wslconfig 文件"
+app.vm.wslconfig_suffix:
+  en: "."
+  zh-CN: "中配置 WSL 2 可用的内存、CPU 和交换空间上限。"
+app.vm.disk_location:
+  en: "Disk image location"
+  zh-CN: "磁盘镜像位置"
+app.browse:
+  en: "Browse…"
+  zh-CN: "浏览…"
+app.vm.disk_hint_installed:
+  en: "Directory containing the Docker data disk (docker-data.vhdx, which stores images, containers and volumes). Choose a new directory and apply to move it; other WSL distributions are not affected."
+  zh-CN: "Docker 数据磁盘（docker-data.vhdx，存放镜像、容器和卷）所在目录。选择新目录并应用即可移动，不影响其他 WSL 发行版。"
+app.vm.disk_hint_new:
+  en: "Directory where the Docker data disk (docker-data.vhdx, which stores images, containers and volumes) is created."
+  zh-CN: "Docker 数据磁盘（docker-data.vhdx，存放镜像、容器和卷）的创建目录。"
+app.vm.disk_move_warning:
+  en: "Applying stops the Engine and moves the data disk, stopping running containers; moving a large disk across drives may take several minutes."
+  zh-CN: "应用后会停止 Engine 并移动数据磁盘，运行中的容器会被停止；跨磁盘移动较大的数据时可能需要数分钟。"
+app.saver.threshold_seconds:
+  en: "30 seconds"
+  zh-CN: "30 秒"
+app.saver.threshold_minutes:
+  en: "%{minutes} minutes"
+  zh-CN: "%{minutes} 分钟"
+app.saver.enable:
+  en: "Enable Resource Saver"
+  zh-CN: "启用资源节省"
+app.saver.hint_managed:
+  en: "Pauses the Engine when no containers are running and no WSL integration is enabled, keeping the WSL distribution and data disk for a fast resume. Windows clients resume it automatically on the next connection; memory reclaim is managed by WSL."
+  zh-CN: "没有运行中的容器且未启用 WSL 集成时暂停 Engine，保留 WSL 发行版和数据盘以便快速恢复。Windows 客户端再次连接时自动继续；内存回收由 WSL 管理。"
+app.saver.hint_unmanaged:
+  en: "Resource Saver only applies to the WSL2 Engine managed by Rusker. The current Engine is not managed by Rusker."
+  zh-CN: "资源节省只作用于 Rusker 管理的 WSL2 Engine，当前 Engine 不由 Rusker 管理。"
+app.saver.active_title:
+  en: "Resource Saver mode is active"
+  zh-CN: "正处于资源节省模式"
+app.saver.active_body:
+  en: "The Engine is paused. Run a docker command or refresh Rusker to resume it."
+  zh-CN: "Engine 已暂停。运行 docker 命令或刷新 Rusker 即可恢复。"
+app.saver.threshold:
+  en: "Resource Saver threshold"
+  zh-CN: "资源节省阈值"
+app.saver.seconds_unit:
+  en: "seconds"
+  zh-CN: "秒"
+app.saver.threshold_hint:
+  en: "Drag the slider to set how long to wait after no containers are running before entering Resource Saver mode (30 seconds to 60 minutes)."
+  zh-CN: "拖动滑块设置从没有运行中的容器到进入资源节省模式之间的等待时间（30 秒到 60 分钟）。"
+app.proxy.engine_title:
+  en: "Docker Engine proxy"
+  zh-CN: "Docker Engine 代理"
+app.proxy.engine_hint:
+  en: "Proxy used for outbound requests such as image pulls and pushes. Applied directly to the managed Engine's daemon.json and takes effect immediately."
+  zh-CN: "Engine 拉取或推送镜像等出站请求使用的代理。应用后直接写入受管 Engine 的 daemon.json 并生效。"
+app.proxy.no_restart:
+  en: "Does not restart the Engine"
+  zh-CN: "不会重启 Engine"
+app.proxy.manual_apply:
+  en: "Requires manual application"
+  zh-CN: "需要手动应用"
+app.proxy.managed_hint:
+  en: "As in Docker Desktop, the Engine always connects out through Rusker's built-in proxy, and proxy settings take effect per request on Windows: 127.0.0.1 refers to the Windows host, regardless of the WSL networking mode (NAT/mirrored). No Engine restart is needed after changes, and system proxy changes are picked up automatically."
+  zh-CN: "与 Docker Desktop 相同，Engine 始终经 Rusker 内置代理出网，代理设置在 Windows 上逐个请求生效：127.0.0.1 指 Windows 本机，与 WSL 网络模式（NAT/mirrored）无关；修改后无需重启 Engine，系统代理的变化也会自动跟随。"
+app.proxy.unmanaged_hint:
+  en: "The current Engine is not managed by Rusker, so its configuration cannot be changed directly. Export it and merge proxies into daemon.json manually, then restart the Engine; do not overwrite other settings in daemon.json."
+  zh-CN: "当前 Engine 不由 Rusker 管理，无法直接修改其配置。请导出后手动合并 proxies 到 daemon.json 并重启 Engine；不要覆盖 daemon.json 中的其他配置。"
+app.proxy.export:
+  en: "Export Engine JSON"
+  zh-CN: "导出 Engine JSON"
+app.proxy.export_path:
+  en: "Export to: %{path}"
+  zh-CN: "导出到：%{path}"
+app.proxy.container_title:
+  en: "Container proxy"
+  zh-CN: "容器代理"
+app.proxy.container_hint:
+  en: "Proxy for outbound traffic from running containers, passed to new containers as the HTTP_PROXY / HTTPS_PROXY / NO_PROXY environment variables."
+  zh-CN: "运行中容器的出站流量使用的代理，新建容器时以 HTTP_PROXY / HTTPS_PROXY / NO_PROXY 环境变量传入。"
+app.proxy.new_containers_only:
+  en: "Only applies to new containers"
+  zh-CN: "仅对新建容器生效"
+app.proxy.new_containers_body:
+  en: "Applying writes proxies.default in the Docker client config %{path} (preserving other settings), so docker run / docker build pass the proxy automatically; existing containers must be recreated. Inside a container, 127.0.0.1 refers to the container itself, so use the host's LAN address."
+  zh-CN: "应用后写入 Docker 客户端配置 %{path} 的 proxies.default（保留其他配置），docker run / docker build 会自动传入代理；已有容器需重新创建。容器内的 127.0.0.1 指向容器自身，请使用宿主机的局域网地址。"
+app.lan.mirrored:
+  en: "WSL uses mirrored networking: published ports appear directly on the Windows network, and LAN devices can reach them via this machine's IP."
+  zh-CN: "WSL 使用镜像网络：已发布端口直接出现在 Windows 网络上，局域网设备可通过本机 IP 访问。"
+app.lan.nat_localhost:
+  en: "WSL uses NAT networking: ports are bound to localhost only and not forwarded to the LAN."
+  zh-CN: "WSL 使用 NAT 网络：端口仅绑定本机，不转发到局域网。"
+app.lan.no_ports:
+  en: "No ports need forwarding right now"
+  zh-CN: "当前没有需要转发的端口"
+app.lan.more_ports:
+  en: " and %{count} more"
+  zh-CN: " 等 %{count} 个"
+app.lan.forwarded:
+  en: "Forwarded %{ports}"
+  zh-CN: "已转发 %{ports}"
+app.lan.nat:
+  en: "WSL uses NAT networking: as in Docker Desktop, Rusker listens on Windows for ports published on all interfaces (TCP/UDP, IPv4 and IPv6) and forwards them to the VM, so LAN devices can reach them via this machine's IP (%{ports}). On the first listen, allow Rusker network access in the Windows firewall prompt."
+  zh-CN: "WSL 使用 NAT 网络：与 Docker Desktop 相同，Rusker 在 Windows 上监听发布到所有接口的端口（TCP/UDP，IPv4 与 IPv6）并转发到 VM，局域网设备可通过本机 IP 访问（%{ports}）。首次监听时请在 Windows 防火墙提示中允许 Rusker 访问网络。"
+app.lan.other:
+  en: "WSL networking mode is %{mode}; Rusker does not forward ports."
+  zh-CN: "WSL 网络模式为 %{mode}，Rusker 不转发端口。"
+app.network.hint:
+  en: "Configure how Docker containers interact with the network."
+  zh-CN: "配置 Docker 容器与网络交互的方式。"
+app.network.subnet:
+  en: "Docker subnet"
+  zh-CN: "Docker 子网"
+app.network.subnet_hint:
+  en: "IPv4 subnet used by the default bridge network (docker0); leave empty to use Docker's default. Change it if it conflicts with your LAN or VPN subnet; existing containers must be recreated to use the new subnet."
+  zh-CN: "默认 bridge 网络（docker0）使用的 IPv4 网段，留空则使用 Docker 默认值。与局域网或 VPN 网段冲突时可修改；已有容器需重新创建才会使用新网段。"
+app.network.host_networking:
+  en: "Enable host networking"
+  zh-CN: "启用主机网络"
+app.network.host_networking_hint:
+  en: "TCP and UDP ports listened on by containers started with --net=host are also forwarded on Windows: reachable from the LAN under NAT networking, and UDP also via localhost. TCP on localhost is forwarded by WSL itself and is not affected by this toggle; no forwarding is needed under mirrored networking. Takes effect immediately without restarting the Engine."
+  zh-CN: "以 --net=host 启动的容器监听的 TCP 和 UDP 端口也会在 Windows 上转发：NAT 网络下局域网设备可访问，UDP 也可通过 localhost 访问。localhost 上的 TCP 由 WSL 自身转发，不受此开关影响；镜像网络下无需转发。应用后立即生效，不会重启 Engine。"
+app.network.port_binding:
+  en: "Port binding behavior"
+  zh-CN: "端口绑定行为"
+app.network.port_binding_hint:
+  en: "Controls whether published container ports bind to all network interfaces (default) or only to 127.0.0.1. Addresses set explicitly in a port mapping (such as 0.0.0.0:8080:80) are not affected."
+  zh-CN: "控制发布的容器端口绑定到所有网络接口（默认），还是只绑定到 127.0.0.1。端口映射中显式指定的地址（如 0.0.0.0:8080:80）不受影响。"
+app.network.default_mode:
+  en: "Default networking mode"
+  zh-CN: "默认网络模式"
+app.network.default_mode_hint:
+  en: "Applies to the default bridge network and bridge networks created afterwards; it can still be set per network (docker network create --ipv6)."
+  zh-CN: "作用于默认 bridge 网络和之后新建的 bridge 网络，创建网络时仍可单独指定（docker network create --ipv6）。"
+app.network.ipv6_hint:
+  en: "The default bridge network uses the IPv6 subnet fd00:7275:736b::/64; new networks are allocated from Docker's IPv6 address pool."
+  zh-CN: "默认 bridge 网络使用 IPv6 子网 fd00:7275:736b::/64，新建网络从 Docker 的 IPv6 地址池分配。"
+app.network.restarts_engine:
+  en: "Restarts the Engine"
+  zh-CN: "会重启 Engine"
+app.network.managed_hint:
+  en: "Network configuration is written to the managed Engine's daemon.json; when it changes, the Engine restarts and running containers are stopped."
+  zh-CN: "网络配置写入受管 Engine 的 daemon.json，变化时 Engine 会重启，运行中的容器会被停止。"
+app.learn_more:
+  en: "Learn more"
+  zh-CN: "了解更多"
+app.statusbar.cpus:
+  en: "CPU %{count} cores"
+  zh-CN: "CPU %{count} 核"
+app.statusbar.memory:
+  en: "Memory %{size}"
+  zh-CN: "内存 %{size}"
+app.statusbar.containers:
+  en: "Containers %{running}/%{total} running"
+  zh-CN: "容器 %{running}/%{total} 运行中"
+app.statusbar.images:
+  en: "Images %{count}"
+  zh-CN: "镜像 %{count}"
+app.statusbar.volumes:
+  en: "Volumes %{count}"
+  zh-CN: "卷 %{count}"
+app.status.engine_stopping:
+  en: "Engine stopping…"
+  zh-CN: "Engine 停止中…"
+app.status.engine_starting:
+  en: "Engine starting…"
+  zh-CN: "Engine 启动中…"
+app.status.engine_restarting:
+  en: "Engine restarting…"
+  zh-CN: "Engine 重启中…"
+app.status.saver:
+  en: "Resource Saver mode"
+  zh-CN: "资源节省模式"
+app.status.not_installed:
+  en: "Engine not installed"
+  zh-CN: "Engine 未安装"
+app.status.stopped:
+  en: "Engine stopped"
+  zh-CN: "Engine 已停止"
+app.status.recovering:
+  en: "Engine recovering…"
+  zh-CN: "Engine 恢复中…"
+app.status.connecting:
+  en: "Connecting to Engine…"
+  zh-CN: "正在连接 Engine…"
+app.proxy.http_label:
+  en: "Web server (HTTP)"
+  zh-CN: "Web 服务器（HTTP）"
+app.proxy.http_hint:
+  en: "Supports http:// or https://; embedded usernames and passwords are not saved."
+  zh-CN: "支持 http:// 或 https://，不保存内嵌用户名或密码。"
+app.proxy.https_label:
+  en: "Secure web server (HTTPS)"
+  zh-CN: "安全 Web 服务器（HTTPS）"
+app.proxy.https_hint:
+  en: "Proxy address for HTTPS requests; an http:// proxy is also allowed."
+  zh-CN: "HTTPS 请求使用的代理地址，也可以填写 http:// 代理。"
+app.proxy.no_proxy_label:
+  en: "Bypass proxy for these hosts and domains"
+  zh-CN: "对以下主机和域名不使用代理"
+app.proxy.no_proxy_hint:
+  en: "Comma-separated, e.g. registry-1.docker.com,*.docker.com,10.0.0.0/8"
+  zh-CN: "逗号分隔，例如 registry-1.docker.com,*.docker.com,10.0.0.0/8"
+app.proxy.no_proxy_detected:
+  en: "No usable HTTP/HTTPS proxy detected; connecting directly."
+  zh-CN: "当前未检测到可用的 HTTP/HTTPS 代理，将直接连接。"
+app.proxy.none:
+  en: "(none)"
+  zh-CN: "（无）"
+app.proxy.current:
+  en: "Currently in effect: HTTP %{http} · HTTPS %{https} · Bypass %{no_proxy}"
+  zh-CN: "当前生效：HTTP %{http} · HTTPS %{https} · 不使用代理 %{no_proxy}"
+app.error.client_config_dir:
+  en: "Could not determine the Docker client config directory; the container proxy only applies to containers created by Rusker"
+  zh-CN: "无法确定 Docker 客户端配置目录，容器代理仅对 Rusker 创建的容器生效"
+app.error.write_client_proxy:
+  en: "Failed to write the container proxy to %{path}: %{error}"
+  zh-CN: "写入容器代理到 %{path} 失败：%{error}"
+app.list_separator:
+  en: ", "
+  zh-CN: "、"

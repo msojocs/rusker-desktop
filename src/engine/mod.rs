@@ -21,15 +21,15 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum EngineError {
-    #[error("无法连接容器引擎：{0}")]
+    #[error("{}", t!("engine.error.connect", detail = .0))]
     Connect(String),
-    #[error("{action}失败：{message}")]
+    #[error("{}", t!("engine.error.operation", action = action, message = message))]
     Operation { action: String, message: String },
-    #[error("{action}超时（{seconds} 秒）")]
+    #[error("{}", t!("engine.error.timeout", action = action, seconds = seconds))]
     Timeout { action: String, seconds: u64 },
-    #[error("无法创建后台运行时：{0}")]
+    #[error("{}", t!("engine.error.runtime", detail = .0))]
     Runtime(String),
-    #[error("后台任务异常结束：{0}")]
+    #[error("{}", t!("engine.error.task", detail = .0))]
     Task(String),
 }
 

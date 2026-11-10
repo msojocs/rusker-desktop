@@ -1,0 +1,265 @@
+_version: 2
+volumes.title:
+  en: "Volumes"
+  zh-CN: "卷"
+volumes.action.delete:
+  en: "Delete"
+  zh-CN: "删除"
+volumes.action.cancel:
+  en: "Cancel"
+  zh-CN: "取消"
+volumes.action.create:
+  en: "Create"
+  zh-CN: "创建"
+volumes.action.clone:
+  en: "Clone"
+  zh-CN: "克隆"
+volumes.action.empty:
+  en: "Empty"
+  zh-CN: "清空"
+volumes.action.import:
+  en: "Import"
+  zh-CN: "导入"
+volumes.action.export:
+  en: "Export"
+  zh-CN: "导出"
+volumes.error.engine_unavailable:
+  en: "Container engine unavailable"
+  zh-CN: "容器引擎不可用"
+volumes.error.exists:
+  en: "Volume %{name} already exists"
+  zh-CN: "卷 %{name} 已存在"
+volumes.error.save_dialog:
+  en: "Unable to open save dialog: %{error}"
+  zh-CN: "无法打开保存对话框：%{error}"
+volumes.error.file_picker:
+  en: "Unable to open file picker: %{error}"
+  zh-CN: "无法打开文件选择器：%{error}"
+volumes.prune.title:
+  en: "Prune %{count} unused volumes?"
+  zh-CN: "清理 %{count} 个未使用的卷？"
+volumes.prune.description:
+  en: "The following volumes are not mounted by any container (including stopped containers) and will be permanently deleted:\n"
+  zh-CN: "以下卷未被任何容器（包括已停止的容器）挂载，将被永久删除：\n"
+volumes.remove_many.title:
+  en: "Delete %{count} volumes?"
+  zh-CN: "删除 %{count} 个卷？"
+volumes.remove_many.description:
+  en: "The following volumes and their data will be permanently deleted. This cannot be undone:\n"
+  zh-CN: "以下卷及其数据将被永久删除，此操作不可撤销：\n"
+volumes.remove_many.in_use_note:
+  en: "\n%{count} of these volumes are mounted by containers; the Engine will refuse to delete them, while the rest are deleted normally."
+  zh-CN: "\n其中 %{count} 个卷正被容器挂载，Engine 会拒绝删除它们，其余卷照常删除。"
+volumes.task.remove_many:
+  en: "Delete %{count} volumes"
+  zh-CN: "删除 %{count} 个卷"
+volumes.task.export:
+  en: "Export volume %{name}"
+  zh-CN: "导出卷 %{name}"
+volumes.task.create_named:
+  en: "Create volume %{name}"
+  zh-CN: "创建卷 %{name}"
+volumes.task.clone:
+  en: "Clone volume %{source} as %{target}"
+  zh-CN: "克隆卷 %{source} 为 %{target}"
+volumes.task.remove:
+  en: "Delete volume %{name}"
+  zh-CN: "删除卷 %{name}"
+volumes.task.empty:
+  en: "Empty volume %{name}"
+  zh-CN: "清空卷 %{name}"
+volumes.task.import:
+  en: "Import data into volume %{name}"
+  zh-CN: "导入数据到卷 %{name}"
+volumes.notice.removed_many:
+  en: "Deleted %{count} volumes"
+  zh-CN: "已删除 %{count} 个卷"
+volumes.notice.removed_partial:
+  en: "Deleted %{removed} volumes, %{failed} failed:\n%{details}"
+  zh-CN: "已删除 %{removed} 个卷，%{failed} 个失败：\n%{details}"
+volumes.notice.exported:
+  en: "Exported volume %{name} to %{path} (%{size})"
+  zh-CN: "已导出卷 %{name} 到 %{path}（%{size}）"
+volumes.create.title:
+  en: "Create Volume"
+  zh-CN: "创建卷"
+volumes.create.name_label:
+  en: "Volume name"
+  zh-CN: "卷名称"
+volumes.create.name_hint:
+  en: "Leave empty to let the Engine generate a random name. May contain letters, digits, underscores, dots, and hyphens."
+  zh-CN: "留空则由 Engine 生成随机名称。可包含字母、数字、下划线、点和连字符。"
+volumes.clone.title:
+  en: "Clone volume %{name}"
+  zh-CN: "克隆卷 %{name}"
+volumes.clone.hint:
+  en: "Creates a new volume and copies all data through a temporary %{image} container, preserving ownership, permissions, and timestamps."
+  zh-CN: "创建新卷并通过临时 %{image} 容器复制全部数据，保留属主、权限和时间戳。"
+volumes.clone.in_use_hint:
+  en: "This volume is in use by containers; stopping the related containers first is recommended to keep data consistent."
+  zh-CN: "该卷正被容器使用，建议先停止相关容器以保证数据一致。"
+volumes.clone.name_label:
+  en: "New volume name *"
+  zh-CN: "新卷名称 *"
+volumes.clone.name_hint:
+  en: "May contain letters, digits, underscores, dots, and hyphens."
+  zh-CN: "可包含字母、数字、下划线、点和连字符。"
+volumes.remove.title:
+  en: "Delete volume %{name}?"
+  zh-CN: "删除卷 %{name}？"
+volumes.remove.description:
+  en: "This cannot be undone. All data in the volume will be permanently deleted."
+  zh-CN: "此操作不可撤销，卷中的全部数据将被永久删除。"
+volumes.remove.in_use:
+  en: "This volume is mounted by %{count} containers (including stopped ones). The Engine will refuse to delete a volume that is still referenced; delete those containers first."
+  zh-CN: "该卷正被 %{count} 个容器挂载（含已停止的容器）。Engine 会拒绝删除仍被引用的卷，请先删除这些容器。"
+volumes.empty.title:
+  en: "Empty volume %{name}?"
+  zh-CN: "清空卷 %{name}？"
+volumes.empty.description:
+  en: "All files and directories inside the volume will be permanently deleted; the volume itself is kept. This cannot be undone."
+  zh-CN: "将永久删除卷内的全部文件和目录，卷本身保留。此操作不可撤销。"
+volumes.empty.running_note:
+  en: "\nThis volume is in use by %{count} running containers. Emptying it may cause those containers to misbehave; stopping them first is recommended."
+  zh-CN: "\n该卷正被 %{count} 个运行中的容器使用，清空可能导致这些容器异常，建议先停止。"
+volumes.import.title:
+  en: "Import data into volume %{name}?"
+  zh-CN: "导入数据到卷 %{name}？"
+volumes.import.description:
+  en: "Extracts %{path} into the volume root. Supports tar, tar.gz, tar.bz2, and tar.xz; files with the same name are overwritten, other existing files are kept, and ownership and permissions from the archive are preserved."
+  zh-CN: "将 %{path} 解压到卷根目录。支持 tar、tar.gz、tar.bz2 和 tar.xz；同名文件会被覆盖，其他已有文件保留；归档中的属主与权限会保留。"
+volumes.size.calculating:
+  en: "Calculating…"
+  zh-CN: "统计中…"
+volumes.column.name:
+  en: "Name"
+  zh-CN: "名称"
+volumes.column.created:
+  en: "Created"
+  zh-CN: "创建时间"
+volumes.column.size:
+  en: "Size"
+  zh-CN: "大小"
+volumes.column.actions:
+  en: "Actions"
+  zh-CN: "操作"
+volumes.list.select_all:
+  en: "Select all in current list"
+  zh-CN: "全选当前列表"
+volumes.list.empty:
+  en: "No volumes yet"
+  zh-CN: "还没有卷"
+volumes.list.no_match:
+  en: "No matching volumes"
+  zh-CN: "没有匹配的卷"
+volumes.list.empty_hint:
+  en: "Click \"Create Volume\" to make one, or adjust the search filters."
+  zh-CN: "点击“创建卷”新建一个，或调整搜索条件。"
+volumes.list.summary:
+  en: "%{total} total, %{shown} shown. A solid dot means the volume is in use by a container."
+  zh-CN: "共 %{total} 个，当前显示 %{shown} 个。实心圆点表示正被容器使用。"
+volumes.list.clear_selection:
+  en: "Clear selection"
+  zh-CN: "取消选择"
+volumes.list.remove_selected:
+  en: "Delete selected (%{count})"
+  zh-CN: "删除所选（%{count}）"
+volumes.list.prune:
+  en: "Prune unused (%{count})"
+  zh-CN: "清理未使用（%{count}）"
+volumes.list.prune_tooltip:
+  en: "Delete all volumes not mounted by any container"
+  zh-CN: "删除所有未被任何容器挂载的卷"
+volumes.list.size_error:
+  en: "Failed to calculate volume sizes: %{error}"
+  zh-CN: "卷大小统计失败：%{error}"
+volumes.list.showing:
+  en: "Showing %{count} items"
+  zh-CN: "显示 %{count} 项"
+volumes.status.unused:
+  en: "Unused"
+  zh-CN: "未使用"
+volumes.status.in_use:
+  en: "In use (%{count} containers)"
+  zh-CN: "使用中（%{count} 个容器）"
+volumes.detail.driver:
+  en: "Driver"
+  zh-CN: "驱动"
+volumes.detail.created:
+  en: "Created"
+  zh-CN: "创建于"
+volumes.detail.mountpoint:
+  en: "Mount point"
+  zh-CN: "挂载点"
+volumes.detail.labels:
+  en: "Labels"
+  zh-CN: "标签"
+volumes.tab.data:
+  en: "Data"
+  zh-CN: "存储数据"
+volumes.tab.containers:
+  en: "Containers in use (%{count})"
+  zh-CN: "使用中的容器（%{count}）"
+volumes.tab.exports:
+  en: "Exports (%{count})"
+  zh-CN: "导出（%{count}）"
+volumes.exports.empty:
+  en: "No exports yet"
+  zh-CN: "还没有导出记录"
+volumes.exports.empty_hint:
+  en: "Files will be listed here after an export finishes, where you can locate them in their folder."
+  zh-CN: "导出完成后会在这里列出文件，可在文件夹中定位。"
+volumes.exports.reveal:
+  en: "Show in folder"
+  zh-CN: "在文件夹中显示"
+volumes.exports.hint:
+  en: "Exports as an uncompressed tar file with entries relative to the volume root, preserving ownership, permissions, and timestamps; restore to any volume via \"Import\". Records are kept only for this session."
+  zh-CN: "导出为未压缩的 tar 文件，条目相对卷根目录并保留属主、权限和时间戳，可通过“导入”恢复到任意卷。记录只保留在本次运行期间。"
+volumes.exports.running_note:
+  en: "This volume is in use by %{count} running containers. If writes continue during export, data may be inconsistent; stopping them first is recommended."
+  zh-CN: "该卷正被 %{count} 个运行中的容器使用，导出时若仍在写入，数据可能不一致，建议先停止。"
+volumes.exports.export_to_file:
+  en: "Export to file…"
+  zh-CN: "导出到文件…"
+volumes.data.modified:
+  en: "Modified"
+  zh-CN: "修改时间"
+volumes.data.mode:
+  en: "Permissions"
+  zh-CN: "权限"
+volumes.data.loading:
+  en: "Reading volume contents…"
+  zh-CN: "正在读取卷内容…"
+volumes.data.loading_hint:
+  en: "The %{image} helper image will be pulled on first use."
+  zh-CN: "首次使用会拉取 %{image} 辅助镜像。"
+volumes.data.empty:
+  en: "Volume is empty"
+  zh-CN: "卷是空的"
+volumes.data.empty_hint:
+  en: "Click \"Import\" to write data from a tar archive."
+  zh-CN: "点击“导入”从 tar 归档写入数据。"
+volumes.data.hint:
+  en: "The volume is mounted read-only into a temporary %{image} container for reading; directory sizes reflect disk usage."
+  zh-CN: "卷以只读方式挂载到临时 %{image} 容器中读取，目录大小为磁盘占用。"
+volumes.data.reading:
+  en: "Reading"
+  zh-CN: "读取中"
+volumes.data.reading_ellipsis:
+  en: "Reading…"
+  zh-CN: "读取中…"
+volumes.data.refresh:
+  en: "Refresh contents"
+  zh-CN: "刷新内容"
+volumes.data.empty_dir:
+  en: "Empty directory"
+  zh-CN: "空目录"
+volumes.data.truncated:
+  en: "Showing only the first %{count} entries"
+  zh-CN: "仅显示前 %{count} 项"
+volumes.users.empty:
+  en: "No containers use this volume"
+  zh-CN: "没有容器使用此卷"
+volumes.users.empty_hint:
+  en: "The volume is not mounted by any container (including stopped containers)."
+  zh-CN: "卷未被任何容器（包括已停止的容器）挂载。"

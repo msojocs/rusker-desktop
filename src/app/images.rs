@@ -104,7 +104,7 @@ impl RuskerApp {
             self.navigate(Page::Images, cx);
             self.open_image_detail(row, cx);
         } else {
-            self.notify_error("容器使用的镜像已不在本地镜像列表中，请刷新后重试。", cx);
+            self.notify_error(t!("images.error.image_missing"), cx);
         }
         cx.notify();
     }
@@ -138,29 +138,35 @@ impl RuskerApp {
             })
             .unwrap_or(0);
         let description = if row.in_use() {
-            "此镜像正被容器使用（包括已停止的容器），Engine 会拒绝删除。请先删除相关容器。"
+            t!("images.remove.in_use")
         } else if row.reference.is_some() && shared_tags > 1 {
-            "该镜像还有其他标签，此操作只移除这个标签，镜像数据保留。"
+            t!("images.remove.untag")
         } else {
-            "镜像将被永久删除，此操作不可撤销。"
-        };
+            t!("images.remove.permanent")
+        }
+        .to_string();
         let target = row.target().to_string();
-        let title = format!(
-            "删除镜像 {}？",
-            row.reference.clone().unwrap_or_else(|| short_id(&row.id))
-        );
+        let title = t!(
+            "images.remove.title",
+            name = row.reference.clone().unwrap_or_else(|| short_id(&row.id))
+        )
+        .to_string();
         let weak = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, cx| {
             let target = target.clone();
             let weak = weak.clone();
             dialog
                 .title(title.clone())
-                .description(description)
+                .description(description.clone())
                 .confirm()
-                .ok_text("删除")
-                .cancel_text("取消")
+                .ok_text(t!("images.action.delete").into_owned())
+                .cancel_text(t!("images.action.cancel").into_owned())
                 .ok_variant(ButtonVariant::Danger)
-                .footer(confirmation_footer("删除", ButtonVariant::Danger, cx))
+                .footer(confirmation_footer(
+                    t!("images.action.delete").into_owned(),
+                    ButtonVariant::Danger,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let target = target.clone();
                     _ = weak.update(cx, |this, cx| this.remove_image(target, cx));
@@ -184,7 +190,7 @@ impl RuskerApp {
             .take(8)
             .map(|target| {
                 if target.starts_with("sha256:") {
-                    format!("<none>（{}）", short_id(target))
+                    t!("images.remove_many.untagged", id = short_id(target)).into_owned()
                 } else {
                     target.clone()
                 }
@@ -194,19 +200,22 @@ impl RuskerApp {
             listed.push("…".into());
         }
         let mut description = if unused_only {
-            "以下镜像未被任何容器（包括已停止的容器）使用，将被删除：\n".to_string()
+            t!("images.remove_many.unused_intro").into_owned()
         } else {
-            "以下镜像将被删除，此操作不可撤销：\n".to_string()
+            t!("images.remove_many.intro").into_owned()
         };
+        description.push('\n');
         description.push_str(&listed.join("\n"));
         if !unused_only {
-            description.push_str("\n仍被容器使用的镜像会被 Engine 拒绝删除，其余照常删除。");
+            description.push('\n');
+            description.push_str(&t!("images.remove_many.in_use_note"));
         }
         let title = if unused_only {
-            format!("清理 {} 个未使用的镜像？", targets.len())
+            t!("images.remove_many.prune_title", count = targets.len())
         } else {
-            format!("删除 {} 个镜像？", targets.len())
-        };
+            t!("images.remove_many.title", count = targets.len())
+        }
+        .into_owned();
         let weak = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, cx| {
             let targets = targets.clone();
@@ -215,10 +224,14 @@ impl RuskerApp {
                 .title(title.clone())
                 .description(description.clone())
                 .confirm()
-                .ok_text("删除")
-                .cancel_text("取消")
+                .ok_text(t!("images.action.delete").into_owned())
+                .cancel_text(t!("images.action.cancel").into_owned())
                 .ok_variant(ButtonVariant::Danger)
-                .footer(confirmation_footer("删除", ButtonVariant::Danger, cx))
+                .footer(confirmation_footer(
+                    t!("images.action.delete").into_owned(),
+                    ButtonVariant::Danger,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let targets = targets.clone();
                     _ = weak.update(cx, |this, cx| this.remove_images(targets, cx));
@@ -232,14 +245,14 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.notify_error("容器引擎不可用", cx);
+            self.notify_error(t!("images.error.engine_unavailable"), cx);
             cx.notify();
             return;
         };
         let total = targets.len();
         let handle = engine.remove_images(targets);
         self.refresh_revision.advance();
-        self.busy = Some(format!("删除 {total} 个镜像…"));
+        self.busy = Some(t!("images.remove_many.busy", count = total).into_owned());
         self.loading = false;
         cx.notify();
         self._action_task = Some(cx.spawn(async move |this, cx| {
@@ -251,14 +264,14 @@ impl RuskerApp {
                         this.connected = true;
                         this.apply_snapshot(snapshot);
                         if failures.is_empty() {
-                            this.notify_success(format!("已删除 {total} 个镜像"), cx);
+                            this.notify_success(t!("images.remove_many.done", count = total), cx);
                         } else {
                             this.notify_error(
-                                format!(
-                                    "已删除 {} 个镜像，{} 个失败：\n{}",
-                                    total - failures.len(),
-                                    failures.len(),
-                                    failures.join("\n")
+                                t!(
+                                    "images.remove_many.partial",
+                                    removed = total - failures.len(),
+                                    failed = failures.len(),
+                                    failures = failures.join("\n")
                                 ),
                                 cx,
                             );
@@ -287,7 +300,7 @@ impl RuskerApp {
             let submit = weak.clone();
             let confirm = weak.clone();
             dialog
-                .title("拉取镜像")
+                .title(t!("images.pull.title").into_owned())
                 .w(px(520.))
                 .on_ok(move |_, window, cx| {
                     _ = confirm.update(cx, |this, cx| this.submit_pull(window, cx));
@@ -300,9 +313,9 @@ impl RuskerApp {
                         .flex_col()
                         .gap_4()
                         .child(form_field(
-                            "镜像引用",
+                            t!("images.pull.reference"),
                             &input,
-                            "省略标签时拉取 latest；使用 Engine 配置的镜像源和代理。",
+                            t!("images.pull.hint"),
                             cx,
                         ))
                         .when_some(error, |this, error| {
@@ -326,14 +339,14 @@ impl RuskerApp {
                         .child(
                             button("cancel-pull")
                                 .outline()
-                                .label("取消")
+                                .label(t!("images.action.cancel").into_owned())
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             button("submit-pull")
                                 .primary()
                                 .icon(IconName::ArrowDown)
-                                .label("拉取")
+                                .label(t!("images.pull.submit").into_owned())
                                 .on_click(move |_, window, cx| {
                                     _ = submit.update(cx, |this, cx| {
                                         this.submit_pull(window, cx);
@@ -347,14 +360,14 @@ impl RuskerApp {
     fn submit_pull(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let reference = self.pull_input.read(cx).value().trim().to_string();
         let error = if reference.is_empty() {
-            Some("请输入要拉取的镜像引用")
+            Some(t!("images.pull.error.empty").into_owned())
         } else if reference.chars().any(char::is_whitespace) {
-            Some("镜像引用不能包含空白字符")
+            Some(t!("images.pull.error.whitespace").into_owned())
         } else {
             None
         };
         if let Some(error) = error {
-            self.images.pull_error = Some(error.into());
+            self.images.pull_error = Some(error);
             cx.notify();
             return;
         }
@@ -412,28 +425,40 @@ impl RuskerApp {
                     .flex_col()
                     .gap_1()
                     .child(self.usage_bar(used, total, cx))
-                    .child(div().text_sm().child(format!(
-                        "{} / {} 使用中",
-                        format_bytes(used),
-                        format_bytes(total)
-                    ))),
+                    .child(
+                        div().text_sm().child(
+                            t!(
+                                "images.usage.in_use",
+                                used = format_bytes(used),
+                                total = format_bytes(total)
+                            )
+                            .into_owned(),
+                        ),
+                    ),
             )
-            .child(div().text_sm().child(format!("{image_count} 个镜像")))
+            .child(
+                div()
+                    .text_sm()
+                    .child(t!("images.usage.count", count = image_count).into_owned()),
+            )
             .child(div().flex_1())
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(match self.images.last_refresh {
-                        Some(time) => format!("上次刷新：{}", format_relative(time, now())),
-                        None => "尚未刷新".into(),
+                        Some(time) => {
+                            t!("images.refresh.last", time = format_relative(time, now()))
+                                .into_owned()
+                        }
+                        None => t!("images.refresh.never").into_owned(),
                     }),
             )
             .child(
                 list_action_button("refresh-images", cx.theme().foreground, cx)
                     .small()
                     .icon(IconName::RotateCw)
-                    .tooltip("刷新")
+                    .tooltip(t!("images.action.refresh").into_owned())
                     .loading(self.loading)
                     .disabled(self.loading || busy)
                     .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
@@ -456,14 +481,14 @@ impl RuskerApp {
                 list_action_button("image-filter", cx.theme().foreground, cx)
                     .icon(Icon::new(AssetIcon::ListFilter))
                     .when(filter != ImageFilter::All, |button| {
-                        button.label(filter.label())
+                        button.label(filter.label().into_owned())
                     })
-                    .tooltip("筛选")
+                    .tooltip(t!("images.action.filter").into_owned())
                     .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
                         for option in ImageFilter::ALL {
                             let weak = weak.clone();
                             menu = menu.item(
-                                PopupMenuItem::new(option.label())
+                                PopupMenuItem::new(option.label().into_owned())
                                     .checked(option == filter)
                                     .on_click(move |_, _, cx| {
                                         _ = weak.update(cx, |this, cx| {
@@ -481,7 +506,7 @@ impl RuskerApp {
                 let count = checked.len();
                 this.child(
                     list_action_button("clear-image-selection", cx.theme().foreground, cx)
-                        .label("取消选择")
+                        .label(t!("images.action.clear_selection").into_owned())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.images.checked.clear();
                             cx.notify();
@@ -492,7 +517,7 @@ impl RuskerApp {
                         .danger()
                         .pointer(!busy)
                         .icon(AssetIcon::Trash)
-                        .label(format!("删除所选（{count}）"))
+                        .label(t!("images.action.delete_selected", count = count).into_owned())
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.confirm_remove_images(checked.clone(), false, window, cx);
@@ -504,8 +529,8 @@ impl RuskerApp {
                     .outline()
                     .pointer(!busy && !unused.is_empty())
                     .icon(AssetIcon::BrushCleaning)
-                    .label(format!("清理未使用（{}）", unused.len()))
-                    .tooltip("删除所有未被任何容器使用的镜像")
+                    .label(t!("images.action.prune", count = unused.len()).into_owned())
+                    .tooltip(t!("images.action.prune_tooltip").into_owned())
                     .disabled(busy || unused.is_empty())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.confirm_remove_images(unused.clone(), true, window, cx);
@@ -516,7 +541,7 @@ impl RuskerApp {
                     .primary()
                     .pointer(!busy)
                     .icon(IconName::ArrowDown)
-                    .label("拉取镜像")
+                    .label(t!("images.pull.title").into_owned())
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, window, cx| this.open_pull_dialog(window, cx))),
             );
@@ -532,12 +557,10 @@ impl RuskerApp {
             .child(usage)
             .child(toolbar)
             .child(self.render_image_table(rows, all_rows.is_empty(), cx))
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .child(muted(format!("显示 {shown} 项"), cx)),
-            )
+            .child(div().flex().justify_end().child(muted(
+                t!("images.list.shown", count = shown).into_owned(),
+                cx,
+            )))
     }
 
     fn usage_bar(&self, used: u64, total: u64, cx: &mut Context<Self>) -> Div {
@@ -563,7 +586,7 @@ impl RuskerApp {
     fn sort_header(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: String,
         key: ImageSortKey,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -621,7 +644,7 @@ impl RuskerApp {
                 div().w(px(CHECK_COLUMN)).flex_shrink_0().child(
                     Checkbox::new("check-all-images")
                         .checked(all_checked)
-                        .tooltip("全选当前列表")
+                        .tooltip(t!("images.list.select_all").into_owned())
                         .disabled(visible.is_empty())
                         .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                             for key in &visible {
@@ -638,7 +661,7 @@ impl RuskerApp {
             .child(div().w(px(DOT_COLUMN)).flex_shrink_0())
             .child(div().flex_1().min_w_0().child(self.sort_header(
                 "sort-name",
-                "名称",
+                t!("images.column.name").into_owned(),
                 ImageSortKey::Name,
                 cx,
             )))
@@ -646,14 +669,29 @@ impl RuskerApp {
                 div()
                     .w(px(TAG_COLUMN))
                     .flex_shrink_0()
-                    .child(self.sort_header("sort-tag", "标签", ImageSortKey::Tag, cx)),
+                    .child(self.sort_header(
+                        "sort-tag",
+                        t!("images.column.tag").into_owned(),
+                        ImageSortKey::Tag,
+                        cx,
+                    )),
             )
-            .child(div().w(px(ID_COLUMN)).flex_shrink_0().child("镜像 ID"))
+            .child(
+                div()
+                    .w(px(ID_COLUMN))
+                    .flex_shrink_0()
+                    .child(t!("images.column.id").into_owned()),
+            )
             .child(
                 div()
                     .w(px(CREATED_COLUMN))
                     .flex_shrink_0()
-                    .child(self.sort_header("sort-created", "创建时间", ImageSortKey::Created, cx)),
+                    .child(self.sort_header(
+                        "sort-created",
+                        t!("images.column.created").into_owned(),
+                        ImageSortKey::Created,
+                        cx,
+                    )),
             )
             .child(
                 div()
@@ -662,9 +700,19 @@ impl RuskerApp {
                     .pr_4()
                     .flex()
                     .justify_end()
-                    .child(self.sort_header("sort-size", "大小", ImageSortKey::Size, cx)),
+                    .child(self.sort_header(
+                        "sort-size",
+                        t!("images.column.size").into_owned(),
+                        ImageSortKey::Size,
+                        cx,
+                    )),
             )
-            .child(div().w(px(ACTIONS_COLUMN)).flex_shrink_0().child("操作"));
+            .child(
+                div()
+                    .w(px(ACTIONS_COLUMN))
+                    .flex_shrink_0()
+                    .child(t!("images.column.actions").into_owned()),
+            );
 
         let panel = div()
             .rounded_lg()
@@ -678,9 +726,17 @@ impl RuskerApp {
 
         if rows.is_empty() {
             return panel.child(if no_images {
-                empty_state("还没有镜像", "点击“拉取镜像”从镜像仓库获取一个。", cx)
+                empty_state(
+                    t!("images.empty.title").into_owned(),
+                    t!("images.empty.description").into_owned(),
+                    cx,
+                )
             } else {
-                empty_state("没有匹配的镜像", "调整搜索或筛选条件。", cx)
+                empty_state(
+                    t!("images.empty.no_match").into_owned(),
+                    t!("images.empty.no_match_hint").into_owned(),
+                    cx,
+                )
             });
         }
 
@@ -750,9 +806,11 @@ impl RuskerApp {
                     .child(usage_dot(in_use, cx))
                     .tooltip(move |window, cx| {
                         let text: SharedString = if in_use {
-                            format!("被 {} 个容器使用", row.containers).into()
+                            t!("images.usage.used_by", count = row.containers)
+                                .into_owned()
+                                .into()
                         } else {
-                            "未被容器使用".into()
+                            t!("images.usage.unused").into_owned().into()
                         };
                         gpui_kit::component::tooltip::Tooltip::new(text).build(window, cx)
                     }),
@@ -818,7 +876,7 @@ impl RuskerApp {
                         list_action_button(("run-image", index), cx.theme().primary, cx)
                             .small()
                             .icon(IconName::Play)
-                            .tooltip("运行")
+                            .tooltip(t!("images.action.run").into_owned())
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_create_container_dialog(
@@ -841,7 +899,7 @@ impl RuskerApp {
                         list_action_button(("remove-image", index), cx.theme().danger, cx)
                             .small()
                             .icon(AssetIcon::Trash)
-                            .tooltip("删除")
+                            .tooltip(t!("images.action.delete").into_owned())
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.confirm_remove_image_row(&remove_row, window, cx);
@@ -864,7 +922,12 @@ fn image_menu(
     let id = row.id.clone();
     let reference = row.reference.clone();
     menu.item(
-        image_menu_item("查看镜像详情", AssetIcon::Layers2, true).on_click(move |_, _, cx| {
+        image_menu_item(
+            t!("images.menu.view_details").into_owned(),
+            AssetIcon::Layers2,
+            true,
+        )
+        .on_click(move |_, _, cx| {
             _ = detail_weak.update(cx, |this, cx| {
                 this.open_image_detail(detail_row.clone(), cx);
             });
@@ -873,9 +936,9 @@ fn image_menu(
     .item(
         image_menu_item(
             if row.in_use() {
-                format!("查看使用的容器（{}）", row.containers)
+                t!("images.menu.view_containers_count", count = row.containers).into_owned()
             } else {
-                "查看使用的容器".into()
+                t!("images.menu.view_containers").into_owned()
             },
             AssetIcon::Container,
             row.in_use(),
@@ -888,7 +951,7 @@ fn image_menu(
     )
     .item(
         image_menu_item(
-            "拉取最新版本",
+            t!("images.menu.pull_latest").into_owned(),
             AssetIcon::Download,
             pull_reference.is_some(),
         )
@@ -900,18 +963,23 @@ fn image_menu(
     )
     .separator()
     .item(
-        image_menu_item("复制镜像 ID", IconName::Copy, true).on_click(move |_, _, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
-        }),
-    )
-    .item(
-        image_menu_item("复制镜像引用", IconName::Copy, reference.is_some()).on_click(
+        image_menu_item(t!("images.menu.copy_id").into_owned(), IconName::Copy, true).on_click(
             move |_, _, cx| {
-                if let Some(reference) = reference.clone() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(reference));
-                }
+                cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
             },
         ),
+    )
+    .item(
+        image_menu_item(
+            t!("images.menu.copy_reference").into_owned(),
+            IconName::Copy,
+            reference.is_some(),
+        )
+        .on_click(move |_, _, cx| {
+            if let Some(reference) = reference.clone() {
+                cx.write_to_clipboard(ClipboardItem::new_string(reference));
+            }
+        }),
     )
     .min_w(px(200.))
 }

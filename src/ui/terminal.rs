@@ -146,7 +146,9 @@ impl TerminalView {
             self.close_search(window, cx);
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索终端输出"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("ui.terminal_search_placeholder"))
+        });
         self.search_subscription =
             Some(
                 cx.subscribe_in(&input, window, |this, input, event, _, cx| match event {
@@ -247,9 +249,9 @@ impl TerminalView {
             return;
         };
         if text.len() > 64 * 1024 {
-            self.error = Some("单次粘贴不能超过 64 KiB".into());
+            self.error = Some(t!("ui.paste_too_large").into_owned());
         } else if let Err(error) = input.try_send(text) {
-            self.error = Some(format!("终端输入未发送：{error}"));
+            self.error = Some(t!("ui.terminal_input_not_sent", error = error).into_owned());
         } else {
             self.error = None;
             self.parser.screen_mut().set_scrollback(0);
@@ -574,7 +576,7 @@ impl Render for TerminalView {
                                 .label("Reg")
                                 .when(self.search_regex, |button| button.primary())
                                 .when(!self.search_regex, |button| button.ghost())
-                                .tooltip("正则表达式")
+                                .tooltip(t!("ui.regex"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.search_regex = !this.search_regex;
                                     this.compile_search();
@@ -599,7 +601,7 @@ impl Render for TerminalView {
                                 .ghost()
                                 .small()
                                 .icon(IconName::ChevronLeft)
-                                .tooltip("上一处（Shift+Enter）")
+                                .tooltip(t!("ui.previous_match"))
                                 .disabled(self.search_matches.is_empty())
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.navigate_search(true, cx)),
@@ -610,7 +612,7 @@ impl Render for TerminalView {
                                 .ghost()
                                 .small()
                                 .icon(IconName::ChevronRight)
-                                .tooltip("下一处（Enter）")
+                                .tooltip(t!("ui.next_match"))
                                 .disabled(self.search_matches.is_empty())
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.navigate_search(false, cx)),
@@ -621,7 +623,7 @@ impl Render for TerminalView {
                                 .ghost()
                                 .small()
                                 .icon(IconName::Close)
-                                .tooltip("关闭搜索（Esc）")
+                                .tooltip(t!("ui.close_search"))
                                 .on_click(
                                     cx.listener(|this, _, window, cx| {
                                         this.close_search(window, cx)
@@ -638,7 +640,7 @@ impl Render for TerminalView {
                             .pb_2()
                             .text_xs()
                             .text_color(cx.theme().danger)
-                            .child(format!("无效正则表达式：{error}")),
+                            .child(t!("ui.invalid_regex", error = error).into_owned()),
                     )
                 })
         });
@@ -667,7 +669,7 @@ impl Render for TerminalView {
                                     .ghost()
                                     .small()
                                     .icon(IconName::Search)
-                                    .tooltip("搜索（Ctrl+F）")
+                                    .tooltip(t!("ui.search_ctrl_f"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.toggle_search(window, cx)
                                     })),
@@ -677,7 +679,7 @@ impl Render for TerminalView {
                                     .ghost()
                                     .small()
                                     .icon(IconName::Copy)
-                                    .tooltip("复制输出")
+                                    .tooltip(t!("ui.copy_output"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             this.contents(),
@@ -689,7 +691,7 @@ impl Render for TerminalView {
                                     .ghost()
                                     .small()
                                     .icon(IconName::Delete)
-                                    .tooltip("清屏")
+                                    .tooltip(t!("ui.clear_screen"))
                                     .on_click(cx.listener(|this, _, _, cx| this.clear(cx))),
                             ),
                     ),

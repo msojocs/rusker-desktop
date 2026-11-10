@@ -34,7 +34,7 @@ impl Render for PullProgressView {
             .text_xs()
             .child(div().text_color(cx.theme().muted_foreground).child(
                 if progress.status.is_empty() {
-                    "正在连接镜像仓库…".to_string()
+                    t!("images.pull.connecting").into_owned()
                 } else {
                     progress.status.clone()
                 },
@@ -84,13 +84,12 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.notify_error("容器引擎不可用", cx);
+            self.notify_error(t!("images.error.engine_unavailable"), cx);
             cx.notify();
             return;
         };
-        let label = format!("拉取镜像 {reference}");
         let revision = self.refresh_revision.advance();
-        self.busy = Some(format!("{label}…"));
+        self.busy = Some(t!("images.pull.busy", reference = &reference).into_owned());
         self.loading = false;
 
         let progress_view = cx.new(|_| PullProgressView {
@@ -100,7 +99,7 @@ impl RuskerApp {
         window.push_notification(
             Notification::new()
                 .id::<ImagePullNotification>()
-                .title("正在拉取镜像")
+                .title(t!("images.pull.in_progress").into_owned())
                 .message(reference.clone())
                 .placement(Anchor::BottomRight)
                 .delivery(NotificationDelivery::InApp)
@@ -142,12 +141,12 @@ impl RuskerApp {
                         this.connected = true;
                         this.apply_snapshot(snapshot);
                         this.after_volume_snapshot(cx);
-                        Notification::success(reference).title("镜像拉取完成")
+                        Notification::success(reference).title(t!("images.pull.done").into_owned())
                     }
                     Err(error) => {
                         let message = error.to_string();
                         Notification::error(message)
-                            .title("镜像拉取失败")
+                            .title(t!("images.pull.failed").into_owned())
                             .autohide(false)
                     }
                 };

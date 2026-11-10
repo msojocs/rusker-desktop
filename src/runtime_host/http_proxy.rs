@@ -218,7 +218,12 @@ fn host_string(url: &Url) -> Option<String> {
 async fn dial(host: &str, port: u16) -> io::Result<TcpStream> {
     let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect((host, port)))
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "连接超时"))??;
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                t!("runtime_host.error.connect_timeout").into_owned(),
+            )
+        })??;
     let _ = stream.set_nodelay(true);
     Ok(stream)
 }
@@ -252,7 +257,7 @@ fn tls_config() -> io::Result<Arc<rustls::ClientConfig>> {
             let (added, _) =
                 roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
             if added == 0 {
-                return Err("无法读取系统根证书".into());
+                return Err(t!("runtime_host.error.system_root_certs_unreadable").into_owned());
             }
             rustls::ClientConfig::builder_with_provider(Arc::new(
                 rustls::crypto::ring::default_provider(),
@@ -277,7 +282,13 @@ where
     W: AsyncWrite + Unpin,
 {
     let Some((host, port)) = connect_authority(&request.target) else {
-        return respond_error(&mut write, 400, "Bad Request", "CONNECT 目标无效").await;
+        return respond_error(
+            &mut write,
+            400,
+            "Bad Request",
+            &t!("runtime_host.error.invalid_connect_target"),
+        )
+        .await;
     };
     let route = route(&proxy.https_proxy, &proxy.no_proxy, &host, port);
     let mut stream = match open(&route, &host, port).await {
@@ -328,11 +339,20 @@ fn connect_authority(target: &str) -> Option<(String, u16)> {
 
 fn connect_error(route: &Route, host: &str, port: u16, error: &io::Error) -> String {
     match route {
-        Route::Direct => format!("无法连接 {host}:{port}：{error}"),
-        Route::Via(upstream) => format!(
-            "无法连接上游代理 {}:{}：{error}",
-            upstream.host, upstream.port
-        ),
+        Route::Direct => t!(
+            "runtime_host.error.connect_failed",
+            host = host,
+            port = port,
+            error = error
+        )
+        .into_owned(),
+        Route::Via(upstream) => t!(
+            "runtime_host.error.upstream_connect_failed",
+            host = upstream.host,
+            port = upstream.port,
+            error = error
+        )
+        .into_owned(),
     }
 }
 
@@ -371,7 +391,7 @@ where
                 write,
                 400,
                 "Bad Request",
-                "仅支持 http:// 绝对地址的代理请求",
+                &t!("runtime_host.error.absolute_url_only"),
             )
             .await?;
             return Ok(Next::Close);
@@ -433,7 +453,13 @@ where
             }
             Ok(None) => {
                 *server = None;
-                respond_error(write, 502, "Bad Gateway", "服务器未返回响应即关闭了连接").await?;
+                respond_error(
+                    write,
+                    502,
+                    "Bad Gateway",
+                    &t!("runtime_host.error.server_closed_without_response"),
+                )
+                .await?;
                 return Ok(Next::Close);
             }
             Err(error) => {
@@ -494,7 +520,7 @@ where
         if response.code == 101 {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "代理不支持协议升级",
+                t!("runtime_host.error.protocol_upgrade_unsupported").into_owned(),
             ));
         }
         return Ok(Some(response));
@@ -552,7 +578,7 @@ fn parse_request(head: &[u8]) -> Result<Request, String> {
     let mut request = httparse::Request::new(&mut headers);
     match request.parse(head) {
         Ok(httparse::Status::Complete(_)) => {}
-        _ => return Err("请求头无效".into()),
+        _ => return Err(t!("runtime_host.error.invalid_request_headers").into_owned()),
     }
     Ok(Request {
         method: request.method.unwrap_or_default().to_string(),
@@ -567,7 +593,7 @@ fn parse_response(head: &[u8]) -> Result<Response, String> {
     let mut response = httparse::Response::new(&mut headers);
     match response.parse(head) {
         Ok(httparse::Status::Complete(_)) => {}
-        _ => return Err("服务器响应头无效".into()),
+        _ => return Err(t!("runtime_host.error.invalid_response_headers").into_owned()),
     }
     Ok(Response {
         code: response.code.unwrap_or_default(),
@@ -672,9 +698,9 @@ fn content_length(headers: &Headers) -> Result<Option<u64>, String> {
         let parsed = std::str::from_utf8(value)
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
-            .ok_or("Content-Length 无效")?;
+            .ok_or_else(|| t!("runtime_host.error.invalid_content_length").into_owned())?;
         if length.is_some_and(|length| length != parsed) {
-            return Err("Content-Length 不一致".into());
+            return Err(t!("runtime_host.error.content_length_mismatch").into_owned());
         }
         length = Some(parsed);
     }
@@ -686,7 +712,7 @@ fn request_body(headers: &Headers) -> Result<Body, String> {
         return if is_chunked(headers) {
             Ok(Body::Chunked)
         } else {
-            Err("不支持的 Transfer-Encoding".into())
+            Err(t!("runtime_host.error.unsupported_transfer_encoding").into_owned())
         };
     }
     Ok(match content_length(headers)? {
@@ -729,7 +755,12 @@ where
                 .ok()
                 .and_then(|line| line.split(';').next())
                 .and_then(|size| u64::from_str_radix(size.trim(), 16).ok())
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "chunk 长度无效"))?;
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        t!("runtime_host.error.invalid_chunk_length").into_owned(),
+                    )
+                })?;
             if size == 0 {
                 // Trailers, then the final blank line.
                 loop {
@@ -789,7 +820,10 @@ async fn read_head<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<Option
             };
         }
         if head.len() > MAX_HEAD {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "消息头过大"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                t!("runtime_host.error.head_too_large").into_owned(),
+            ));
         }
         if matches!(&head[start..], b"\r\n" | b"\n") {
             if start == 0 {
@@ -807,7 +841,7 @@ async fn respond_error<W: AsyncWrite + Unpin>(
     reason: &str,
     message: &str,
 ) -> io::Result<()> {
-    let body = format!("Rusker Engine 代理：{message}\n");
+    let body = t!("runtime_host.error.proxy_response_body", message = message).into_owned();
     let response = format!(
         "HTTP/1.1 {code} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()

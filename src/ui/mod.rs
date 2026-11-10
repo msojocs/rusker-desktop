@@ -20,7 +20,11 @@ pub fn button(id: impl Into<ElementId>) -> Button {
 }
 
 /// Pointer-enabled alert buttons, dispatching through their own dialog's focus path.
-pub fn confirmation_footer(label: &'static str, variant: ButtonVariant, cx: &mut App) -> Div {
+pub fn confirmation_footer(
+    label: impl Into<SharedString>,
+    variant: ButtonVariant,
+    cx: &mut App,
+) -> Div {
     let anchor = cx.focus_handle();
     let cancel = anchor.clone();
     div()
@@ -31,13 +35,13 @@ pub fn confirmation_footer(label: &'static str, variant: ButtonVariant, cx: &mut
         .child(
             button("cancel")
                 .outline()
-                .label("取消")
+                .label(t!("ui.cancel"))
                 .on_click(move |_, window, cx| cancel.dispatch_action(&Cancel, window, cx)),
         )
         .child(
             button("ok")
                 .with_variant(variant)
-                .label(label)
+                .label(label.into())
                 .on_click(move |_, window, cx| {
                     anchor.dispatch_action(&Confirm { secondary: false }, window, cx);
                 }),

@@ -1,0 +1,94 @@
+_version: 2
+run.placeholder.mount_source:
+  en: Host path or volume name
+  zh-CN: 宿主机路径或卷名
+run.placeholder.mount_target:
+  en: "Container path, e.g. /data"
+  zh-CN: 容器路径，如 /data
+run.placeholder.env_name:
+  en: Variable name
+  zh-CN: 变量名
+run.placeholder.env_value:
+  en: Value
+  zh-CN: 值
+run.browse_prompt:
+  en: "Select"
+  zh-CN: "选择"
+run.cancel:
+  en: "Cancel"
+  zh-CN: "取消"
+run.submit:
+  en: "Run"
+  zh-CN: "运行"
+run.submitting:
+  en: "Running…"
+  zh-CN: "运行中…"
+run.title:
+  en: "Run a new container"
+  zh-CN: "运行新容器"
+run.creating:
+  en: "Creating and starting container…"
+  zh-CN: "正在创建并启动容器…"
+run.field.image:
+  en: "Image reference *"
+  zh-CN: "镜像引用 *"
+run.hint.image:
+  en: "Only local images are used; this step doesn't pull automatically."
+  zh-CN: "仅使用本地已有镜像；本步骤不会自动拉取。"
+run.optional_settings:
+  en: "Optional settings"
+  zh-CN: "可选设置"
+run.field.name:
+  en: "Container name"
+  zh-CN: "容器名称"
+run.hint.name:
+  en: "Leave empty to generate a random name."
+  zh-CN: "留空则自动生成随机名称。"
+run.field.ports:
+  en: "Ports"
+  zh-CN: "端口"
+run.hint.ports:
+  en: "Host port:container port, separate multiple with commas. Binds to 127.0.0.1 only."
+  zh-CN: "宿主机端口:容器端口，多个用逗号分隔，仅绑定到 127.0.0.1。"
+run.field.volumes:
+  en: "Volumes"
+  zh-CN: "卷"
+run.hint.volumes:
+  en: "Host paths can be Windows paths; values that don't start with a path are treated as named volumes."
+  zh-CN: "宿主机路径可直接使用 Windows 路径；不以路径开头时视为命名卷。"
+run.field.env:
+  en: "Environment variables"
+  zh-CN: "环境变量"
+run.hint.env:
+  en: "Variables with the same name override the container proxy variables from Settings."
+  zh-CN: "同名变量会覆盖设置中的容器代理变量。"
+run.field.command:
+  en: "Command"
+  zh-CN: "启动命令"
+run.hint.command:
+  en: "Overrides the image CMD. Quotes are supported; not run through a shell."
+  zh-CN: "覆盖镜像 CMD，支持引号；不会自动经过 shell 执行。"
+run.browse_folder:
+  en: "Select folder"
+  zh-CN: "选择文件夹"
+run.remove_row:
+  en: "Remove"
+  zh-CN: "移除"
+run.add_row:
+  en: "Add row"
+  zh-CN: "添加一行"
+run.gpu.label:
+  en: "Use all NVIDIA GPUs"
+  zh-CN: "使用全部 NVIDIA GPU"
+run.gpu.hint:
+  en: "Maps to --gpus all; requires the NVIDIA runtime in the managed environment."
+  zh-CN: "映射为 --gpus all；需要受管环境的 NVIDIA runtime。"
+run.gpu.unavailable:
+  en: "No usable NVIDIA GPU/runtime detected. Check the WSL2 environment in Settings first."
+  zh-CN: "未检测到可用的 NVIDIA GPU/runtime，请先在设置中检查 WSL2 环境。"
+run.error.engine_unavailable:
+  en: "Container engine unavailable"
+  zh-CN: "容器引擎不可用"
+run.notice.created:
+  en: "Container created and started"
+  zh-CN: "容器已创建并启动"

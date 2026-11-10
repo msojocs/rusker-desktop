@@ -10,6 +10,8 @@ use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // Translations are embedded by `rust_i18n::i18n!`, which cannot track them.
+    println!("cargo:rerun-if-changed=locales");
     rootfs_version();
     println!("cargo:rerun-if-changed=helpers/vm-proxy/src");
     println!("cargo:rerun-if-changed=helpers/vm-proxy/Cargo.toml");

@@ -1,0 +1,25 @@
+_version: 2
+docker_context.what.context:
+  en: "Docker context"
+  zh-CN: "Docker 上下文"
+docker_context.what.client_config:
+  en: "Docker client configuration"
+  zh-CN: "Docker 客户端配置"
+docker_context.error.no_parent_dir:
+  en: "Cannot determine the directory containing %{path}"
+  zh-CN: "无法确定 %{path} 所在目录"
+docker_context.error.read_failed:
+  en: "Failed to read %{path}: %{error}"
+  zh-CN: "读取 %{path} 失败：%{error}"
+docker_context.error.not_json_object:
+  en: "%{path} is not a JSON object; it was not modified"
+  zh-CN: "%{path} 不是 JSON 对象，未修改"
+docker_context.error.invalid_json:
+  en: "%{path} is invalid and was not modified: %{error}"
+  zh-CN: "%{path} 格式无效，未修改：%{error}"
+docker_context.error.create_dir_failed:
+  en: "Failed to create the %{what} directory %{path}: %{error}"
+  zh-CN: "创建%{what}目录 %{path} 失败：%{error}"
+docker_context.error.write_failed:
+  en: "Failed to write %{what} %{path}: %{error}"
+  zh-CN: "写入%{what} %{path} 失败：%{error}"

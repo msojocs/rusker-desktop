@@ -24,7 +24,7 @@ impl RuskerApp {
     pub(super) fn load_docker_context(&mut self) {
         self.docker_context = Some(
             docker_client_config_path()
-                .ok_or_else(|| "无法确定 Docker 客户端配置目录".to_string())
+                .ok_or_else(|| t!("docker_context_ui.error.config_dir").into_owned())
                 .and_then(|path| current_context(&path)),
         );
     }
@@ -43,10 +43,14 @@ impl RuskerApp {
         let Some(Ok(CliContext::Other(current))) = self.docker_context.clone() else {
             return;
         };
-        let title = "将 Docker CLI 切换到 Rusker？";
-        let description = format!(
-            "Docker CLI 当前使用“{current}”上下文，docker 命令不会连接 Rusker 的 Engine。\n\n切换后将创建并使用“{RUSKER_CONTEXT}”上下文（{MANAGED_DOCKER_HOST}）。这对当前 Windows 用户的所有 Docker CLI 生效，包括其他软件自带的 docker.exe；可随时执行 docker context use {current} 切回。"
-        );
+        let title = t!("docker_context_ui.prompt.title").into_owned();
+        let description = t!(
+            "docker_context_ui.prompt.description",
+            current = current,
+            context = RUSKER_CONTEXT,
+            host = MANAGED_DOCKER_HOST
+        )
+        .into_owned();
         let weak = cx.weak_entity();
         let window = self.window_handle;
         cx.defer(move |cx| {
@@ -54,40 +58,43 @@ impl RuskerApp {
                 window.open_alert_dialog(cx, move |dialog, _, _| {
                     let skip = weak.clone();
                     let switch = weak.clone();
-                    dialog.title(title).description(description.clone()).footer(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                button("docker-context-skip")
-                                    .ghost()
-                                    .label("不再提示")
-                                    .on_click(move |_, window, cx| {
-                                        _ = skip.update(cx, |this, cx| {
-                                            this.skip_docker_context_prompt(cx);
-                                        });
-                                        window.close_dialog(cx);
-                                    }),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                button("docker-context-later")
-                                    .outline()
-                                    .label("暂不")
-                                    .on_click(|_, window, cx| window.close_dialog(cx)),
-                            )
-                            .child(
-                                button("docker-context-switch")
-                                    .primary()
-                                    .label("切换")
-                                    .on_click(move |_, window, cx| {
-                                        _ = switch.update(cx, |this, cx| {
-                                            this.switch_docker_context(cx);
-                                        });
-                                        window.close_dialog(cx);
-                                    }),
-                            ),
-                    )
+                    dialog
+                        .title(title.clone())
+                        .description(description.clone())
+                        .footer(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    button("docker-context-skip")
+                                        .ghost()
+                                        .label(t!("docker_context_ui.prompt.dont_ask"))
+                                        .on_click(move |_, window, cx| {
+                                            _ = skip.update(cx, |this, cx| {
+                                                this.skip_docker_context_prompt(cx);
+                                            });
+                                            window.close_dialog(cx);
+                                        }),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    button("docker-context-later")
+                                        .outline()
+                                        .label(t!("docker_context_ui.prompt.later"))
+                                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                                )
+                                .child(
+                                    button("docker-context-switch")
+                                        .primary()
+                                        .label(t!("docker_context_ui.prompt.switch"))
+                                        .on_click(move |_, window, cx| {
+                                            _ = switch.update(cx, |this, cx| {
+                                                this.switch_docker_context(cx);
+                                            });
+                                            window.close_dialog(cx);
+                                        }),
+                                ),
+                        )
                 });
             });
         });
@@ -95,13 +102,20 @@ impl RuskerApp {
 
     fn switch_docker_context(&mut self, cx: &mut Context<Self>) {
         let result = docker_client_config_path()
-            .ok_or_else(|| "无法确定 Docker 客户端配置目录".to_string())
+            .ok_or_else(|| t!("docker_context_ui.error.config_dir").into_owned())
             .and_then(|path| use_rusker_context(&path, MANAGED_DOCKER_HOST));
         match result {
-            Ok(()) => {
-                self.notify_success(format!("Docker CLI 已切换到“{RUSKER_CONTEXT}”上下文"), cx)
-            }
-            Err(error) => self.notify_error(format!("切换 Docker CLI 上下文失败：{error}"), cx),
+            Ok(()) => self.notify_success(
+                t!(
+                    "docker_context_ui.notice.switched",
+                    context = RUSKER_CONTEXT
+                ),
+                cx,
+            ),
+            Err(error) => self.notify_error(
+                t!("docker_context_ui.error.switch_failed", error = error),
+                cx,
+            ),
         }
         self.load_docker_context();
         cx.notify();
@@ -109,11 +123,17 @@ impl RuskerApp {
 
     fn restore_docker_context(&mut self, cx: &mut Context<Self>) {
         let result = docker_client_config_path()
-            .ok_or_else(|| "无法确定 Docker 客户端配置目录".to_string())
+            .ok_or_else(|| t!("docker_context_ui.error.config_dir").into_owned())
             .and_then(|path| restore_previous_context(&path));
         match result {
-            Ok(previous) => self.notify_success(format!("Docker CLI 已切回“{previous}”上下文"), cx),
-            Err(error) => self.notify_error(format!("切回 Docker CLI 上下文失败：{error}"), cx),
+            Ok(previous) => self.notify_success(
+                t!("docker_context_ui.notice.restored", context = previous),
+                cx,
+            ),
+            Err(error) => self.notify_error(
+                t!("docker_context_ui.error.restore_failed", error = error),
+                cx,
+            ),
         }
         self.load_docker_context();
         cx.notify();
@@ -139,19 +159,27 @@ impl RuskerApp {
     /// "Docker CLI" row of the Docker Engine settings section.
     pub(super) fn render_docker_context_setting(&self, cx: &mut Context<Self>) -> Div {
         let (status, can_switch, previous) = match &self.docker_context {
-            None => ("读取中…".to_string(), false, None),
+            None => (
+                t!("docker_context_ui.status.loading").into_owned(),
+                false,
+                None,
+            ),
             Some(Ok(CliContext::Rusker { previous })) => (
-                format!("docker 命令已使用“{RUSKER_CONTEXT}”上下文连接 Rusker。"),
+                t!(
+                    "docker_context_ui.status.using_rusker",
+                    context = RUSKER_CONTEXT
+                )
+                .into_owned(),
                 false,
                 Some(previous.clone()),
             ),
             Some(Ok(CliContext::Other(current))) => (
-                format!("docker 命令当前使用“{current}”上下文，不会连接 Rusker。"),
+                t!("docker_context_ui.status.using_other", current = current).into_owned(),
                 true,
                 None,
             ),
             Some(Ok(CliContext::Overridden(variable))) => (
-                format!("环境变量 {variable} 决定 docker 命令连接的 Engine，切换上下文不会生效。"),
+                t!("docker_context_ui.status.overridden", variable = variable).into_owned(),
                 false,
                 None,
             ),
@@ -168,7 +196,7 @@ impl RuskerApp {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(settings_label("Docker CLI 上下文", cx))
+                    .child(settings_label(t!("docker_context_ui.setting.label"), cx))
                     .child(muted(status, cx)),
             )
             .when(can_switch, |this| {
@@ -176,7 +204,10 @@ impl RuskerApp {
                     button("switch-docker-context")
                         .outline()
                         .small()
-                        .label(format!("切换到 {RUSKER_CONTEXT}"))
+                        .label(t!(
+                            "docker_context_ui.action.switch_to",
+                            context = RUSKER_CONTEXT
+                        ))
                         .disabled(!self.manages_engine())
                         .pointer(self.manages_engine())
                         .on_click(cx.listener(|this, _, _, cx| this.switch_docker_context(cx))),
@@ -187,7 +218,7 @@ impl RuskerApp {
                     button("restore-docker-context")
                         .outline()
                         .small()
-                        .label(format!("切回 {previous}"))
+                        .label(t!("docker_context_ui.action.restore", context = previous))
                         .on_click(cx.listener(|this, _, _, cx| this.restore_docker_context(cx))),
                 )
             })

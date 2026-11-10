@@ -1,0 +1,43 @@
+_version: 2
+tray.show:
+  en: Show main window
+  zh-CN: 显示主窗口
+tray.minimize:
+  en: Minimize to tray
+  zh-CN: 最小化到托盘
+tray.refresh:
+  en: Refresh container status
+  zh-CN: 刷新容器状态
+tray.containers:
+  en: Open Containers
+  zh-CN: 打开容器
+tray.images:
+  en: Open Images
+  zh-CN: 打开镜像
+tray.settings:
+  en: Open Settings
+  zh-CN: 打开设置
+tray.quit:
+  en: Quit Rusker
+  zh-CN: 退出 Rusker
+tray.tooltip:
+  en: Rusker Desktop — Container management
+  zh-CN: Rusker Desktop — 容器管理
+tray.error.menu:
+  en: "Failed to create the tray menu: %{error}"
+  zh-CN: 创建托盘菜单失败：%{error}
+tray.error.icon:
+  en: "Failed to create the tray icon: %{error}"
+  zh-CN: 创建托盘图标失败：%{error}
+tray.error.init:
+  en: "Failed to initialize the system tray: %{error}"
+  zh-CN: 初始化系统托盘失败：%{error}
+tray.error.decode:
+  en: "Failed to decode the tray icon: %{error}"
+  zh-CN: 解析托盘图标失败：%{error}
+tray.error.too_large:
+  en: image too large
+  zh-CN: 图像过大
+tray.error.color:
+  en: "Unsupported tray icon color format: %{color}"
+  zh-CN: 托盘图标颜色格式不受支持：%{color}

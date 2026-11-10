@@ -19,7 +19,7 @@ pub struct ContainerDraft {
 impl ContainerDraft {
     pub fn parse(&self) -> Result<CreateContainerRequest, String> {
         let command = shell_words::split(self.command.trim())
-            .map_err(|error| format!("启动命令解析失败：{error}"))?;
+            .map_err(|error| t!("container.command_parse_failed", error = error).into_owned())?;
         let request = CreateContainerRequest {
             image: self.image.trim().to_string(),
             name: optional_text(&self.name),
@@ -57,13 +57,13 @@ fn parse_env(rows: &[(String, String)]) -> Result<Vec<String>, String> {
             if value.trim().is_empty() {
                 continue;
             }
-            return Err(format!("环境变量值“{value}”缺少变量名"));
+            return Err(t!("container.env_missing_name", value = value).into_owned());
         }
         if name.contains('=') || name.chars().any(char::is_whitespace) {
-            return Err(format!("环境变量名“{name}”不能包含等号或空白字符"));
+            return Err(t!("container.env_invalid_name", name = name).into_owned());
         }
         if !seen.insert(name.to_string()) {
-            return Err(format!("环境变量 {name} 重复"));
+            return Err(t!("container.env_duplicate", name = name).into_owned());
         }
         env.push(format!("{name}={value}"));
     }
@@ -77,18 +77,22 @@ fn parse_mounts(rows: &[(String, String)]) -> Result<Vec<String>, String> {
         let (source, target) = (source.trim(), target.trim());
         match (source.is_empty(), target.is_empty()) {
             (true, true) => continue,
-            (true, false) => return Err(format!("挂载到 {target} 的宿主机路径不能为空")),
-            (false, true) => return Err(format!("宿主机路径 {source} 缺少容器路径")),
+            (true, false) => {
+                return Err(t!("container.mount_host_empty", target = target).into_owned())
+            }
+            (false, true) => {
+                return Err(t!("container.mount_container_missing", source = source).into_owned())
+            }
             _ => {}
         }
         if !target.starts_with('/') {
-            return Err(format!("容器路径“{target}”必须是以 / 开头的绝对路径"));
+            return Err(t!("container.mount_not_absolute", target = target).into_owned());
         }
         if target.contains(':') {
-            return Err(format!("容器路径“{target}”不能包含冒号"));
+            return Err(t!("container.mount_has_colon", target = target).into_owned());
         }
         if !targets.insert(target.to_string()) {
-            return Err(format!("容器路径 {target} 被重复挂载"));
+            return Err(t!("container.mount_duplicate", target = target).into_owned());
         }
         binds.push(format!("{source}:{target}"));
     }
@@ -98,10 +102,10 @@ fn parse_mounts(rows: &[(String, String)]) -> Result<Vec<String>, String> {
 impl CreateContainerRequest {
     pub fn validate(&self) -> Result<(), String> {
         if self.image.is_empty() {
-            return Err("镜像引用不能为空".into());
+            return Err(t!("container.image_empty").into_owned());
         }
         if self.image.chars().any(char::is_whitespace) {
-            return Err("镜像引用不能包含空白字符".into());
+            return Err(t!("container.image_whitespace").into_owned());
         }
         if let Some(name) = &self.name {
             validate_name(name)?;
@@ -110,16 +114,18 @@ impl CreateContainerRequest {
         let mut host_bindings = HashSet::new();
         for port in &self.ports {
             if port.host_port == 0 || port.container_port == 0 {
-                return Err("端口必须大于 0".into());
+                return Err(t!("container.port_must_be_positive").into_owned());
             }
             if port.host_ip.parse::<IpAddr>().is_err() {
-                return Err(format!("无效的宿主机 IP 地址：{}", port.host_ip));
+                return Err(t!("container.invalid_host_ip", ip = port.host_ip).into_owned());
             }
             if !host_bindings.insert((&port.host_ip, port.host_port)) {
-                return Err(format!(
-                    "宿主机端口 {}:{} 被重复绑定",
-                    port.host_ip, port.host_port
-                ));
+                return Err(t!(
+                    "container.host_port_duplicate",
+                    ip = port.host_ip,
+                    port = port.host_port
+                )
+                .into_owned());
             }
         }
         Ok(())
@@ -134,19 +140,17 @@ fn optional_text(value: &str) -> Option<String> {
 fn validate_name(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
-        return Err("容器名称不能为空".into());
+        return Err(t!("container.name_empty").into_owned());
     };
     if !first.is_ascii_alphanumeric()
         || !chars.all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
         })
     {
-        return Err(
-            "容器名称只能包含字母、数字、下划线、点和连字符，且必须以字母或数字开头".into(),
-        );
+        return Err(t!("container.name_invalid").into_owned());
     }
     if name.len() < 2 {
-        return Err("容器名称至少需要 2 个字符".into());
+        return Err(t!("container.name_too_short").into_owned());
     }
     Ok(())
 }
@@ -162,7 +166,7 @@ fn parse_ports(value: &str) -> Result<Vec<CreatePortBinding>, String> {
             let entry = entry.trim();
             let parts: Vec<&str> = entry.split(':').collect();
             let [host, container] = parts.as_slice() else {
-                return Err(format!("端口映射“{entry}”无效，应为 宿主机端口:容器端口"));
+                return Err(t!("container.port_mapping_invalid", entry = entry).into_owned());
             };
             let host_port = parse_port(host)?;
             let container_port = parse_port(container)?;
@@ -179,9 +183,9 @@ fn parse_port(value: &str) -> Result<u16, String> {
     let port = value
         .trim()
         .parse::<u16>()
-        .map_err(|_| format!("端口“{value}”无效，应为 1–65535 的整数"))?;
+        .map_err(|_| t!("container.port_invalid", value = value).into_owned())?;
     if port == 0 {
-        return Err("端口必须大于 0".into());
+        return Err(t!("container.port_must_be_positive").into_owned());
     }
     Ok(port)
 }
@@ -237,7 +241,7 @@ mod tests {
         }
         .parse()
         .expect_err("未闭合引号");
-        assert!(error.contains("启动命令解析失败"));
+        assert!(error.contains("Failed to parse start command"));
     }
 
     #[test]
@@ -296,7 +300,7 @@ mod tests {
         }
         .parse()
         .expect_err("重复宿主机端口");
-        assert!(error.contains("重复绑定"));
+        assert!(error.contains("is bound more than once"));
     }
 
     #[test]

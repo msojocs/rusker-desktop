@@ -43,8 +43,8 @@ use rusker_desktop::{
     },
     settings::{
         apply_client_proxy, docker_client_config_path, AppSettings, DockerProxySettings,
-        NetworkingMode, PortBinding, ProxyMode, ResolvedProxy, SettingsStore, ThemePreference,
-        DEFAULT_DOCKER_SUBNET, RESOURCE_SAVER_MAX_SECS, RESOURCE_SAVER_MIN_SECS,
+        LanguagePreference, NetworkingMode, PortBinding, ProxyMode, ResolvedProxy, SettingsStore,
+        ThemePreference, DEFAULT_DOCKER_SUBNET, RESOURCE_SAVER_MAX_SECS, RESOURCE_SAVER_MIN_SECS,
     },
     tray::{TrayCommand, TrayMenu},
 };
@@ -78,13 +78,24 @@ enum Page {
 }
 
 impl Page {
-    fn title(self) -> &'static str {
+    /// Stable slug used for element ids (not translated).
+    fn key(self) -> &'static str {
         match self {
-            Self::Overview => "概览",
-            Self::Containers => "容器",
-            Self::Images => "镜像",
-            Self::Volumes => "卷",
-            Self::Settings => "设置",
+            Self::Overview => "overview",
+            Self::Containers => "containers",
+            Self::Images => "images",
+            Self::Volumes => "volumes",
+            Self::Settings => "settings",
+        }
+    }
+
+    fn title(self) -> String {
+        match self {
+            Self::Overview => t!("app.page.overview").into(),
+            Self::Containers => t!("app.page.containers").into(),
+            Self::Images => t!("app.page.images").into(),
+            Self::Volumes => t!("app.page.volumes").into(),
+            Self::Settings => t!("app.page.settings").into(),
         }
     }
 }
@@ -120,16 +131,16 @@ impl SettingsSection {
         sections
     }
 
-    fn title(self) -> &'static str {
+    fn title(self) -> String {
         match self {
-            Self::General => "常规",
-            Self::VmResources => "VM 资源",
-            Self::ResourceSaver => "资源节省",
-            Self::Proxies => "代理",
-            Self::Network => "网络",
-            Self::WslIntegration => "WSL 集成",
-            Self::DockerEngine => "Docker Engine",
-            Self::DesktopImport => "容器导入",
+            Self::General => t!("app.settings_section.general").into(),
+            Self::VmResources => t!("app.settings_section.vm_resources").into(),
+            Self::ResourceSaver => t!("app.settings_section.resource_saver").into(),
+            Self::Proxies => t!("app.settings_section.proxies").into(),
+            Self::Network => t!("app.settings_section.network").into(),
+            Self::WslIntegration => t!("app.settings_section.wsl_integration").into(),
+            Self::DockerEngine => "Docker Engine".into(),
+            Self::DesktopImport => t!("app.settings_section.desktop_import").into(),
         }
     }
 }
@@ -148,12 +159,20 @@ enum RuntimeOperation {
 }
 
 impl RuntimeOperation {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::Install => "安装/修复 WSL2 环境",
-            Self::Start => "启动 WSL2 环境",
-            Self::Stop => "停止 WSL2 环境",
+            Self::Install => t!("app.runtime_op.install").into(),
+            Self::Start => t!("app.runtime_op.start").into(),
+            Self::Stop => t!("app.runtime_op.stop").into(),
         }
+    }
+
+    fn busy_label(self) -> String {
+        t!("app.operation_progress", operation = self.label()).into()
+    }
+
+    fn done_label(self) -> String {
+        t!("app.operation_done", operation = self.label()).into()
     }
 }
 
@@ -181,22 +200,20 @@ impl EngineTransition {
         }
     }
 
-    fn title(self) -> &'static str {
+    fn title(self) -> String {
         match self {
-            Self::Starting => "正在启动 Docker Engine…",
-            Self::Connecting => "正在连接 Docker Engine…",
-            Self::Stopping => "正在停止 Docker Engine…",
-            Self::Recovering => "Engine 意外退出，正在自动重启…",
+            Self::Starting => t!("app.transition.starting").into(),
+            Self::Connecting => t!("app.transition.connecting").into(),
+            Self::Stopping => t!("app.transition.stopping").into(),
+            Self::Recovering => t!("app.transition.recovering").into(),
         }
     }
 
-    fn description(self) -> &'static str {
+    fn description(self) -> String {
         match self {
-            Self::Starting | Self::Connecting => "Docker Engine 是运行容器的底层技术",
-            Self::Stopping => "运行中的容器将被停止，Engine 关闭后可在设置中重新启动",
-            Self::Recovering => {
-                "WSL 被关闭或 Engine 崩溃。设置了重启策略的容器会随 Engine 一起恢复"
-            }
+            Self::Starting | Self::Connecting => t!("app.transition.description.starting").into(),
+            Self::Stopping => t!("app.transition.description.stopping").into(),
+            Self::Recovering => t!("app.transition.description.recovering").into(),
         }
     }
 }
@@ -328,58 +345,33 @@ impl RuskerApp {
         settings: AppSettings,
         mut settings_warning: Option<String>,
     ) -> Self {
-        let search_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索名称、ID、镜像或状态"));
-        let pull_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("例如：nginx:1.29 或 docker.io/library/nginx:latest")
-        });
-        let create_image_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("例如：alpine:3.23 或 nginx:1.29"));
-        let create_name_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("留空则由 Engine 自动命名"));
-        let create_command_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("例如：sh -c \"echo hello; sleep 60\"")
-        });
-        let create_ports_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("例如：8080:80, 8443:443"));
-        let volume_name_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("例如：postgres-data"));
+        let search_input = cx.new(|cx| InputState::new(window, cx));
+        let pull_input = cx.new(|cx| InputState::new(window, cx));
+        let create_image_input = cx.new(|cx| InputState::new(window, cx));
+        let create_name_input = cx.new(|cx| InputState::new(window, cx));
+        let create_command_input = cx.new(|cx| InputState::new(window, cx));
+        let create_ports_input = cx.new(|cx| InputState::new(window, cx));
+        let volume_name_input = cx.new(|cx| InputState::new(window, cx));
         let http_proxy_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.docker_proxy.http_proxy.clone())
-                .placeholder("例如：http://127.0.0.1:8080")
+            InputState::new(window, cx).default_value(settings.docker_proxy.http_proxy.clone())
         });
         let https_proxy_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.docker_proxy.https_proxy.clone())
-                .placeholder("通常与 HTTP 代理地址相同")
+            InputState::new(window, cx).default_value(settings.docker_proxy.https_proxy.clone())
         });
         let no_proxy_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.docker_proxy.no_proxy.clone())
-                .placeholder("localhost,127.0.0.1,::1")
+            InputState::new(window, cx).default_value(settings.docker_proxy.no_proxy.clone())
         });
         let container_http_proxy_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.container_proxy.http_proxy.clone())
-                .placeholder("例如：http://192.168.1.10:7890")
+            InputState::new(window, cx).default_value(settings.container_proxy.http_proxy.clone())
         });
         let container_https_proxy_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.container_proxy.https_proxy.clone())
-                .placeholder("通常与 HTTP 代理地址相同")
+            InputState::new(window, cx).default_value(settings.container_proxy.https_proxy.clone())
         });
         let container_no_proxy_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.container_proxy.no_proxy.clone())
-                .placeholder("localhost,127.0.0.1,::1")
+            InputState::new(window, cx).default_value(settings.container_proxy.no_proxy.clone())
         });
-        let network_subnet_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.network.subnet.clone())
-                .placeholder(format!("{DEFAULT_DOCKER_SUBNET}（Docker 默认）"))
-        });
+        let network_subnet_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(settings.network.subnet.clone()));
         let daemon_editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("json")
@@ -538,7 +530,7 @@ impl RuskerApp {
             settings_warning = Some(warning);
         }
 
-        Self {
+        let mut this = Self {
             engine,
             engine_transition: None,
             quitting: false,
@@ -624,7 +616,67 @@ impl RuskerApp {
                 subscriptions.extend([subscription, appearance_subscription, quit_subscription]);
                 subscriptions
             },
+        };
+        this.apply_placeholders(window, cx);
+        this
+    }
+
+    /// Switches the UI language (preview or applied setting). Rendered text
+    /// follows on the next frame; text held outside of render is reset here.
+    fn apply_language(
+        &mut self,
+        preference: LanguagePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if rusker_desktop::i18n::resolve(preference) == &*rust_i18n::locale() {
+            return;
         }
+        rusker_desktop::i18n::apply(preference);
+        if let Some(tray) = &self.tray {
+            tray.retranslate();
+        }
+        self.apply_placeholders(window, cx);
+        cx.refresh_windows();
+    }
+
+    /// Input placeholders in the current language.
+    fn apply_placeholders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let subnet = t!("app.placeholder.subnet", subnet = DEFAULT_DOCKER_SUBNET);
+        for (input, placeholder) in [
+            (&self.search_input, t!("app.placeholder.search")),
+            (&self.pull_input, t!("app.placeholder.pull_image")),
+            (&self.create_image_input, t!("app.placeholder.create_image")),
+            (&self.create_name_input, t!("app.placeholder.create_name")),
+            (
+                &self.create_command_input,
+                t!("app.placeholder.create_command"),
+            ),
+            (&self.create_ports_input, t!("app.placeholder.create_ports")),
+            (&self.volume_name_input, t!("app.placeholder.volume_name")),
+            (&self.http_proxy_input, t!("app.placeholder.http_proxy")),
+            (&self.https_proxy_input, t!("app.placeholder.https_proxy")),
+            (&self.no_proxy_input, "localhost,127.0.0.1,::1".into()),
+            (
+                &self.container_http_proxy_input,
+                t!("app.placeholder.container_http_proxy"),
+            ),
+            (
+                &self.container_https_proxy_input,
+                t!("app.placeholder.https_proxy"),
+            ),
+            (
+                &self.container_no_proxy_input,
+                "localhost,127.0.0.1,::1".into(),
+            ),
+            (&self.network_subnet_input, subnet),
+        ] {
+            let placeholder = SharedString::from(placeholder.into_owned());
+            input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
+        }
+        self.apply_run_placeholders(window, cx);
     }
 
     pub fn start_tray_polling(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -690,7 +742,7 @@ impl RuskerApp {
     /// animation on screen instead of freezing in the quit hook.
     fn request_quit(&mut self, cx: &mut Context<Self>) {
         if self.desktop_import_running() {
-            self.notify_error("正在导入容器，请等待完成后再退出，避免中断数据复制", cx);
+            self.notify_error(t!("app.error.quit_importing"), cx);
             cx.notify();
             return;
         }
@@ -811,7 +863,7 @@ impl RuskerApp {
         let Some(host) = self.runtime_host.clone() else {
             return;
         };
-        self.runtime_busy = Some("正在准备 WSL2 环境（未安装时自动安装）…".into());
+        self.runtime_busy = Some(t!("app.busy.preparing_wsl").into());
         self.engine_transition = Some(EngineTransition::Starting);
         self.runtime_error = None;
         cx.notify();
@@ -843,7 +895,7 @@ impl RuskerApp {
         let Some(host) = self.runtime_host.clone() else {
             return;
         };
-        self.runtime_busy = Some("读取 WSL2 环境状态…".into());
+        self.runtime_busy = Some(t!("app.busy.reading_wsl").into());
         self.runtime_error = None;
         cx.notify();
         let handle = host.snapshot(self.settings.wsl.integrations.clone());
@@ -962,11 +1014,11 @@ impl RuskerApp {
             return;
         }
         let Some(host) = self.runtime_host.clone() else {
-            self.runtime_error = Some("WSL2 后台运行时不可用".into());
+            self.runtime_error = Some(t!("app.error.runtime_unavailable").into());
             cx.notify();
             return;
         };
-        self.runtime_busy = Some(format!("{}…", operation.label()));
+        self.runtime_busy = Some(operation.busy_label());
         self.engine_transition = Some(match operation {
             RuntimeOperation::Install | RuntimeOperation::Start => EngineTransition::Starting,
             RuntimeOperation::Stop => EngineTransition::Stopping,
@@ -989,7 +1041,7 @@ impl RuskerApp {
                     Ok(snapshot) => {
                         let ready = snapshot.engine_ready;
                         this.runtime_snapshot = snapshot;
-                        this.runtime_notice = Some(format!("{}完成", operation.label()));
+                        this.runtime_notice = Some(operation.done_label());
                         if matches!(
                             operation,
                             RuntimeOperation::Install | RuntimeOperation::Start
@@ -1045,7 +1097,7 @@ impl RuskerApp {
         }
         let Some(engine) = self.engine.clone() else {
             self.loading = false;
-            self.notify_error("后台运行时不可用，请重启应用", cx);
+            self.notify_error(t!("app.error.backend_unavailable"), cx);
             cx.notify();
             return;
         };
@@ -1176,7 +1228,7 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.notify_error("容器引擎不可用", cx);
+            self.notify_error(t!("app.error.engine_unavailable"), cx);
             cx.notify();
             return;
         };
@@ -1189,12 +1241,12 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.notify_error("容器引擎不可用", cx);
+            self.notify_error(t!("app.error.engine_unavailable"), cx);
             cx.notify();
             return;
         };
         let handle = engine.remove_image(id);
-        self.run_snapshot_operation("删除镜像".into(), handle, cx);
+        self.run_snapshot_operation(t!("app.op.remove_image").into(), handle, cx);
     }
 
     fn proxy_draft(&self, cx: &App) -> DockerProxySettings {
@@ -1227,7 +1279,7 @@ impl RuskerApp {
             .value()
             .trim()
             .parse::<u64>()
-            .map_err(|_| "资源节省阈值必须是整数秒".to_string())?;
+            .map_err(|_| t!("app.error.threshold_integer").to_string())?;
         let mut candidate = self.settings_draft.clone();
         candidate.docker_proxy = self.proxy_draft(cx);
         candidate.container_proxy = self.container_proxy_draft(cx);
@@ -1268,7 +1320,7 @@ impl RuskerApp {
         self.runtime_host
             .as_ref()
             .map(|host| host.default_disk_location().display().to_string())
-            .unwrap_or_else(|| "不可用".into())
+            .unwrap_or_else(|| t!("app.not_available").into())
     }
 
     fn browse_disk_location(&mut self, cx: &mut Context<Self>) {
@@ -1276,7 +1328,7 @@ impl RuskerApp {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("选择".into()),
+            prompt: Some(t!("app.select").into()),
         });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
@@ -1336,6 +1388,7 @@ impl RuskerApp {
                 .update(cx, |state, cx| state.set_value(loaded, window, cx));
         }
         apply_theme(saved.theme, cx);
+        self.apply_language(saved.language, window, cx);
         self.settings_error = None;
         self.settings_notice = None;
         cx.notify();
@@ -1346,7 +1399,7 @@ impl RuskerApp {
     /// saves and applies everything else.
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
         if self.desktop_import_running() {
-            self.settings_error = Some("正在导入容器，请完成后再应用设置".into());
+            self.settings_error = Some(t!("app.error.settings_importing").into());
             cx.notify();
             return;
         }
@@ -1384,7 +1437,7 @@ impl RuskerApp {
             }
         };
         if self.settings_store.is_none() {
-            self.settings_error = Some("无法确定配置目录，设置未保存".into());
+            self.settings_error = Some(t!("app.error.config_dir_settings").into());
             cx.notify();
             return;
         }
@@ -1395,19 +1448,19 @@ impl RuskerApp {
             return;
         }
         let Some(host) = self.runtime_host.clone() else {
-            self.settings_error = Some("WSL2 后台运行时不可用，设置未保存".into());
+            self.settings_error = Some(t!("app.error.runtime_unavailable_settings").into());
             cx.notify();
             return;
         };
         if self.runtime_busy.is_some() {
-            self.settings_error = Some("运行环境正忙，请稍后再应用".into());
+            self.settings_error = Some(t!("app.error.runtime_busy").into());
             cx.notify();
             return;
         }
-        self.runtime_busy = Some("正在应用 WSL 集成…".into());
+        self.runtime_busy = Some(t!("app.busy.applying_wsl").into());
         self.runtime_error = None;
         self.settings_error = None;
-        self.settings_notice = Some("正在应用 WSL 集成…".into());
+        self.settings_notice = Some(t!("app.busy.applying_wsl").into());
         cx.notify();
         let handle = host.apply_integrations(changes, candidate.wsl.integrations.clone());
         self._runtime_task = Some(cx.spawn(async move |this, cx| {
@@ -1419,14 +1472,19 @@ impl RuskerApp {
                         this.runtime_snapshot = snapshot;
                         let mut candidate = candidate;
                         candidate.wsl.integrations = effective;
-                        let warning = (!failures.is_empty())
-                            .then(|| format!("部分 WSL 集成未生效：{}", failures.join("；")));
+                        let warning = (!failures.is_empty()).then(|| {
+                            t!(
+                                "app.warning.wsl_partial",
+                                errors = failures.join(t!("app.list_separator").as_ref())
+                            )
+                            .into()
+                        });
                         this.apply_validated_settings(candidate, warning, cx);
                     }
                     Err(error) => {
                         this.settings_notice = None;
                         this.settings_error =
-                            Some(format!("应用 WSL 集成失败，设置未保存：{error}"));
+                            Some(t!("app.error.apply_wsl_failed", error = error).into());
                     }
                 }
                 this.settle_settings_applying();
@@ -1452,14 +1510,14 @@ impl RuskerApp {
             return;
         };
         if self.runtime_busy.is_some() {
-            self.settings_error = Some("运行环境正忙，请稍后再应用".into());
+            self.settings_error = Some(t!("app.error.runtime_busy").into());
             cx.notify();
             return;
         }
-        self.runtime_busy = Some("正在移动磁盘镜像…".into());
+        self.runtime_busy = Some(t!("app.busy.moving_disk").into());
         self.runtime_error = None;
         self.settings_error = None;
-        self.settings_notice = Some("正在移动磁盘镜像，Engine 会暂时停止…".into());
+        self.settings_notice = Some(t!("app.notice.moving_disk").into());
         self.connected = false;
         cx.notify();
         let handle = host.move_disk(target, self.settings.wsl.integrations.clone());
@@ -1479,7 +1537,7 @@ impl RuskerApp {
                     Err(error) => {
                         this.settings_notice = None;
                         this.settings_error =
-                            Some(format!("移动磁盘镜像失败，设置未保存：{error}"));
+                            Some(t!("app.error.move_disk_failed", error = error).into());
                     }
                 }
                 this.settle_settings_applying();
@@ -1513,10 +1571,10 @@ impl RuskerApp {
                 self.settings_draft = candidate;
                 self.settings_warning = warning;
                 self.settings_error = None;
-                self.settings_notice = Some("设置已保存".into());
+                self.settings_notice = Some(t!("app.notice.settings_saved").into());
                 if container_proxy_changed {
                     if let Err(error) = sync_container_proxy(&self.settings) {
-                        self.settings_error = Some(format!("设置已保存，但{error}"));
+                        self.settings_error = Some(t!("app.error.saved_but", error = error).into());
                     }
                 }
                 // Idempotent: dockerd is only restarted if daemon.json changes.
@@ -1537,10 +1595,7 @@ impl RuskerApp {
 
     fn apply_engine_proxy(&mut self, cx: &mut Context<Self>) {
         if !self.manages_engine() {
-            self.settings_notice = Some(
-                "设置已保存。当前 Engine 不由 Rusker 管理（非 Windows 或设置了 DOCKER_HOST），请导出 Engine JSON 并在该 Engine 上应用"
-                    .into(),
-            );
+            self.settings_notice = Some(t!("app.notice.settings_saved_external").into());
             return;
         }
         let Some(host) = self.runtime_host.clone() else {
@@ -1548,9 +1603,9 @@ impl RuskerApp {
         };
         let daemon_config = self.daemon_pending(cx);
         let with_daemon = daemon_config.is_some();
-        self.runtime_busy = Some("正在应用 Engine 配置…".into());
+        self.runtime_busy = Some(t!("app.busy.applying_engine").into());
         self.runtime_error = None;
-        self.settings_notice = Some("设置已保存，正在应用 Engine 配置…".into());
+        self.settings_notice = Some(t!("app.notice.settings_saved_applying").into());
         let handle = host.apply_engine_config(
             self.settings.docker_proxy.clone(),
             self.settings.network.clone(),
@@ -1567,11 +1622,11 @@ impl RuskerApp {
                         this.runtime_snapshot = snapshot;
                         this.settings_notice = Some(
                             match outcome {
-                                ProxyApplyOutcome::Restarted => "已生效：Engine 已按新配置重启",
-                                ProxyApplyOutcome::Unchanged => "已生效（Engine 配置无变化）",
-                                ProxyApplyOutcome::Deferred => {
-                                    "设置已保存，Engine 配置将在 Engine 启动时自动生效"
+                                ProxyApplyOutcome::Restarted => {
+                                    t!("app.notice.applied_restarted")
                                 }
+                                ProxyApplyOutcome::Unchanged => t!("app.notice.applied_unchanged"),
+                                ProxyApplyOutcome::Deferred => t!("app.notice.applied_deferred"),
                             }
                             .into(),
                         );
@@ -1586,7 +1641,7 @@ impl RuskerApp {
                     Err(error) => {
                         this.settings_notice = None;
                         this.settings_error =
-                            Some(format!("设置已保存，但应用 Engine 配置失败：{error}"));
+                            Some(t!("app.error.apply_engine_failed", error = error).into());
                     }
                 }
                 this.settle_settings_applying();
@@ -1604,7 +1659,7 @@ impl RuskerApp {
             return;
         }
         let Some(store) = &self.settings_store else {
-            self.settings_error = Some("无法确定配置目录，代理配置未导出".into());
+            self.settings_error = Some(t!("app.error.config_dir_proxy").into());
             cx.notify();
             return;
         };
@@ -1612,10 +1667,13 @@ impl RuskerApp {
         match store.export_proxy(&proxy) {
             Ok(path) => {
                 self.settings_error = None;
-                self.settings_notice = Some(format!(
-                    "已导出 {}。请手动合并到 daemon.json 并重启 Engine",
-                    path.display()
-                ));
+                self.settings_notice = Some(
+                    t!(
+                        "app.notice.proxy_exported",
+                        path = path.display().to_string()
+                    )
+                    .into(),
+                );
             }
             Err(error) => {
                 self.settings_error = Some(error.to_string());
@@ -1623,6 +1681,24 @@ impl RuskerApp {
             }
         }
         cx.notify();
+    }
+
+    fn language_button(&self, preference: LanguagePreference, cx: &mut Context<Self>) -> Button {
+        let selected = self.settings_draft.language == preference;
+        let button = button(SharedString::from(format!("language-{preference:?}")))
+            .label(preference.label())
+            .pointer(true)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.settings_draft.language = preference;
+                this.settings_notice = None;
+                this.apply_language(preference, window, cx);
+                cx.notify();
+            }));
+        if selected {
+            button.primary()
+        } else {
+            button.outline()
+        }
     }
 
     fn theme_button(&self, preference: ThemePreference, cx: &mut Context<Self>) -> Button {
@@ -1653,7 +1729,7 @@ impl RuskerApp {
             return;
         }
         let revision = self.refresh_revision.advance();
-        self.busy = Some(format!("{label}…"));
+        self.busy = Some(t!("app.operation_progress", operation = label).into());
         self.loading = false;
         cx.notify();
         self._action_task = Some(cx.spawn(async move |this, cx| {
@@ -1667,7 +1743,7 @@ impl RuskerApp {
                     Ok(snapshot) => {
                         this.connected = true;
                         this.apply_snapshot(snapshot);
-                        this.notify_success(format!("{label}完成"), cx);
+                        this.notify_success(t!("app.operation_done", operation = label), cx);
                         this.after_volume_snapshot(cx);
                         this.sync_container_tools(cx);
                     }
@@ -1686,8 +1762,8 @@ impl RuskerApp {
     ) {
         self.open_remove_containers_dialog(
             vec![container.id.clone()],
-            format!("删除容器 {}？", container.name),
-            "此操作不可撤销。关联卷不会被删除；运行中的容器需先停止。".into(),
+            t!("app.dialog.remove_container.title", name = container.name).into(),
+            t!("app.dialog.remove_container.description").into(),
             window,
             cx,
         );
@@ -1705,16 +1781,21 @@ impl RuskerApp {
         let mut listed: Vec<String> = containers
             .iter()
             .take(8)
-            .map(|container| format!("{}（{}）", container.name, short_id(&container.id)))
+            .map(|container| format!("{} ({})", container.name, short_id(&container.id)))
             .collect();
         if containers.len() > listed.len() {
             listed.push("…".into());
         }
-        let title = format!("删除 {} 个容器？", containers.len());
-        let description = format!(
-            "此操作不可撤销。关联卷不会被删除；运行中的容器会被 Engine 拒绝。\n{}",
-            listed.join("\n")
-        );
+        let title = t!(
+            "app.dialog.remove_containers.title",
+            count = containers.len()
+        )
+        .into();
+        let description = t!(
+            "app.dialog.remove_containers.description",
+            containers = listed.join("\n")
+        )
+        .into();
         let ids = containers
             .into_iter()
             .map(|container| container.id)
@@ -1773,14 +1854,18 @@ impl RuskerApp {
                         .child(
                             button("cancel-remove-containers")
                                 .outline()
-                                .label("取消")
+                                .label(t!("app.cancel"))
                                 .disabled(submitting)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             button("submit-remove-containers")
                                 .danger()
-                                .label(if submitting { "删除中..." } else { "删除" })
+                                .label(if submitting {
+                                    t!("app.deleting")
+                                } else {
+                                    t!("app.delete")
+                                })
                                 .loading(submitting)
                                 .disabled(submitting)
                                 .on_click(move |_, _, cx| {
@@ -1801,7 +1886,7 @@ impl RuskerApp {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.container_removal.error = Some("容器引擎不可用".into());
+            self.container_removal.error = Some(t!("app.error.engine_unavailable").into());
             cx.notify();
             return;
         };
@@ -1811,7 +1896,7 @@ impl RuskerApp {
         let revision = self.refresh_revision.advance();
         self.container_removal.submitting = true;
         self.container_removal.error = None;
-        self.busy = Some("删除中...".into());
+        self.busy = Some(t!("app.deleting").into());
         self.loading = false;
         cx.notify();
         self._action_task = Some(cx.spawn(async move |this, cx| {
@@ -1838,14 +1923,20 @@ impl RuskerApp {
                         if failures.is_empty() {
                             let window = this.window_handle;
                             _ = cx.update_window(window, |_, window, cx| window.close_dialog(cx));
-                            this.notify_success(format!("已删除 {total} 个容器"), cx);
+                            this.notify_success(
+                                t!("app.notice.containers_removed", count = total),
+                                cx,
+                            );
                         } else {
-                            this.container_removal.error = Some(format!(
-                                "已删除 {} 个容器，{} 个失败：\n{}",
-                                total - failures.len(),
-                                failures.len(),
-                                failures.join("\n")
-                            ));
+                            this.container_removal.error = Some(
+                                t!(
+                                    "app.error.containers_partial",
+                                    removed = total - failures.len(),
+                                    failed = failures.len(),
+                                    errors = failures.join("\n")
+                                )
+                                .into(),
+                            );
                         }
                     }
                     Err(error) => this.container_removal.error = Some(error.to_string()),
@@ -1907,9 +1998,15 @@ impl RuskerApp {
     fn sidebar_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.sidebar_collapsed;
         let (icon, label) = if collapsed {
-            (IconName::PanelLeftOpen, "展开菜单")
+            (
+                IconName::PanelLeftOpen,
+                t!("app.sidebar.expand").into_owned(),
+            )
         } else {
-            (IconName::PanelLeftClose, "收起菜单")
+            (
+                IconName::PanelLeftClose,
+                t!("app.sidebar.collapse").into_owned(),
+            )
         };
         div()
             .id("sidebar-toggle")
@@ -1926,9 +2023,9 @@ impl RuskerApp {
             .cursor_pointer()
             .hover(|style| style.bg(cx.theme().sidebar_accent))
             .child(Icon::new(icon).small())
-            .when(!collapsed, |this| this.child(label))
+            .when(!collapsed, |this| this.child(label.clone()))
             .when(collapsed, |this| {
-                this.tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+                this.tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
             })
             .on_click(cx.listener(|this, _, _, cx| {
                 this.sidebar_collapsed = !this.sidebar_collapsed;
@@ -1996,9 +2093,9 @@ impl RuskerApp {
                         .font_semibold()
                         .text_color(cx.theme().foreground)
                         .child(if self.quitting {
-                            "正在停止 Docker Engine 并退出…"
+                            t!("app.transition.quitting")
                         } else {
-                            phase.title()
+                            phase.title().into()
                         }),
                 )
                 .child(
@@ -2027,7 +2124,7 @@ impl RuskerApp {
         let collapsed = self.sidebar_collapsed;
         let accent = brand_color(cx);
         div()
-            .id(SharedString::from(format!("nav-{}", page.title())))
+            .id(SharedString::from(format!("nav-{}", page.key())))
             .mx_2()
             .px_3()
             .h(px(36.))
@@ -2072,7 +2169,11 @@ impl RuskerApp {
                         .outline()
                         .small()
                         .icon(IconName::RefreshCw)
-                        .label(if self.loading { "刷新中" } else { "刷新" })
+                        .label(if self.loading {
+                            t!("app.refreshing")
+                        } else {
+                            t!("app.refresh")
+                        })
                         .disabled(self.loading || self.busy.is_some())
                         .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                 )
@@ -2092,36 +2193,45 @@ impl RuskerApp {
                         .flex()
                         .flex_col()
                         .gap_6()
-                        .child(div().text_2xl().font_semibold().child("容器运行概览"))
+                        .child(
+                            div()
+                                .text_2xl()
+                                .font_semibold()
+                                .child(t!("app.overview.heading")),
+                        )
                         .child(
                             div()
                                 .w_full()
                                 .flex()
                                 .gap_4()
                                 .child(stat_card(
-                                    "全部容器",
+                                    t!("app.overview.all_containers"),
                                     self.snapshot.containers.len().to_string(),
-                                    "包括运行中和已停止",
+                                    t!("app.overview.all_containers_detail"),
                                     cx,
                                 ))
                                 .child(stat_card(
-                                    "运行中",
+                                    t!("app.overview.running"),
                                     self.snapshot.running_containers().to_string(),
-                                    format!("{} 个未运行", self.snapshot.stopped_containers()),
+                                    t!(
+                                        "app.overview.not_running",
+                                        count = self.snapshot.stopped_containers()
+                                    ),
                                     cx,
                                 ))
                                 .child(stat_card(
-                                    "本地镜像",
+                                    t!("app.overview.images"),
                                     self.snapshot.images.len().to_string(),
-                                    "包含无标签镜像",
+                                    t!("app.overview.images_detail"),
                                     cx,
                                 ))
                                 .child(stat_card(
-                                    "卷",
+                                    t!("app.overview.volumes"),
                                     self.snapshot.volumes.len().to_string(),
-                                    format!(
-                                        "{} 个正被容器使用",
-                                        self.snapshot
+                                    t!(
+                                        "app.overview.volumes_in_use",
+                                        count = self
+                                            .snapshot
                                             .volumes
                                             .iter()
                                             .filter(|volume| self
@@ -2138,12 +2248,21 @@ impl RuskerApp {
                                 .flex()
                                 .flex_col()
                                 .gap_4()
-                                .child(div().text_lg().font_semibold().child("引擎信息"))
-                                .child(detail_row("名称", engine.name.clone(), cx))
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_semibold()
+                                        .child(t!("app.overview.engine_info")),
+                                )
+                                .child(detail_row(t!("app.name"), engine.name.clone(), cx))
                                 .child(detail_row("Engine", engine.version.clone(), cx))
                                 .child(detail_row("API", engine.api_version.clone(), cx))
-                                .child(detail_row("操作系统", engine.operating_system.clone(), cx))
-                                .child(detail_row("架构", engine.architecture.clone(), cx)),
+                                .child(detail_row(
+                                    t!("app.os"),
+                                    engine.operating_system.clone(),
+                                    cx,
+                                ))
+                                .child(detail_row(t!("app.arch"), engine.architecture.clone(), cx)),
                         ),
                 ),
         )
@@ -2195,23 +2314,29 @@ impl RuskerApp {
             .collect();
 
         let usage = if running == 0 {
-            "暂无运行中的容器。".to_string()
+            t!("app.containers.usage_none").to_string()
         } else {
-            format!("{running} 个容器运行中，实时统计尚未支持。")
+            t!("app.containers.usage_running", running = running).to_string()
         };
 
         let title = div()
             .flex()
             .items_center()
             .gap_3()
-            .child(div().text_2xl().font_semibold().child("容器"))
+            .child(
+                div()
+                    .text_2xl()
+                    .font_semibold()
+                    .child(t!("app.page.containers")),
+            )
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "{running} 个运行中 · 共 {} 个",
-                        all_containers.len()
+                    .child(t!(
+                        "app.containers.summary",
+                        running = running,
+                        total = all_containers.len()
                     )),
             )
             .child(div().flex_1())
@@ -2219,7 +2344,7 @@ impl RuskerApp {
                 list_action_button("refresh-containers", cx.theme().primary, cx)
                     .small()
                     .icon(IconName::RotateCw)
-                    .tooltip("刷新")
+                    .tooltip(t!("app.refresh"))
                     .disabled(self.loading || busy)
                     .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
             )
@@ -2228,7 +2353,7 @@ impl RuskerApp {
                     .pointer(true)
                     .primary()
                     .icon(IconName::Plus)
-                    .label("创建")
+                    .label(t!("app.create"))
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_create_container_dialog(None, window, cx);
@@ -2240,14 +2365,16 @@ impl RuskerApp {
             .items_start()
             .gap_8()
             .child(container_usage(
-                "容器 CPU 使用率",
-                "需要 Engine 实时统计支持，当前版本暂未提供。",
+                "cpu",
+                t!("app.containers.cpu_usage"),
+                t!("app.containers.stats_unavailable"),
                 &usage,
                 cx,
             ))
             .child(container_usage(
-                "容器内存使用率",
-                "需要 Engine 实时统计支持，当前版本暂未提供。",
+                "memory",
+                t!("app.containers.memory_usage"),
+                t!("app.containers.stats_unavailable"),
                 &usage,
                 cx,
             ));
@@ -2266,7 +2393,7 @@ impl RuskerApp {
             .child(
                 Switch::new("container-running-only")
                     .checked(self.containers_running_only)
-                    .label("仅显示运行中的容器")
+                    .label(t!("app.containers.running_only").into_owned())
                     .on_change(cx.listener(|this, checked: &bool, _, cx| {
                         this.containers_running_only = *checked;
                         cx.notify();
@@ -2278,7 +2405,7 @@ impl RuskerApp {
                 let selected = selected_containers.clone();
                 this.child(
                     list_action_button("clear-container-selection", cx.theme().primary, cx)
-                        .label("取消选择")
+                        .label(t!("app.clear_selection"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.containers_checked.clear();
                             cx.notify();
@@ -2289,7 +2416,7 @@ impl RuskerApp {
                         .pointer(true)
                         .danger()
                         .icon(AssetIcon::Trash)
-                        .label(format!("删除所选（{count}）"))
+                        .label(t!("app.remove_selected", count = count))
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.confirm_remove_containers(selected.clone(), window, cx);
@@ -2320,7 +2447,7 @@ impl RuskerApp {
                 div().w(px(CONTAINER_CHECK_COLUMN)).flex_shrink_0().child(
                     Checkbox::new("check-all-containers")
                         .checked(all_checked)
-                        .tooltip("全选当前列表")
+                        .tooltip(t!("app.select_all"))
                         .disabled(visible_ids.is_empty())
                         .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                             for id in &visible_ids {
@@ -2336,19 +2463,19 @@ impl RuskerApp {
                 ),
             )
             .child(div().w(px(CONTAINER_STATUS_COLUMN)).flex_shrink_0())
-            .child(div().flex_1().min_w(px(112.)).pr_3().child("名称"))
+            .child(div().flex_1().min_w(px(112.)).pr_3().child(t!("app.name")))
             .child(
                 div()
                     .w(px(CONTAINER_ID_COLUMN))
                     .flex_shrink_0()
-                    .child("容器 ID"),
+                    .child(t!("app.container_id")),
             )
-            .child(div().flex_1().min_w(px(112.)).pr_3().child("镜像"))
+            .child(div().flex_1().min_w(px(112.)).pr_3().child(t!("app.image")))
             .child(
                 div()
                     .w(px(CONTAINER_PORTS_COLUMN))
                     .flex_shrink_0()
-                    .child("端口"),
+                    .child(t!("app.ports")),
             )
             .child(
                 div()
@@ -2360,13 +2487,13 @@ impl RuskerApp {
                 div()
                     .w(px(CONTAINER_CREATED_COLUMN))
                     .flex_shrink_0()
-                    .child("创建时间"),
+                    .child(t!("app.created")),
             )
             .child(
                 div()
                     .w(px(CONTAINER_ACTIONS_COLUMN))
                     .flex_shrink_0()
-                    .child("操作"),
+                    .child(t!("app.actions")),
             );
 
         let panel = div()
@@ -2384,7 +2511,7 @@ impl RuskerApp {
             .justify_end()
             .text_sm()
             .text_color(cx.theme().muted_foreground)
-            .child(format!("显示 {shown} 个"));
+            .child(t!("app.containers.shown", count = shown));
 
         if containers.is_empty() {
             return div()
@@ -2398,15 +2525,23 @@ impl RuskerApp {
                 .child(usage_row)
                 .child(toolbar)
                 .child(panel.child(if all_containers.is_empty() {
-                    empty_state("还没有容器", "点击右上角“创建”，从镜像运行第一个容器。", cx)
+                    empty_state(
+                        t!("app.empty.no_containers"),
+                        t!("app.empty.no_containers_hint"),
+                        cx,
+                    )
                 } else if self.containers_running_only && running == 0 {
                     empty_state(
-                        "没有运行中的容器",
-                        "关闭“仅显示运行中的容器”可查看全部容器。",
+                        t!("app.empty.no_running"),
+                        t!("app.empty.no_running_hint"),
                         cx,
                     )
                 } else {
-                    empty_state("没有匹配的容器", "调整搜索条件或筛选方式。", cx)
+                    empty_state(
+                        t!("app.empty.no_matches"),
+                        t!("app.empty.no_matches_hint"),
+                        cx,
+                    )
                 }))
                 .child(footer);
         }
@@ -2541,7 +2676,10 @@ impl RuskerApp {
                             .cursor_pointer()
                             .text_color(cx.theme().muted_foreground)
                             .hover(|style| style.underline())
-                            .tooltip(|window, cx| Tooltip::new("复制容器 ID").build(window, cx))
+                            .tooltip(|window, cx| {
+                                Tooltip::new(t!("app.copy_container_id").into_owned())
+                                    .build(window, cx)
+                            })
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
@@ -2558,7 +2696,9 @@ impl RuskerApp {
                         .cursor_pointer()
                         .text_color(cx.theme().primary)
                         .hover(|style| style.underline())
-                        .tooltip(|window, cx| Tooltip::new("查看镜像详情").build(window, cx))
+                        .tooltip(|window, cx| {
+                            Tooltip::new(t!("app.view_image").into_owned()).build(window, cx)
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.open_container_image(&image_container, cx);
@@ -2602,7 +2742,11 @@ impl RuskerApp {
                             } else {
                                 IconName::Play
                             })
-                            .tooltip(if running { "停止" } else { "启动" })
+                            .tooltip(if running {
+                                t!("app.stop")
+                            } else {
+                                t!("app.start")
+                            })
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
@@ -2630,7 +2774,7 @@ impl RuskerApp {
                         list_action_button(("remove-container-row", index), cx.theme().danger, cx)
                             .small()
                             .icon(Icon::new(AssetIcon::Trash).text_color(cx.theme().danger))
-                            .tooltip("删除")
+                            .tooltip(t!("app.delete"))
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
@@ -2668,7 +2812,7 @@ impl RuskerApp {
                 button("stop-container")
                     .secondary()
                     .icon(IconName::Square)
-                    .tooltip("停止")
+                    .tooltip(t!("app.stop"))
                     .disabled(busy || !running)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.start_container_action(stop_id.clone(), ContainerAction::Stop, cx);
@@ -2678,7 +2822,7 @@ impl RuskerApp {
                 button("start-container")
                     .primary()
                     .icon(IconName::Play)
-                    .tooltip("启动")
+                    .tooltip(t!("app.start"))
                     .disabled(busy || running)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.start_container_action(start_id.clone(), ContainerAction::Start, cx);
@@ -2688,7 +2832,7 @@ impl RuskerApp {
                 button("restart-container")
                     .outline()
                     .icon(IconName::RotateCw)
-                    .tooltip("重启")
+                    .tooltip(t!("app.restart"))
                     .disabled(busy)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.start_container_action(
@@ -2702,7 +2846,7 @@ impl RuskerApp {
                 button("remove-container")
                     .danger()
                     .icon(AssetIcon::Trash)
-                    .tooltip("删除")
+                    .tooltip(t!("app.delete"))
                     .disabled(busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.confirm_remove_container(&remove_container, window, cx);
@@ -2721,12 +2865,12 @@ impl RuskerApp {
                     .underline()
                     .flex_1()
                     .selected_index(tab)
-                    .child(Tab::new().cursor_pointer().label("日志"))
-                    .child(Tab::new().cursor_pointer().label("详情"))
-                    .child(Tab::new().cursor_pointer().label("挂载"))
-                    .child(Tab::new().cursor_pointer().label("命令行"))
-                    .child(Tab::new().cursor_pointer().label("文件"))
-                    .child(Tab::new().cursor_pointer().label("统计"))
+                    .child(Tab::new().cursor_pointer().label(t!("app.tab.logs")))
+                    .child(Tab::new().cursor_pointer().label(t!("app.tab.inspect")))
+                    .child(Tab::new().cursor_pointer().label(t!("app.tab.mounts")))
+                    .child(Tab::new().cursor_pointer().label(t!("app.tab.terminal")))
+                    .child(Tab::new().cursor_pointer().label(t!("app.tab.files")))
+                    .child(Tab::new().cursor_pointer().label(t!("app.tab.stats")))
                     .on_click({
                         let weak = weak.clone();
                         move |index, window, cx| {
@@ -2757,7 +2901,7 @@ impl RuskerApp {
                         .ghost()
                         .small()
                         .icon(IconName::RotateCw)
-                        .tooltip("刷新详情")
+                        .tooltip(t!("app.refresh_inspect"))
                         .on_click(cx.listener(|this, _, _, cx| this.load_container_inspect(cx))),
                 )
             })
@@ -2767,7 +2911,7 @@ impl RuskerApp {
                         .ghost()
                         .small()
                         .icon(IconName::Copy)
-                        .tooltip("复制日志")
+                        .tooltip(t!("app.copy_logs"))
                         .disabled(self.logs.is_empty())
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(logs_for_copy.clone()));
@@ -2780,7 +2924,7 @@ impl RuskerApp {
                         .ghost()
                         .small()
                         .icon(IconName::RotateCw)
-                        .tooltip("刷新日志")
+                        .tooltip(t!("app.refresh_logs"))
                         .disabled(self.logs_loading)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.load_logs(logs_id.clone(), cx);
@@ -2817,7 +2961,7 @@ impl RuskerApp {
                 div().px_6().pt_4().child(
                     Breadcrumb::new()
                         .child(
-                            BreadcrumbItem::new("容器")
+                            BreadcrumbItem::new(t!("app.page.containers").into_owned())
                                 .text_color(cx.theme().primary)
                                 .on_click(move |_, _, cx| {
                                     _ = back_weak
@@ -2839,7 +2983,7 @@ impl RuskerApp {
                             .ghost()
                             .small()
                             .icon(IconName::ChevronLeft)
-                            .tooltip("返回容器列表")
+                            .tooltip(t!("app.back_to_containers"))
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.close_container_detail(cx)),
                             ),
@@ -2878,7 +3022,7 @@ impl RuskerApp {
                                         "copy-detail-id",
                                         AssetIcon::Link,
                                         short_id(&container.id),
-                                        "复制容器 ID",
+                                        t!("app.copy_container_id"),
                                         cx.theme().foreground,
                                         cx.theme().muted_foreground,
                                     ))
@@ -2886,7 +3030,7 @@ impl RuskerApp {
                                         "copy-detail-image",
                                         AssetIcon::Link,
                                         container.image.clone(),
-                                        "复制镜像引用",
+                                        t!("app.copy_image_ref"),
                                         cx.theme().primary,
                                         cx.theme().muted_foreground,
                                     ))
@@ -2908,7 +3052,7 @@ impl RuskerApp {
                                     .flex_col()
                                     .items_end()
                                     .gap_1()
-                                    .child(div().text_xs().font_semibold().child("状态"))
+                                    .child(div().text_xs().font_semibold().child(t!("app.status")))
                                     .child(
                                         div()
                                             .text_sm()
@@ -2927,11 +3071,11 @@ impl RuskerApp {
         let is_placeholder =
             self.logs_loading || self.logs_error.is_some() || self.logs.trim().is_empty();
         let text = if self.logs_loading {
-            "正在读取日志…".to_string()
+            t!("app.logs.loading").to_string()
         } else if let Some(error) = &self.logs_error {
             error.clone()
         } else if self.logs.trim().is_empty() {
-            "该容器最近没有 stdout/stderr 日志。".to_string()
+            t!("app.logs.empty").to_string()
         } else {
             self.logs.clone()
         };
@@ -2969,7 +3113,7 @@ impl RuskerApp {
                         button("container-logs-bottom")
                             .outline()
                             .icon(IconName::ArrowDown)
-                            .tooltip("滚动到底部")
+                            .tooltip(t!("app.scroll_to_bottom"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.container_logs_scroll.scroll_to_bottom();
                                 cx.notify();
@@ -2995,7 +3139,11 @@ impl RuskerApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let content = if container.volumes.is_empty() {
-            empty_state("没有命名卷挂载", "该容器没有挂载命名卷。", cx)
+            empty_state(
+                t!("app.empty.no_mounts"),
+                t!("app.empty.no_mounts_hint"),
+                cx,
+            )
         } else {
             let mut list = section_panel(cx).flex().flex_col();
             for (index, volume) in container.volumes.iter().enumerate() {
@@ -3034,21 +3182,21 @@ impl RuskerApp {
     fn render_engine_runtime(&self, cx: &mut Context<Self>) -> Div {
         let snapshot = &self.runtime_snapshot;
         let status = if !snapshot.installed {
-            "未安装"
+            t!("app.runtime.not_installed")
         } else if snapshot.engine_ready {
-            "Engine 运行中"
+            t!("app.status.engine_running")
         } else if self.resource_saver_active() {
-            "资源节省模式（Engine 已暂停，有客户端连接时自动恢复）"
+            t!("app.runtime.saver_active_status")
         } else if snapshot.running {
-            "发行版运行中，Engine 未就绪"
+            t!("app.runtime.distro_running")
         } else {
-            "已停止"
+            t!("app.runtime.stopped")
         };
         let busy = self.runtime_busy.is_some() || self.desktop_import_running();
         let gpu_detail = if snapshot.gpu.detail.is_empty() {
-            "正在检测 NVIDIA GPU 与 runtime"
+            t!("app.runtime.detecting_gpu")
         } else {
-            &snapshot.gpu.detail
+            snapshot.gpu.detail.as_str().into()
         };
         let warning = snapshot.warnings.join("\n");
 
@@ -3056,11 +3204,19 @@ impl RuskerApp {
             .flex()
             .flex_col()
             .gap_3()
-            .child(settings_label("WSL2 运行环境", cx))
-            .child(detail_row("专用发行版", "rusker (WSL2)", cx))
-            .child(detail_row("运行状态", status, cx))
-            .child(detail_row("Windows 端点", MANAGED_DOCKER_HOST, cx))
-            .child(detail_row("WSL2 端点", WSL_DOCKER_HOST, cx))
+            .child(settings_label(t!("app.runtime.wsl_environment"), cx))
+            .child(detail_row(t!("app.runtime.distro"), "rusker (WSL2)", cx))
+            .child(detail_row(t!("app.runtime.state"), status, cx))
+            .child(detail_row(
+                t!("app.runtime.windows_endpoint"),
+                MANAGED_DOCKER_HOST,
+                cx,
+            ))
+            .child(detail_row(
+                t!("app.runtime.wsl_endpoint"),
+                WSL_DOCKER_HOST,
+                cx,
+            ))
             .child(detail_row("NVIDIA GPU", gpu_detail, cx))
             .when_some(self.runtime_busy.clone(), |this, label| {
                 this.child(
@@ -3081,7 +3237,11 @@ impl RuskerApp {
                         button("install-runtime")
                             .primary()
                             .icon(IconName::HardDrive)
-                            .label(if snapshot.installed { "修复环境" } else { "安装环境" })
+                            .label(if snapshot.installed {
+                                t!("app.runtime.repair")
+                            } else {
+                                t!("app.runtime.install")
+                            })
                             .disabled(busy)
                             .pointer(!busy)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3092,7 +3252,7 @@ impl RuskerApp {
                         button("start-runtime")
                             .outline()
                             .icon(IconName::Play)
-                            .label("启动")
+                            .label(t!("app.start"))
                             .disabled(busy || !snapshot.installed || snapshot.engine_ready)
                             .pointer(!(busy || !snapshot.installed || snapshot.engine_ready))
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3103,7 +3263,7 @@ impl RuskerApp {
                         button("stop-runtime")
                             .outline()
                             .icon(IconName::Square)
-                            .label("停止")
+                            .label(t!("app.stop"))
                             .disabled(busy || !snapshot.running)
                             .pointer(!(busy || !snapshot.running))
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3114,7 +3274,7 @@ impl RuskerApp {
                         button("refresh-runtime")
                             .ghost()
                             .icon(IconName::RefreshCw)
-                            .label("刷新状态")
+                            .label(t!("app.refresh_status"))
                             .disabled(busy)
                             .pointer(!busy)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3123,7 +3283,12 @@ impl RuskerApp {
                     ),
             )
             .when(!warning.is_empty(), |this| {
-                this.child(div().text_sm().text_color(cx.theme().warning).child(warning))
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().warning)
+                        .child(warning),
+                )
             })
             .when_some(self.runtime_error.clone(), |this, error| {
                 this.child(div().text_sm().text_color(cx.theme().danger).child(error))
@@ -3131,10 +3296,7 @@ impl RuskerApp {
             .when_some(self.runtime_notice.clone(), |this, notice| {
                 this.child(div().text_sm().text_color(cx.theme().success).child(notice))
             })
-            .child(muted(
-                "Engine 不监听 TCP 端口。Windows 工具可执行：docker context create rusker --docker host=npipe:////./pipe/rusker_engine。退出 Rusker 时会停止 Engine。安装或修复可能需要数分钟，Engine 日志位于专用发行版的 /var/log/rusker-dockerd.log。",
-                cx,
-            ))
+            .child(muted(t!("app.runtime.engine_hint"), cx))
     }
 
     /// Docker Desktop's "Docker engine" page: edit `daemon.json` directly.
@@ -3154,7 +3316,7 @@ impl RuskerApp {
                     .gap_1()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("通过编辑 JSON 格式的 Docker daemon")
+                    .child(t!("app.daemon.intro_prefix"))
                     .child(
                         div()
                             .id("open-daemon-docs")
@@ -3164,19 +3326,16 @@ impl RuskerApp {
                             .text_color(cx.theme().link)
                             .underline()
                             .cursor_pointer()
-                            .child("配置文件")
+                            .child(t!("app.daemon.config_file_link"))
                             .child(Icon::new(AssetIcon::ExternalLink).xsmall())
                             .on_click(|_, _, cx| cx.open_url(DAEMON_CONFIG_DOCS_URL)),
                     )
-                    .child("来配置 Engine。"),
+                    .child(t!("app.daemon.intro_suffix")),
             )
             .child(callout(
                 CalloutKind::Warning,
-                "高级设置",
-                muted(
-                    "错误的配置可能导致 Docker 无法启动，请谨慎修改。应用前会用 dockerd --validate 校验，应用后 Engine 会重启，运行中的容器会被停止。proxies 由“代理”设置管理，bip、ip、ipv6 等网络配置由“网络”设置管理，不在此显示。",
-                    cx,
-                ),
+                t!("app.daemon.advanced_title"),
+                muted(t!("app.daemon.advanced_body"), cx),
                 cx,
             ))
             .child(
@@ -3184,13 +3343,21 @@ impl RuskerApp {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(div().flex_1().child(settings_label("Daemon 配置文件", cx)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(settings_label(t!("app.daemon.file_label"), cx)),
+                    )
                     .child(
                         button("reload-daemon-config")
                             .ghost()
                             .small()
                             .icon(IconName::Redo)
-                            .label(if self.daemon_loading { "读取中…" } else { "重新读取" })
+                            .label(if self.daemon_loading {
+                                t!("app.daemon.reading")
+                            } else {
+                                t!("app.daemon.reload")
+                            })
                             .disabled(!managed || self.daemon_loading || busy)
                             .pointer(!(!managed || self.daemon_loading || busy))
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3200,18 +3367,10 @@ impl RuskerApp {
                     ),
             )
             .when(!managed, |this| {
-                this.child(muted(
-                    "当前 Engine 不由 Rusker 管理（设置了 DOCKER_HOST），请直接编辑该 Engine 的 daemon.json。",
-                    cx,
-                ))
+                this.child(muted(t!("app.daemon.unmanaged_hint"), cx))
             })
             .when_some(self.daemon_error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(error),
-                )
+                this.child(div().text_sm().text_color(cx.theme().danger).child(error))
             })
             .when(managed, |this| {
                 this.child(
@@ -3231,12 +3390,9 @@ impl RuskerApp {
             .flex()
             .flex_col()
             .gap_3()
-            .child(muted(
-                "开关安装或移除 Rusker 标记的 Docker CLI 包装器及 Compose/Buildx 插件，默认连接共享 socket；它不是防止手动访问的安全边界。",
-                cx,
-            ))
+            .child(muted(t!("app.wsl.integration_hint"), cx))
             .when(snapshot.distributions.is_empty(), |this| {
-                this.child(muted("没有发现可集成的其他 WSL2 发行版。", cx))
+                this.child(muted(t!("app.wsl.no_distros"), cx))
             })
             .children(snapshot.distributions.iter().map(|distribution| {
                 let name = distribution.name.clone();
@@ -3254,7 +3410,7 @@ impl RuskerApp {
                     || self.settings_store.is_none()
                     || (!drafted && !saved && !snapshot.engine_ready);
                 let title = if distribution.is_default {
-                    format!("{}（默认）", distribution.name)
+                    t!("app.wsl.default_distro", name = distribution.name).to_string()
                 } else {
                     distribution.name.clone()
                 };
@@ -3278,15 +3434,14 @@ impl RuskerApp {
                         .checked(drafted)
                         .disabled(switch_disabled)
                         .pointer(!switch_disabled)
-                        .on_change(cx.listener(move |this, enabled, _, cx| {
-                            this.set_runtime_integration(name.clone(), *enabled, cx);
-                        })),
+                        .on_change(cx.listener(
+                            move |this, enabled, _, cx| {
+                                this.set_runtime_integration(name.clone(), *enabled, cx);
+                            },
+                        )),
                     )
             }))
-            .child(muted(
-                "点击“应用”后集成才会生效。资源节省模式下 WSL 发行版内的 docker 命令无法唤醒 Engine，请通过 Windows 端点或 Rusker 恢复。",
-                cx,
-            ))
+            .child(muted(t!("app.wsl.apply_hint"), cx))
     }
 
     fn render_settings(&self, cx: &mut Context<Self>) -> Div {
@@ -3327,7 +3482,7 @@ impl RuskerApp {
             .when_some(self.settings_warning.clone(), |this, warning| {
                 this.child(div().px_8().pt_6().child(callout(
                     CalloutKind::Warning,
-                    "设置警告",
+                    t!("app.settings_warning"),
                     div().child(warning),
                     cx,
                 )))
@@ -3390,7 +3545,7 @@ impl RuskerApp {
                     .text_base()
                     .font_semibold()
                     .text_color(cx.theme().foreground)
-                    .child("正在应用设置"),
+                    .child(t!("app.applying_settings")),
             )
             .when_some(self.settings_notice.clone(), |this, notice| {
                 this.child(
@@ -3469,15 +3624,18 @@ impl RuskerApp {
             (
                 self.settings_notice
                     .clone()
-                    .unwrap_or_else(|| "正在应用设置…".into()),
+                    .unwrap_or_else(|| t!("app.applying_settings_progress").into()),
                 cx.theme().muted_foreground,
             )
         } else if dirty {
-            ("有未保存的更改".to_string(), cx.theme().warning)
+            (t!("app.unsaved_changes").to_string(), cx.theme().warning)
         } else if let Some(notice) = self.settings_notice.clone() {
             (notice, cx.theme().success)
         } else {
-            ("没有未保存的更改".to_string(), cx.theme().muted_foreground)
+            (
+                t!("app.no_unsaved_changes").to_string(),
+                cx.theme().muted_foreground,
+            )
         };
         let manages_engine = self.manages_engine();
         let apply_blocked = self.settings_store.is_none()
@@ -3503,7 +3661,7 @@ impl RuskerApp {
             .child(
                 button("discard-settings")
                     .outline()
-                    .label("放弃更改")
+                    .label(t!("app.discard_changes"))
                     .disabled(!dirty || applying)
                     .pointer(dirty && !applying)
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -3513,7 +3671,7 @@ impl RuskerApp {
             .child(
                 button("apply-settings")
                     .primary()
-                    .label("应用")
+                    .label(t!("app.apply"))
                     .disabled(applying || !dirty || apply_blocked)
                     .pointer(!applying && dirty && !apply_blocked)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -3527,12 +3685,12 @@ impl RuskerApp {
             .settings_store
             .as_ref()
             .map(|store| store.config_path().display().to_string())
-            .unwrap_or_else(|| "不可用".into());
+            .unwrap_or_else(|| t!("app.not_available").into());
         div()
             .flex()
             .flex_col()
             .gap_3()
-            .child(settings_label("外观", cx))
+            .child(settings_label(t!("app.general.appearance"), cx))
             .child(
                 div()
                     .flex()
@@ -3541,19 +3699,20 @@ impl RuskerApp {
                     .child(self.theme_button(ThemePreference::Light, cx))
                     .child(self.theme_button(ThemePreference::Dark, cx)),
             )
-            .child(muted("主题立即预览，点击“应用”后保存。", cx))
-            .child(muted(format!("Rusker 配置文件：{config_path}"), cx))
+            .child(settings_label(t!("app.settings.language"), cx))
+            .child(div().flex().gap_2().children(
+                LanguagePreference::ALL.map(|preference| self.language_button(preference, cx)),
+            ))
+            .child(muted(t!("app.general.theme_hint"), cx))
+            .child(muted(t!("app.general.config_path", path = config_path), cx))
     }
 
     fn render_vm_settings(&self, cx: &mut Context<Self>) -> Div {
         if !self.manages_engine() {
             return div().child(callout(
                 CalloutKind::Info,
-                "外部 Engine",
-                muted(
-                    "当前 Engine 不由 Rusker 管理（非 Windows 或设置了 DOCKER_HOST），CPU、内存和磁盘由该 Engine 自行配置。",
-                    cx,
-                ),
+                t!("app.vm.external_title"),
+                muted(t!("app.vm.external_body"), cx),
                 cx,
             ));
         }
@@ -3566,19 +3725,19 @@ impl RuskerApp {
             .gap_6()
             .child(callout(
                 CalloutKind::Info,
-                "WSL 2 后端",
+                t!("app.vm.wsl_backend_title"),
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child("你正在使用 WSL 2 后端，资源限制由 Windows 管理。")
+                    .child(t!("app.vm.wsl_backend_body"))
                     .child(
                         div()
                             .flex()
                             .flex_wrap()
                             .items_center()
                             .gap_1()
-                            .child("可以在")
+                            .child(t!("app.vm.wslconfig_prefix"))
                             .child(
                                 div()
                                     .id("open-wslconfig-docs")
@@ -3589,11 +3748,11 @@ impl RuskerApp {
                                     .text_color(cx.theme().link)
                                     .underline()
                                     .cursor_pointer()
-                                    .child(".wslconfig 文件")
+                                    .child(t!("app.vm.wslconfig_file"))
                                     .child(Icon::new(AssetIcon::ExternalLink).xsmall())
                                     .on_click(|_, _, cx| cx.open_url(WSLCONFIG_DOCS_URL)),
                             )
-                            .child("中配置 WSL 2 可用的内存、CPU 和交换空间上限。"),
+                            .child(t!("app.vm.wslconfig_suffix")),
                     ),
                 cx,
             ))
@@ -3602,7 +3761,7 @@ impl RuskerApp {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(settings_label("磁盘镜像位置", cx))
+                    .child(settings_label(t!("app.vm.disk_location"), cx))
                     .child(
                         div()
                             .flex()
@@ -3641,7 +3800,7 @@ impl RuskerApp {
                             .child(
                                 button("browse-disk-location")
                                     .outline()
-                                    .label("浏览…")
+                                    .label(t!("app.browse"))
                                     .disabled(busy)
                                     .pointer(!busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -3651,9 +3810,9 @@ impl RuskerApp {
                     )
                     .child(muted(
                         if self.runtime_snapshot.installed {
-                            "Docker 数据磁盘（docker-data.vhdx，存放镜像、容器和卷）所在目录。选择新目录并应用即可移动，不影响其他 WSL 发行版。"
+                            t!("app.vm.disk_hint_installed")
                         } else {
-                            "Docker 数据磁盘（docker-data.vhdx，存放镜像、容器和卷）的创建目录。"
+                            t!("app.vm.disk_hint_new")
                         },
                         cx,
                     ))
@@ -3662,7 +3821,7 @@ impl RuskerApp {
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().warning)
-                                .child("应用后会停止 Engine 并移动数据磁盘，运行中的容器会被停止；跨磁盘移动较大的数据时可能需要数分钟。"),
+                                .child(t!("app.vm.disk_move_warning")),
                         )
                     }),
             )
@@ -3673,13 +3832,13 @@ impl RuskerApp {
         let enabled = self.settings_draft.resource_saver.enabled;
         let managed = self.manages_engine();
         let threshold_labels = [
-            "30 秒",
-            "10 分钟",
-            "20 分钟",
-            "30 分钟",
-            "40 分钟",
-            "50 分钟",
-            "60 分钟",
+            t!("app.saver.threshold_seconds"),
+            t!("app.saver.threshold_minutes", minutes = 10),
+            t!("app.saver.threshold_minutes", minutes = 20),
+            t!("app.saver.threshold_minutes", minutes = 30),
+            t!("app.saver.threshold_minutes", minutes = 40),
+            t!("app.saver.threshold_minutes", minutes = 50),
+            t!("app.saver.threshold_minutes", minutes = 60),
         ];
         div()
             .flex()
@@ -3690,7 +3849,11 @@ impl RuskerApp {
                     .flex()
                     .items_center()
                     .gap_4()
-                    .child(div().flex_1().child(settings_label("启用资源节省", cx)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(settings_label(t!("app.saver.enable"), cx)),
+                    )
                     .child(
                         Switch::new("resource-saver-enabled")
                             .checked(enabled)
@@ -3705,17 +3868,17 @@ impl RuskerApp {
             )
             .child(muted(
                 if managed {
-                    "没有运行中的容器且未启用 WSL 集成时暂停 Engine，保留 WSL 发行版和数据盘以便快速恢复。Windows 客户端再次连接时自动继续；内存回收由 WSL 管理。"
+                    t!("app.saver.hint_managed")
                 } else {
-                    "资源节省只作用于 Rusker 管理的 WSL2 Engine，当前 Engine 不由 Rusker 管理。"
+                    t!("app.saver.hint_unmanaged")
                 },
                 cx,
             ))
             .when(self.resource_saver_active(), |this| {
                 this.child(callout(
                     CalloutKind::Info,
-                    "正处于资源节省模式",
-                    muted("Engine 已暂停。运行 docker 命令或刷新 Rusker 即可恢复。", cx),
+                    t!("app.saver.active_title"),
+                    muted(t!("app.saver.active_body"), cx),
                     cx,
                 ))
             })
@@ -3729,7 +3892,7 @@ impl RuskerApp {
                     .flex_col()
                     .gap_3()
                     .when(!enabled || !managed, |this| this.opacity(0.5))
-                    .child(settings_label("资源节省阈值", cx))
+                    .child(settings_label(t!("app.saver.threshold"), cx))
                     .child(
                         div()
                             .flex()
@@ -3746,7 +3909,7 @@ impl RuskerApp {
                                                 .disabled(!enabled || !managed),
                                         ),
                                     )
-                                    .child(muted("秒", cx)),
+                                    .child(muted(t!("app.saver.seconds_unit"), cx)),
                             )
                             .child(
                                 div()
@@ -3766,14 +3929,13 @@ impl RuskerApp {
                                             .justify_between()
                                             .text_xs()
                                             .text_color(cx.theme().muted_foreground)
-                                            .children(threshold_labels.map(|label| div().child(label))),
+                                            .children(
+                                                threshold_labels.map(|label| div().child(label)),
+                                            ),
                                     ),
                             ),
                     )
-                    .child(muted(
-                        "拖动滑块设置从没有运行中的容器到进入资源节省模式之间的等待时间（30 秒到 60 分钟）。",
-                        cx,
-                    )),
+                    .child(muted(t!("app.saver.threshold_hint"), cx)),
             )
     }
 
@@ -3783,14 +3945,14 @@ impl RuskerApp {
             .settings_store
             .as_ref()
             .map(|store| store.proxy_export_path().display().to_string())
-            .unwrap_or_else(|| "不可用".into());
+            .unwrap_or_else(|| t!("app.not_available").into());
         let mode = self.settings_draft.docker_proxy.mode;
         div()
             .flex()
             .flex_col()
             .gap_4()
             .child(proxy_heading(
-                "Docker Engine 代理",
+                t!("app.proxy.engine_title"),
                 self.proxy_mode_select(
                     "engine-proxy-mode",
                     mode,
@@ -3800,10 +3962,7 @@ impl RuskerApp {
                 ),
                 cx,
             ))
-            .child(muted(
-                "Engine 拉取或推送镜像等出站请求使用的代理。应用后直接写入受管 Engine 的 daemon.json 并生效。",
-                cx,
-            ))
+            .child(muted(t!("app.proxy.engine_hint"), cx))
             .when(mode == ProxyMode::Manual, |this| {
                 this.child(proxy_fields(
                     [
@@ -3815,23 +3974,37 @@ impl RuskerApp {
                 ))
             })
             .when(mode == ProxyMode::System, |this| {
-                this.child(proxy_summary(&self.settings_draft.docker_proxy.resolve(None), cx))
-            })
-            .when(mode != ProxyMode::None || self.settings.docker_proxy.mode != ProxyMode::None, |this| {
-                this.child(callout(
-                    if manages_engine { CalloutKind::Info } else { CalloutKind::Warning },
-                    if manages_engine { "不会重启 Engine" } else { "需要手动应用" },
-                    muted(
-                        if manages_engine {
-                            "与 Docker Desktop 相同，Engine 始终经 Rusker 内置代理出网，代理设置在 Windows 上逐个请求生效：127.0.0.1 指 Windows 本机，与 WSL 网络模式（NAT/mirrored）无关；修改后无需重启 Engine，系统代理的变化也会自动跟随。"
-                        } else {
-                            "当前 Engine 不由 Rusker 管理，无法直接修改其配置。请导出后手动合并 proxies 到 daemon.json 并重启 Engine；不要覆盖 daemon.json 中的其他配置。"
-                        },
-                        cx,
-                    ),
+                this.child(proxy_summary(
+                    &self.settings_draft.docker_proxy.resolve(None),
                     cx,
                 ))
             })
+            .when(
+                mode != ProxyMode::None || self.settings.docker_proxy.mode != ProxyMode::None,
+                |this| {
+                    this.child(callout(
+                        if manages_engine {
+                            CalloutKind::Info
+                        } else {
+                            CalloutKind::Warning
+                        },
+                        if manages_engine {
+                            t!("app.proxy.no_restart")
+                        } else {
+                            t!("app.proxy.manual_apply")
+                        },
+                        muted(
+                            if manages_engine {
+                                t!("app.proxy.managed_hint")
+                            } else {
+                                t!("app.proxy.unmanaged_hint")
+                            },
+                            cx,
+                        ),
+                        cx,
+                    ))
+                },
+            )
             .when(!manages_engine, |this| {
                 this.child(
                     div()
@@ -3842,14 +4015,14 @@ impl RuskerApp {
                             button("export-proxy-settings")
                                 .outline()
                                 .icon(IconName::FileText)
-                                .label("导出 Engine JSON")
+                                .label(t!("app.proxy.export"))
                                 .disabled(self.settings_store.is_none())
                                 .pointer(self.settings_store.is_some())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.export_proxy_settings(cx);
                                 })),
                         )
-                        .child(muted(format!("导出到：{export_path}"), cx)),
+                        .child(muted(t!("app.proxy.export_path", path = export_path), cx)),
                 )
             })
             .child(div().my_2().h(px(1.)).bg(cx.theme().border))
@@ -3860,14 +4033,14 @@ impl RuskerApp {
     fn render_container_proxy_settings(&self, cx: &mut Context<Self>) -> Div {
         let config_path = docker_client_config_path()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "不可用".into());
+            .unwrap_or_else(|| t!("app.not_available").into());
         let mode = self.settings_draft.container_proxy.mode;
         div()
             .flex()
             .flex_col()
             .gap_4()
             .child(proxy_heading(
-                "容器代理",
+                t!("app.proxy.container_title"),
                 self.proxy_mode_select(
                     "container-proxy-mode",
                     mode,
@@ -3877,10 +4050,7 @@ impl RuskerApp {
                 ),
                 cx,
             ))
-            .child(muted(
-                "运行中容器的出站流量使用的代理，新建容器时以 HTTP_PROXY / HTTPS_PROXY / NO_PROXY 环境变量传入。",
-                cx,
-            ))
+            .child(muted(t!("app.proxy.container_hint"), cx))
             .when(mode == ProxyMode::Manual, |this| {
                 this.child(proxy_fields(
                     [
@@ -3903,13 +4073,8 @@ impl RuskerApp {
             })
             .child(callout(
                 CalloutKind::Info,
-                "仅对新建容器生效",
-                muted(
-                    format!(
-                        "应用后写入 Docker 客户端配置 {config_path} 的 proxies.default（保留其他配置），docker run / docker build 会自动传入代理；已有容器需重新创建。容器内的 127.0.0.1 指向容器自身，请使用宿主机的局域网地址。"
-                    ),
-                    cx,
-                ),
+                t!("app.proxy.new_containers_only"),
+                muted(t!("app.proxy.new_containers_body", path = config_path), cx),
                 cx,
             ))
     }
@@ -3933,7 +4098,7 @@ impl RuskerApp {
         id: &'static str,
         current: T,
         options: &'static [T],
-        label: fn(T) -> &'static str,
+        label: fn(T) -> String,
         field: fn(&mut AppSettings) -> &mut T,
         enabled: bool,
         cx: &mut Context<Self>,
@@ -3971,15 +4136,15 @@ impl RuskerApp {
         let state = &self.lan_forward;
         let mode = state.mode.as_deref()?;
         let text = match mode {
-            "mirrored" => {
-                "WSL 使用镜像网络：已发布端口直接出现在 Windows 网络上，局域网设备可通过本机 IP 访问。".to_string()
-            }
-            "nat" | "unknown" if self.settings.network.port_binding == PortBinding::LocalhostOnly => {
-                "WSL 使用 NAT 网络：端口仅绑定本机，不转发到局域网。".to_string()
+            "mirrored" => t!("app.lan.mirrored").to_string(),
+            "nat" | "unknown"
+                if self.settings.network.port_binding == PortBinding::LocalhostOnly =>
+            {
+                t!("app.lan.nat_localhost").to_string()
             }
             "nat" | "unknown" => {
                 let ports = if state.forwarded.is_empty() {
-                    "当前没有需要转发的端口".to_string()
+                    t!("app.lan.no_ports").to_string()
                 } else {
                     let mut list = state
                         .forwarded
@@ -3987,17 +4152,17 @@ impl RuskerApp {
                         .take(12)
                         .map(|(protocol, port)| format!("{} {port}", protocol.label()))
                         .collect::<Vec<_>>()
-                        .join("、");
+                        .join(t!("app.list_separator").as_ref());
                     if state.forwarded.len() > 12 {
-                        list.push_str(&format!(" 等 {} 个", state.forwarded.len()));
+                        list.push_str(
+                            t!("app.lan.more_ports", count = state.forwarded.len()).as_ref(),
+                        );
                     }
-                    format!("已转发 {list}")
+                    t!("app.lan.forwarded", ports = list).to_string()
                 };
-                format!(
-                    "WSL 使用 NAT 网络：与 Docker Desktop 相同，Rusker 在 Windows 上监听发布到所有接口的端口（TCP/UDP，IPv4 与 IPv6）并转发到 VM，局域网设备可通过本机 IP 访问（{ports}）。首次监听时请在 Windows 防火墙提示中允许 Rusker 访问网络。"
-                )
+                t!("app.lan.nat", ports = ports).to_string()
             }
-            other => format!("WSL 网络模式为 {other}，Rusker 不转发端口。"),
+            other => t!("app.lan.other", mode = other).to_string(),
         };
         Some((text, state.failures.clone()))
     }
@@ -4021,25 +4186,26 @@ impl RuskerApp {
             .flex()
             .flex_col()
             .gap_4()
-            .child(muted("配置 Docker 容器与网络交互的方式。", cx))
+            .child(muted(t!("app.network.hint"), cx))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(settings_label("Docker 子网", cx))
+                    .child(settings_label(t!("app.network.subnet"), cx))
                     .child(Input::new(&self.network_subnet_input).disabled(!managed))
-                    .child(muted(
-                        "默认 bridge 网络（docker0）使用的 IPv4 网段，留空则使用 Docker 默认值。与局域网或 VPN 网段冲突时可修改；已有容器需重新创建才会使用新网段。",
-                        cx,
-                    )),
+                    .child(muted(t!("app.network.subnet_hint"), cx)),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_4()
-                    .child(div().flex_1().child(settings_label("启用主机网络", cx)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(settings_label(t!("app.network.host_networking"), cx)),
+                    )
                     .child(
                         Switch::new("network-host-networking")
                             .checked(network.host_networking)
@@ -4053,12 +4219,9 @@ impl RuskerApp {
                             })),
                     ),
             )
-            .child(muted(
-                "以 --net=host 启动的容器监听的 TCP 和 UDP 端口也会在 Windows 上转发：NAT 网络下局域网设备可访问，UDP 也可通过 localhost 访问。localhost 上的 TCP 由 WSL 自身转发，不受此开关影响；镜像网络下无需转发。应用后立即生效，不会重启 Engine。",
-                cx,
-            ))
+            .child(muted(t!("app.network.host_networking_hint"), cx))
             .child(proxy_heading(
-                "端口绑定行为",
+                t!("app.network.port_binding"),
                 self.settings_select(
                     "network-port-binding",
                     network.port_binding,
@@ -4070,10 +4233,7 @@ impl RuskerApp {
                 ),
                 cx,
             ))
-            .child(muted(
-                "控制发布的容器端口绑定到所有网络接口（默认），还是只绑定到 127.0.0.1。端口映射中显式指定的地址（如 0.0.0.0:8080:80）不受影响。",
-                cx,
-            ))
+            .child(muted(t!("app.network.port_binding_hint"), cx))
             .when_some(self.lan_forward_summary(), |this, (text, failures)| {
                 this.child(
                     indented(cx)
@@ -4087,7 +4247,7 @@ impl RuskerApp {
                 )
             })
             .child(proxy_heading(
-                "默认网络模式",
+                t!("app.network.default_mode"),
                 self.settings_select(
                     "network-mode",
                     network.mode,
@@ -4099,19 +4259,17 @@ impl RuskerApp {
                 ),
                 cx,
             ))
-            .child(muted(
-                "作用于默认 bridge 网络和之后新建的 bridge 网络，创建网络时仍可单独指定（docker network create --ipv6）。",
-                cx,
-            ))
+            .child(muted(t!("app.network.default_mode_hint"), cx))
             .when(network.mode == NetworkingMode::DualStack, |this| {
-                this.child(indented(cx).child(muted(
-                    "默认 bridge 网络使用 IPv6 子网 fd00:7275:736b::/64，新建网络从 Docker 的 IPv6 地址池分配。",
-                    cx,
-                )))
+                this.child(indented(cx).child(muted(t!("app.network.ipv6_hint"), cx)))
             })
             .child(callout(
                 CalloutKind::Info,
-                if managed { "会重启 Engine" } else { "需要手动应用" },
+                if managed {
+                    t!("app.network.restarts_engine")
+                } else {
+                    t!("app.proxy.manual_apply")
+                },
                 div()
                     .flex()
                     .flex_wrap()
@@ -4119,9 +4277,9 @@ impl RuskerApp {
                     .gap_1()
                     .text_color(cx.theme().muted_foreground)
                     .child(if managed {
-                        "网络配置写入受管 Engine 的 daemon.json，变化时 Engine 会重启，运行中的容器会被停止。"
+                        t!("app.network.managed_hint")
                     } else {
-                        "当前 Engine 不由 Rusker 管理（设置了 DOCKER_HOST），请直接编辑该 Engine 的 daemon.json。"
+                        t!("app.daemon.unmanaged_hint")
                     })
                     .child(
                         div()
@@ -4132,7 +4290,7 @@ impl RuskerApp {
                             .text_color(cx.theme().link)
                             .underline()
                             .cursor_pointer()
-                            .child("了解更多")
+                            .child(t!("app.learn_more"))
                             .child(Icon::new(AssetIcon::ExternalLink).xsmall())
                             .on_click(|_, _, cx| cx.open_url(NETWORKING_DOCS_URL)),
                     ),
@@ -4153,12 +4311,15 @@ fn list_action_button(id: impl Into<ElementId>, color: Hsla, cx: &App) -> Button
 
 /// Usage summary block shown above the container table.
 fn container_usage(
-    title: &'static str,
-    tooltip: &'static str,
+    key: &'static str,
+    title: impl Into<SharedString>,
+    tooltip: impl Into<SharedString>,
     value: &str,
     cx: &App,
 ) -> impl IntoElement {
     let muted = cx.theme().muted_foreground;
+    let title = title.into();
+    let tooltip = tooltip.into();
     div()
         .flex_1()
         .min_w_0()
@@ -4173,9 +4334,9 @@ fn container_usage(
                 .child(div().text_sm().font_medium().child(title))
                 .child(
                     div()
-                        .id(SharedString::from(format!("container-usage-{title}")))
+                        .id(SharedString::from(format!("container-usage-{key}")))
                         .child(Icon::new(IconName::Info).xsmall().text_color(muted))
-                        .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx)),
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)),
                 ),
         )
         .child(div().text_sm().text_color(muted).child(value.to_string()))
@@ -4186,12 +4347,13 @@ fn copyable_value(
     id: impl Into<ElementId>,
     icon: impl Into<AssetIcon>,
     text: impl Into<SharedString>,
-    tooltip: &'static str,
+    tooltip: impl Into<SharedString>,
     text_color: Hsla,
     icon_color: Hsla,
 ) -> impl IntoElement {
     let text: SharedString = text.into();
     let copy_text = text.clone();
+    let tooltip = tooltip.into();
     div()
         .id(id)
         .flex()
@@ -4200,7 +4362,7 @@ fn copyable_value(
         .min_w_0()
         .cursor_pointer()
         .hover(|style| style.underline())
-        .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
@@ -4218,7 +4380,8 @@ fn copyable_value(
 /// Custom content spans the menu row, including its horizontal padding,
 /// so both the icon and label (and the space around them) use a pointer.
 /// Keep the handler on PopupMenuItem to preserve dismissal and keyboard activation.
-fn container_menu_item(label: &'static str, icon: impl Into<Icon>) -> PopupMenuItem {
+fn container_menu_item(label: impl Into<SharedString>, icon: impl Into<Icon>) -> PopupMenuItem {
+    let label = label.into();
     let icon: Icon = icon.into();
     PopupMenuItem::element(move |_, _| {
         div()
@@ -4231,7 +4394,7 @@ fn container_menu_item(label: &'static str, icon: impl Into<Icon>) -> PopupMenuI
             .gap_1()
             .cursor_pointer()
             .child(icon.clone().xsmall())
-            .child(label)
+            .child(label.clone())
     })
 }
 
@@ -4247,14 +4410,16 @@ fn container_menu(
     let id = container.id.clone();
     let image = container.image.clone();
     menu.item(
-        container_menu_item("查看详情", AssetIcon::Container).on_click(move |_, _, cx| {
-            _ = detail_weak.update(cx, |this, cx| {
-                this.select_container(detail_container.id.clone(), cx);
-            });
-        }),
+        container_menu_item(t!("app.view_details"), AssetIcon::Container).on_click(
+            move |_, _, cx| {
+                _ = detail_weak.update(cx, |this, cx| {
+                    this.select_container(detail_container.id.clone(), cx);
+                });
+            },
+        ),
     )
     .item(
-        container_menu_item("重启", IconName::RotateCw).on_click(move |_, _, cx| {
+        container_menu_item(t!("app.restart"), IconName::RotateCw).on_click(move |_, _, cx| {
             _ = restart_weak.update(cx, |this, cx| {
                 this.start_container_action(restart_id.clone(), ContainerAction::Restart, cx);
             });
@@ -4262,12 +4427,14 @@ fn container_menu(
     )
     .separator()
     .item(
-        container_menu_item("复制容器 ID", IconName::Copy).on_click(move |_, _, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
-        }),
+        container_menu_item(t!("app.copy_container_id"), IconName::Copy).on_click(
+            move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+            },
+        ),
     )
     .item(
-        container_menu_item("复制镜像引用", IconName::Copy).on_click(move |_, _, cx| {
+        container_menu_item(t!("app.copy_image_ref"), IconName::Copy).on_click(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(image.clone()));
         }),
     )
@@ -4486,18 +4653,28 @@ impl RuskerApp {
         let mut facts: Vec<String> = Vec::new();
         if self.connected {
             if engine.cpus > 0 {
-                facts.push(format!("CPU {} 核", engine.cpus));
+                facts.push(t!("app.statusbar.cpus", count = engine.cpus).to_string());
             }
             if engine.memory_bytes > 0 {
-                facts.push(format!("内存 {}", format_bytes(engine.memory_bytes)));
+                facts.push(
+                    t!(
+                        "app.statusbar.memory",
+                        size = format_bytes(engine.memory_bytes)
+                    )
+                    .to_string(),
+                );
             }
-            facts.push(format!(
-                "容器 {}/{} 运行中",
-                self.snapshot.running_containers(),
-                self.snapshot.containers.len()
-            ));
-            facts.push(format!("镜像 {}", self.snapshot.images.len()));
-            facts.push(format!("卷 {}", self.snapshot.volumes.len()));
+            facts.push(
+                t!(
+                    "app.statusbar.containers",
+                    running = self.snapshot.running_containers(),
+                    total = self.snapshot.containers.len()
+                )
+                .to_string(),
+            );
+            facts.push(t!("app.statusbar.images", count = self.snapshot.images.len()).to_string());
+            facts
+                .push(t!("app.statusbar.volumes", count = self.snapshot.volumes.len()).to_string());
             if let Some(gpu) = self
                 .runtime_snapshot
                 .gpu
@@ -4579,28 +4756,31 @@ impl RuskerApp {
     /// connection with the managed runtime's lifecycle.
     fn engine_status(&self, cx: &App) -> (String, Hsla) {
         if self.quitting {
-            return ("Engine 停止中…".into(), cx.theme().warning);
+            return (t!("app.status.engine_stopping").into(), cx.theme().warning);
         }
         match self
             .engine_transition
             .or(self.recovering().then_some(EngineTransition::Recovering))
         {
             Some(EngineTransition::Stopping) => {
-                return ("Engine 停止中…".into(), cx.theme().warning)
+                return (t!("app.status.engine_stopping").into(), cx.theme().warning)
             }
             Some(EngineTransition::Starting) => {
-                return ("Engine 启动中…".into(), cx.theme().warning)
+                return (t!("app.status.engine_starting").into(), cx.theme().warning)
             }
             Some(EngineTransition::Recovering) => {
-                return ("Engine 重启中…".into(), cx.theme().warning)
+                return (
+                    t!("app.status.engine_restarting").into(),
+                    cx.theme().warning,
+                )
             }
             _ => {}
         }
         if self.connected {
-            return ("Engine 运行中".into(), cx.theme().success);
+            return (t!("app.status.engine_running").into(), cx.theme().success);
         }
         if self.resource_saver_active() {
-            return ("资源节省模式".into(), cx.theme().info);
+            return (t!("app.status.saver").into(), cx.theme().info);
         }
         if let Some(busy) = &self.runtime_busy {
             return (
@@ -4623,14 +4803,14 @@ impl RuskerApp {
             self.busy.is_some(),
             self.loading,
         ) {
-            return (label.into(), cx.theme().warning);
+            return (label, cx.theme().warning);
         }
         let label = if cfg!(windows) && !self.runtime_snapshot.installed && self.manages_engine() {
-            "Engine 未安装"
+            t!("app.status.not_installed")
         } else {
-            "Engine 已停止"
+            t!("app.status.stopped")
         };
-        (label.into(), cx.theme().danger)
+        (label.into_owned(), cx.theme().danger)
     }
 }
 
@@ -4641,13 +4821,13 @@ fn engine_reconnect_label(
     connected: bool,
     busy: bool,
     loading: bool,
-) -> Option<&'static str> {
+) -> Option<String> {
     if connected {
         None
     } else if session_running && busy {
-        Some("Engine 恢复中…")
+        Some(t!("app.status.recovering").into())
     } else if session_running || loading {
-        Some("正在连接 Engine…")
+        Some(t!("app.status.connecting").into())
     } else {
         None
     }
@@ -4662,13 +4842,13 @@ mod engine_status_tests {
         // Saver has cleared, but action deliberately sets loading=false and
         // connected remains false until its full snapshot has arrived.
         assert_eq!(
-            engine_reconnect_label(true, false, true, false),
-            Some("Engine 恢复中…")
+            engine_reconnect_label(true, false, true, false).as_deref(),
+            Some("Engine recovering…")
         );
         // Also covers an external CLI wake-up before the next UI poll.
         assert_eq!(
-            engine_reconnect_label(true, false, false, false),
-            Some("正在连接 Engine…")
+            engine_reconnect_label(true, false, false, false).as_deref(),
+            Some("Connecting to Engine…")
         );
     }
 
@@ -4678,8 +4858,8 @@ mod engine_status_tests {
         assert_eq!(engine_reconnect_label(false, false, true, false), None);
         assert_eq!(engine_reconnect_label(true, true, true, false), None);
         assert_eq!(
-            engine_reconnect_label(false, false, false, true),
-            Some("正在连接 Engine…")
+            engine_reconnect_label(false, false, false, true).as_deref(),
+            Some("Connecting to Engine…")
         );
     }
 }
@@ -4760,7 +4940,7 @@ fn disk_location_setting(settings: &AppSettings) -> Option<PathBuf> {
 }
 
 /// Section title with its mode drop-down on the right.
-fn proxy_heading(title: &'static str, select: impl IntoElement, cx: &App) -> Div {
+fn proxy_heading(title: impl Into<SharedString>, select: impl IntoElement, cx: &App) -> Div {
     div()
         .flex()
         .items_center()
@@ -4782,21 +4962,21 @@ fn proxy_fields(inputs: [&Entity<InputState>; 3], cx: &App) -> Div {
         .flex_col()
         .gap_4()
         .child(form_field(
-            "Web 服务器（HTTP）",
+            t!("app.proxy.http_label"),
             http,
-            "支持 http:// 或 https://，不保存内嵌用户名或密码。",
+            t!("app.proxy.http_hint"),
             cx,
         ))
         .child(form_field(
-            "安全 Web 服务器（HTTPS）",
+            t!("app.proxy.https_label"),
             https,
-            "HTTPS 请求使用的代理地址，也可以填写 http:// 代理。",
+            t!("app.proxy.https_hint"),
             cx,
         ))
         .child(form_field(
-            "对以下主机和域名不使用代理",
+            t!("app.proxy.no_proxy_label"),
             no_proxy,
-            "逗号分隔，例如 registry-1.docker.com,*.docker.com,10.0.0.0/8",
+            t!("app.proxy.no_proxy_hint"),
             cx,
         ))
 }
@@ -4804,21 +4984,22 @@ fn proxy_fields(inputs: [&Entity<InputState>; 3], cx: &App) -> Div {
 /// The addresses a non-manual mode currently resolves to.
 fn proxy_summary(proxy: &ResolvedProxy, cx: &App) -> Div {
     let text = if proxy.is_empty() {
-        "当前未检测到可用的 HTTP/HTTPS 代理，将直接连接。".to_string()
+        t!("app.proxy.no_proxy_detected").to_string()
     } else {
         let or_none = |value: &str| {
             if value.is_empty() {
-                "（无）".to_string()
+                t!("app.proxy.none").to_string()
             } else {
                 value.to_string()
             }
         };
-        format!(
-            "当前生效：HTTP {} · HTTPS {} · 不使用代理 {}",
-            or_none(&proxy.http_proxy),
-            or_none(&proxy.https_proxy),
-            or_none(&proxy.no_proxy)
+        t!(
+            "app.proxy.current",
+            http = or_none(&proxy.http_proxy),
+            https = or_none(&proxy.https_proxy),
+            no_proxy = or_none(&proxy.no_proxy)
         )
+        .to_string()
     };
     div()
         .ml_2()
@@ -4838,19 +5019,25 @@ fn follows_other_proxy(mode: ProxyMode) -> bool {
 /// (`proxies.default`), so `docker run` / `docker build` pass it on.
 /// Containers created from Rusker get the variables directly.
 fn sync_container_proxy(settings: &AppSettings) -> Result<(), String> {
-    let path = docker_client_config_path()
-        .ok_or("无法确定 Docker 客户端配置目录，容器代理仅对 Rusker 创建的容器生效")?;
+    let path = docker_client_config_path().ok_or_else(|| t!("app.error.client_config_dir"))?;
     apply_client_proxy(&path, &settings.container_proxy_resolved())
         .map(|_| ())
-        .map_err(|error| format!("写入容器代理到 {} 失败：{error}", path.display()))
+        .map_err(|error| {
+            t!(
+                "app.error.write_client_proxy",
+                path = path.display().to_string(),
+                error = error
+            )
+            .to_string()
+        })
 }
 
-fn settings_label(text: &'static str, cx: &App) -> Div {
+fn settings_label(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_base()
         .font_semibold()
         .text_color(cx.theme().foreground)
-        .child(text)
+        .child(text.into())
 }
 
 #[derive(Clone, Copy)]
@@ -4861,7 +5048,12 @@ enum CalloutKind {
 
 /// Tinted notice box with an icon and a title, like Docker Desktop's
 /// "WSL2 backend" panel.
-fn callout(kind: CalloutKind, title: &'static str, body: impl IntoElement, cx: &App) -> Div {
+fn callout(
+    kind: CalloutKind,
+    title: impl Into<SharedString>,
+    body: impl IntoElement,
+    cx: &App,
+) -> Div {
     let (color, icon) = match kind {
         CalloutKind::Info => (cx.theme().info, AssetIcon::Info),
         CalloutKind::Warning => (cx.theme().warning, AssetIcon::TriangleAlert),
@@ -4884,23 +5076,28 @@ fn callout(kind: CalloutKind, title: &'static str, body: impl IntoElement, cx: &
                 .flex_col()
                 .gap_2()
                 .text_sm()
-                .child(div().text_base().font_semibold().child(title))
+                .child(div().text_base().font_semibold().child(title.into()))
                 .child(body),
         )
 }
 
-fn form_field(label: &str, input: &Entity<InputState>, hint: &str, cx: &App) -> Div {
+fn form_field(
+    label: impl Into<SharedString>,
+    input: &Entity<InputState>,
+    hint: impl Into<SharedString>,
+    cx: &App,
+) -> Div {
     div()
         .flex()
         .flex_col()
         .gap_2()
-        .child(div().text_sm().font_medium().child(label.to_string()))
+        .child(div().text_sm().font_medium().child(label.into()))
         .child(Input::new(input))
         .child(
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(hint.to_string()),
+                .child(hint.into()),
         )
 }
 

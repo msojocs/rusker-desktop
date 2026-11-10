@@ -134,9 +134,7 @@ impl DockerEngine {
             Ok(Ok(client)) => client,
             Ok(Err(error)) => {
                 let message = if managed_wsl {
-                    format!(
-                        "无法连接 Rusker WSL2 受管 Engine，请在设置中安装并启动运行环境：{error}"
-                    )
+                    t!("engine.error.connect_managed", error = error).into_owned()
                 } else {
                     error.to_string()
                 };
@@ -144,7 +142,7 @@ impl DockerEngine {
             }
             Err(_) => {
                 return Err(EngineError::Timeout {
-                    action: "连接容器引擎".into(),
+                    action: t!("engine.action.connect_engine").into_owned(),
                     seconds: connect_timeout.as_secs(),
                 });
             }
@@ -165,21 +163,26 @@ impl DockerEngine {
         // Top-level images only (like `docker images`), without
         // intermediate build layers.
         let images_options = ListImagesOptionsBuilder::default().all(false).build();
+        let version_action = t!("engine.action.read_engine_version");
+        let info_action = t!("engine.action.read_engine_info");
+        let containers_action = t!("engine.action.list_containers");
+        let images_action = t!("engine.action.list_images");
+        let volumes_action = t!("engine.action.list_volumes");
         let (version, info, containers, images, volumes) = tokio::try_join!(
-            with_timeout("读取引擎版本", REQUEST_TIMEOUT, self.client.version()),
-            with_timeout("读取引擎信息", REQUEST_TIMEOUT, self.client.info()),
+            with_timeout(&version_action, REQUEST_TIMEOUT, self.client.version()),
+            with_timeout(&info_action, REQUEST_TIMEOUT, self.client.info()),
             with_timeout(
-                "读取容器列表",
+                &containers_action,
                 REQUEST_TIMEOUT,
                 self.client.list_containers(Some(containers_options)),
             ),
             with_timeout(
-                "读取镜像列表",
+                &images_action,
                 REQUEST_TIMEOUT,
                 self.client.list_images(Some(images_options)),
             ),
             with_timeout(
-                "读取卷列表",
+                &volumes_action,
                 REQUEST_TIMEOUT,
                 self.client.list_volumes(None::<ListVolumesOptions>),
             ),
@@ -200,23 +203,29 @@ impl DockerEngine {
         Ok(EngineSnapshot {
             engine: EngineInfo {
                 name: {
-                    let name = info.name.unwrap_or_else(|| "本地引擎".into());
+                    let name = info
+                        .name
+                        .unwrap_or_else(|| t!("engine.info.local_engine").into_owned());
                     if self.managed_wsl {
                         format!("Rusker WSL2 / {name}")
                     } else {
                         name
                     }
                 },
-                version: version.version.unwrap_or_else(|| "未知".into()),
-                api_version: version.api_version.unwrap_or_else(|| "未知".into()),
+                version: version
+                    .version
+                    .unwrap_or_else(|| t!("engine.info.unknown").into_owned()),
+                api_version: version
+                    .api_version
+                    .unwrap_or_else(|| t!("engine.info.unknown").into_owned()),
                 operating_system: info
                     .operating_system
                     .or(version.os)
-                    .unwrap_or_else(|| "未知".into()),
+                    .unwrap_or_else(|| t!("engine.info.unknown").into_owned()),
                 architecture: info
                     .architecture
                     .or(version.arch)
-                    .unwrap_or_else(|| "未知".into()),
+                    .unwrap_or_else(|| t!("engine.info.unknown").into_owned()),
                 cpus: info
                     .ncpu
                     .and_then(|cpus| u32::try_from(cpus).ok())
@@ -236,9 +245,9 @@ impl DockerEngine {
         &self,
         request: CreateContainerRequest,
     ) -> Result<String, EngineError> {
-        request
-            .validate()
-            .map_err(|error| EngineError::operation("校验容器配置", error))?;
+        request.validate().map_err(|error| {
+            EngineError::operation(t!("engine.action.validate_container_config"), error)
+        })?;
         let mut options = CreateContainerOptionsBuilder::default();
         if let Some(name) = &request.name {
             options = options.name(name);
@@ -278,7 +287,7 @@ impl DockerEngine {
             ..Default::default()
         };
         let created = with_timeout(
-            "创建容器",
+            &t!("engine.action.create_container"),
             ACTION_TIMEOUT,
             self.client.create_container(Some(options.build()), body),
         )
@@ -286,7 +295,7 @@ impl DockerEngine {
         let id = created.id;
 
         if let Err(start_error) = with_timeout(
-            "启动新容器",
+            &t!("engine.action.start_new_container"),
             ACTION_TIMEOUT,
             self.client.start_container(&id, None),
         )
@@ -297,18 +306,27 @@ impl DockerEngine {
                 .v(false)
                 .build();
             let cleanup = with_timeout(
-                "清理未启动的新容器",
+                &t!("engine.action.cleanup_new_container"),
                 ACTION_TIMEOUT,
                 self.client.remove_container(&id, Some(cleanup_options)),
             )
             .await;
             let cleanup_message = match cleanup {
-                Ok(()) => "新建容器已清理".into(),
-                Err(error) => format!("新建容器 {id} 清理失败：{error}"),
+                Ok(()) => t!("engine.error.new_container_cleaned").into_owned(),
+                Err(error) => t!(
+                    "engine.error.new_container_cleanup_failed",
+                    id = id,
+                    error = error
+                )
+                .into_owned(),
             };
             return Err(EngineError::operation(
-                "创建并运行容器",
-                format!("{start_error}；{cleanup_message}"),
+                t!("engine.action.create_and_run_container"),
+                t!(
+                    "engine.error.with_cleanup",
+                    error = start_error,
+                    cleanup = cleanup_message
+                ),
             ));
         }
         Ok(id)
@@ -322,7 +340,7 @@ impl DockerEngine {
         match action {
             ContainerAction::Start => {
                 with_timeout(
-                    action.label(),
+                    &action.label(),
                     ACTION_TIMEOUT,
                     self.client.start_container(id, None),
                 )
@@ -330,7 +348,7 @@ impl DockerEngine {
             }
             ContainerAction::Stop => {
                 with_timeout(
-                    action.label(),
+                    &action.label(),
                     ACTION_TIMEOUT,
                     self.client.stop_container(id, None),
                 )
@@ -338,7 +356,7 @@ impl DockerEngine {
             }
             ContainerAction::Restart => {
                 with_timeout(
-                    action.label(),
+                    &action.label(),
                     ACTION_TIMEOUT,
                     self.client.restart_container(id, None),
                 )
@@ -350,7 +368,7 @@ impl DockerEngine {
                     .v(false)
                     .build();
                 with_timeout(
-                    action.label(),
+                    &action.label(),
                     ACTION_TIMEOUT,
                     self.client.remove_container(id, Some(options)),
                 )
@@ -373,13 +391,14 @@ impl DockerEngine {
 
     pub async fn container_inspect(&self, id: &str) -> Result<String, EngineError> {
         let inspect = with_timeout(
-            "读取容器详情",
+            &t!("engine.action.read_container_detail"),
             REQUEST_TIMEOUT,
             self.client.inspect_container(id, None),
         )
         .await?;
-        serde_json::to_string_pretty(&inspect)
-            .map_err(|error| EngineError::operation("格式化容器详情", error))
+        serde_json::to_string_pretty(&inspect).map_err(|error| {
+            EngineError::operation(t!("engine.action.format_container_detail"), error)
+        })
     }
 
     pub async fn container_logs(&self, id: &str) -> Result<String, EngineError> {
@@ -395,11 +414,9 @@ impl DockerEngine {
 
         let result = timeout(REQUEST_TIMEOUT, async {
             let mut logs = String::new();
-            while let Some(output) = stream
-                .try_next()
-                .await
-                .map_err(|error| EngineError::operation("读取容器日志", error))?
-            {
+            while let Some(output) = stream.try_next().await.map_err(|error| {
+                EngineError::operation(t!("engine.action.read_container_logs"), error)
+            })? {
                 logs.push_str(&output.to_string());
                 if logs.len() > 256 * 1024 {
                     logs = bound_logs(&logs);
@@ -412,7 +429,7 @@ impl DockerEngine {
         match result {
             Ok(logs) => logs.map(|logs| bound_logs(&logs)),
             Err(_) => Err(EngineError::Timeout {
-                action: "读取容器日志".into(),
+                action: t!("engine.action.read_container_logs").into_owned(),
                 seconds: REQUEST_TIMEOUT.as_secs(),
             }),
         }
@@ -438,14 +455,16 @@ impl DockerEngine {
     }
 
     pub async fn image_detail(&self, id: &str) -> Result<ImageDetail, EngineError> {
+        let detail_action = t!("engine.action.read_image_detail");
+        let history_action = t!("engine.action.read_image_history");
         let (image, history) = tokio::try_join!(
             with_timeout(
-                "读取镜像详情",
+                &detail_action,
                 REQUEST_TIMEOUT,
                 self.client.inspect_image(id)
             ),
             with_timeout(
-                "读取镜像历史",
+                &history_action,
                 REQUEST_TIMEOUT,
                 self.client.image_history(id)
             ),
@@ -459,7 +478,7 @@ impl DockerEngine {
             .noprune(false)
             .build();
         with_timeout(
-            "删除镜像",
+            &t!("engine.action.remove_image"),
             ACTION_TIMEOUT,
             self.client.remove_image(id, Some(options), None),
         )
@@ -491,15 +510,24 @@ impl DockerEngine {
         let result = timeout(PULL_TIMEOUT, async {
             while let Some(response) = stream.try_next().await.map_err(|error| match error {
                 BollardError::RequestTimeoutError => EngineError::Timeout {
-                    action: format!("拉取镜像 {reference}：客户端等待容器引擎响应"),
+                    action: t!("engine.action.pull_image_wait", reference = reference).into_owned(),
                     seconds: client.timeout().as_secs(),
                 },
-                error => EngineError::operation(format!("拉取镜像 {reference}"), error),
+                error => EngineError::operation(
+                    t!("engine.action.pull_image", reference = reference),
+                    error,
+                ),
             })? {
                 if let Some(detail) = &response.error_detail {
                     return Err(EngineError::operation(
-                        format!("拉取镜像 {reference}"),
-                        detail.message.as_deref().unwrap_or("引擎返回未知错误"),
+                        t!("engine.action.pull_image", reference = reference),
+                        detail
+                            .message
+                            .as_deref()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                t!("engine.error.unknown_engine_error").into_owned()
+                            }),
                     ));
                 }
                 on_progress(response);
@@ -511,7 +539,7 @@ impl DockerEngine {
         match result {
             Ok(result) => result,
             Err(_) => Err(EngineError::Timeout {
-                action: format!("拉取镜像 {reference}"),
+                action: t!("engine.action.pull_image", reference = reference).into_owned(),
                 seconds: PULL_TIMEOUT.as_secs(),
             }),
         }
@@ -534,8 +562,12 @@ impl DockerEngine {
             }
             request
         });
-        let usage =
-            with_timeout("统计卷大小", DISK_USAGE_TIMEOUT, client.df(Some(options))).await?;
+        let usage = with_timeout(
+            &t!("engine.action.volume_disk_usage"),
+            DISK_USAGE_TIMEOUT,
+            client.df(Some(options)),
+        )
+        .await?;
         let mut sizes = HashMap::new();
         for item in usage
             .volume_usage
@@ -557,11 +589,14 @@ impl DockerEngine {
 
     pub async fn create_volume(&self, name: Option<String>) -> Result<(), EngineError> {
         if let Some(name) = &name {
-            validate_volume_name(name).map_err(|error| EngineError::operation("创建卷", error))?;
-            self.ensure_volume_absent("创建卷", name).await?;
+            validate_volume_name(name).map_err(|error| {
+                EngineError::operation(t!("engine.action.create_volume"), error)
+            })?;
+            self.ensure_volume_absent(&t!("engine.action.create_volume"), name)
+                .await?;
         }
         with_timeout(
-            "创建卷",
+            &t!("engine.action.create_volume"),
             ACTION_TIMEOUT,
             self.client.create_volume(VolumeCreateRequest {
                 name,
@@ -575,7 +610,7 @@ impl DockerEngine {
     pub async fn remove_volume(&self, name: &str) -> Result<(), EngineError> {
         let options = RemoveVolumeOptionsBuilder::default().force(false).build();
         with_timeout(
-            format!("删除卷 {name}").as_str(),
+            t!("engine.action.remove_volume", name = name).as_ref(),
             ACTION_TIMEOUT,
             self.client.remove_volume(name, Some(options)),
         )
@@ -585,7 +620,7 @@ impl DockerEngine {
     /// Creates `target` and copies every file of `source` into it. The new
     /// volume is removed again when copying fails.
     pub async fn clone_volume(&self, source: &str, target: &str) -> Result<(), EngineError> {
-        let action = format!("克隆卷 {source}");
+        let action = t!("engine.action.clone_volume", source = source).into_owned();
         validate_volume_name(target).map_err(|error| EngineError::operation(&action, error))?;
         self.ensure_volume_absent(&action, target).await?;
         with_timeout(
@@ -614,12 +649,23 @@ impl DockerEngine {
         if let Err(error) = result {
             let options = RemoveVolumeOptionsBuilder::default().force(true).build();
             let cleanup = match self.client.remove_volume(target, Some(options)).await {
-                Ok(()) => format!("已删除未完成的卷 {target}"),
-                Err(cleanup) => format!("未完成的卷 {target} 删除失败：{cleanup}"),
+                Ok(()) => {
+                    t!("engine.error.removed_incomplete_volume", target = target).into_owned()
+                }
+                Err(cleanup) => t!(
+                    "engine.error.incomplete_volume_remove_failed",
+                    target = target,
+                    error = cleanup
+                )
+                .into_owned(),
             };
             return Err(EngineError::operation(
                 action,
-                format!("{error}；{cleanup}"),
+                t!(
+                    "engine.error.with_cleanup",
+                    error = error,
+                    cleanup = cleanup
+                ),
             ));
         }
         Ok(())
@@ -627,7 +673,7 @@ impl DockerEngine {
 
     /// Deletes all files inside the volume, keeping the volume itself.
     pub async fn empty_volume(&self, name: &str) -> Result<(), EngineError> {
-        let action = format!("清空卷 {name}");
+        let action = t!("engine.action.empty_volume", name = name).into_owned();
         self.run_helper(
             &action,
             vec![volume_mount(name, VOLUME_MOUNT, false)],
@@ -646,12 +692,12 @@ impl DockerEngine {
         name: &str,
         relative: &str,
     ) -> Result<DirectoryListing, EngineError> {
-        let action = "读取卷内容";
+        let action = t!("engine.action.read_volume_content").into_owned();
         let path =
-            container_path(relative).map_err(|error| EngineError::operation(action, error))?;
+            container_path(relative).map_err(|error| EngineError::operation(&action, error))?;
         let output = self
             .run_helper(
-                action,
+                &action,
                 vec![volume_mount(name, VOLUME_MOUNT, true)],
                 LIST_SCRIPT,
                 vec![format!("RUSKER_PATH={path}")],
@@ -660,11 +706,14 @@ impl DockerEngine {
             .await?;
         if output.code == 3 {
             return Err(EngineError::operation(
-                action,
-                format!("目录 /{relative} 不存在或无法访问"),
+                &action,
+                t!(
+                    "engine.error.volume_directory_unavailable",
+                    relative = relative
+                ),
             ));
         }
-        output.success(action)?;
+        output.success(&action)?;
         Ok(parse_listing(&output.stdout))
     }
 
@@ -672,9 +721,16 @@ impl DockerEngine {
     /// local file system into the volume root. Existing files with the same
     /// path are overwritten; ownership in the archive is preserved.
     pub async fn import_volume(&self, name: &str, archive: &Path) -> Result<(), EngineError> {
-        let action = format!("导入数据到卷 {name}");
+        let action = t!("engine.action.import_volume", name = name).into_owned();
         let file = tokio::fs::File::open(archive).await.map_err(|error| {
-            EngineError::operation(&action, format!("无法读取 {}：{error}", archive.display()))
+            EngineError::operation(
+                &action,
+                t!(
+                    "engine.error.cannot_read_file",
+                    path = archive.display(),
+                    error = error
+                ),
+            )
         })?;
         let id = self
             .create_helper(
@@ -728,10 +784,17 @@ impl DockerEngine {
     /// streamed into a sibling temporary file that only replaces
     /// `destination` once complete.
     pub async fn export_volume(&self, name: &str, destination: &Path) -> Result<u64, EngineError> {
-        let action = format!("导出卷 {name}");
+        let action = t!("engine.action.export_volume", name = name).into_owned();
         let partial = partial_export_path(destination);
         let mut file = tokio::fs::File::create(&partial).await.map_err(|error| {
-            EngineError::operation(&action, format!("无法创建 {}：{error}", partial.display()))
+            EngineError::operation(
+                &action,
+                t!(
+                    "engine.error.cannot_create_file",
+                    path = partial.display(),
+                    error = error
+                ),
+            )
         })?;
         let id = match self
             .create_helper(
@@ -763,12 +826,18 @@ impl DockerEngine {
                 .map_err(|error| EngineError::operation(&action, error))?
             {
                 file.write_all(&chunk).await.map_err(|error| {
-                    EngineError::operation(&action, format!("写入导出文件失败：{error}"))
+                    EngineError::operation(
+                        &action,
+                        t!("engine.error.export_write_failed", error = error),
+                    )
                 })?;
                 written += chunk.len() as u64;
             }
             file.flush().await.map_err(|error| {
-                EngineError::operation(&action, format!("写入导出文件失败：{error}"))
+                EngineError::operation(
+                    &action,
+                    t!("engine.error.export_write_failed", error = error),
+                )
             })?;
             Ok(written)
         })
@@ -799,7 +868,11 @@ impl DockerEngine {
             _ = tokio::fs::remove_file(&partial).await;
             return Err(EngineError::operation(
                 &action,
-                format!("无法保存到 {}：{error}", destination.display()),
+                t!(
+                    "engine.error.cannot_save_file",
+                    path = destination.display(),
+                    error = error
+                ),
             ));
         }
         Ok(written)
@@ -807,7 +880,10 @@ impl DockerEngine {
 
     async fn ensure_volume_absent(&self, action: &str, name: &str) -> Result<(), EngineError> {
         match timeout(REQUEST_TIMEOUT, self.client.inspect_volume(name)).await {
-            Ok(Ok(_)) => Err(EngineError::operation(action, format!("卷 {name} 已存在"))),
+            Ok(Ok(_)) => Err(EngineError::operation(
+                action,
+                t!("engine.error.volume_exists", name = name),
+            )),
             Ok(Err(BollardError::DockerResponseServerError {
                 status_code: 404, ..
             })) => Ok(()),
@@ -825,8 +901,12 @@ impl DockerEngine {
         }
         self.pull_image(HELPER_IMAGE).await.map_err(|error| {
             EngineError::operation(
-                "准备卷辅助镜像",
-                format!("卷操作需要 {HELPER_IMAGE} 镜像，自动拉取失败：{error}"),
+                t!("engine.action.prepare_helper_image"),
+                t!(
+                    "engine.error.helper_image_pull_failed",
+                    image = HELPER_IMAGE,
+                    error = error
+                ),
             )
         })
     }
@@ -926,7 +1006,10 @@ impl DockerEngine {
             Ok(Some(Err(BollardError::DockerContainerWaitError { code, .. }))) => code,
             Ok(Some(Err(error))) => return Err(EngineError::operation(action, error)),
             Ok(None) => {
-                return Err(EngineError::operation(action, "辅助容器未返回退出状态"));
+                return Err(EngineError::operation(
+                    action,
+                    t!("engine.error.helper_no_exit_status"),
+                ));
             }
         };
 
@@ -954,7 +1037,10 @@ impl DockerEngine {
                     LogOutput::StdIn { .. } => continue,
                 };
                 if target.len() + message.len() > MAX_HELPER_OUTPUT {
-                    return Err(EngineError::operation(action, "辅助容器输出过大"));
+                    return Err(EngineError::operation(
+                        action,
+                        t!("engine.error.helper_output_too_large"),
+                    ));
                 }
                 target.extend_from_slice(&message);
             }
@@ -991,9 +1077,14 @@ impl HelperOutput {
         }
         let detail = self.stderr.trim();
         let detail = if detail.is_empty() {
-            format!("辅助容器退出码 {}", self.code)
+            t!("engine.error.helper_exit_code", code = self.code).into_owned()
         } else {
-            format!("辅助容器退出码 {}：{}", self.code, bound_logs(detail))
+            t!(
+                "engine.error.helper_exit_code_logs",
+                code = self.code,
+                logs = bound_logs(detail)
+            )
+            .into_owned()
         };
         Err(EngineError::operation(action, detail))
     }
@@ -1078,7 +1169,9 @@ pub(super) fn container_dto(container: ContainerSummary) -> ContainerDto {
     ContainerDto {
         id,
         name,
-        image: container.image.unwrap_or_else(|| "未知镜像".into()),
+        image: container
+            .image
+            .unwrap_or_else(|| t!("engine.info.unknown_image").into_owned()),
         image_id: container.image_id.unwrap_or_default(),
         state: container
             .state

@@ -41,6 +41,7 @@
 - `helpers/vm-proxy`（独立 Cargo workspace）：HTTP 代理与 Docker API 转发的 VM 一侧，纯 std 的静态 Linux musl 程序；`build.rs` 为 VM 架构构建并嵌入 Windows exe，运行时按内容哈希安装到 `rusker` 发行版。
 - `runtime_host/http_proxy.rs`：Windows 侧 HTTP 正向代理（对应 `com.docker.backend` 内置代理）：逐请求解析代理设置、在 Windows 侧应用 `NO_PROXY`，`CONNECT` 与纯 HTTP 请求走上游代理（`http://`/`https://`）或直连。
 - `format.rs`：不含 I/O 的格式化、过滤和展示逻辑。
+- `i18n.rs` 与 `locales/*.yml`：界面语言（英文、简体中文）。用户可见文本通过 `rust_i18n::t!` 按键翻译，每个 yml 按模块划分键前缀，每个键同时提供 `en` 与 `zh-CN`；locale 为全局设置，与 gpui-component 内置文本共用。测试使用默认的 `en`，不在测试中切换 locale。
 - `app.rs`：页面、选择、忙碌状态、请求序号、通知和 GPUI Task；`app/volumes.rs` 为卷页面与卷详情。
 - `main.rs`：只负责应用、资源、主题初始化和窗口创建。
 

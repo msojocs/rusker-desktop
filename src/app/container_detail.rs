@@ -160,9 +160,9 @@ fn inspect_fields(json: &str) -> Result<InspectFields, serde_json::Error> {
                 continue;
             };
             let host_port = if host_port.is_empty() || host_port == "0" {
-                "自动分配"
+                t!("container_detail.auto_assigned").into_owned()
             } else {
-                host_port
+                host_port.to_string()
             };
             let ip = binding
                 .get("HostIp")
@@ -187,7 +187,7 @@ fn inspect_fields(json: &str) -> Result<InspectFields, serde_json::Error> {
                 (
                     port,
                     if bindings.is_empty() {
-                        "未绑定".into()
+                        t!("container_detail.unbound").into_owned()
                     } else {
                         bindings.join(", ")
                     },
@@ -310,7 +310,8 @@ impl RuskerApp {
         self.container_tools.inspect_error = None;
         let Some(engine) = self.engine.clone() else {
             self.container_tools.inspect_loading = false;
-            self.container_tools.inspect_error = Some("容器引擎不可用，请连接引擎后重试。".into());
+            self.container_tools.inspect_error =
+                Some(t!("container_detail.engine_unavailable").into_owned());
             cx.notify();
             return;
         };
@@ -333,8 +334,9 @@ impl RuskerApp {
                                 Some(cx.new(|_| crate::ui::json_view::JsonView::new(json)));
                         }
                         Err(error) => {
-                            this.container_tools.inspect_error =
-                                Some(format!("解析容器详情失败：{error}"))
+                            this.container_tools.inspect_error = Some(
+                                t!("container_detail.parse_failed", error = error).into_owned(),
+                            )
                         }
                     },
                     Err(error) => this.container_tools.inspect_error = Some(error.to_string()),
@@ -354,7 +356,7 @@ impl RuskerApp {
             .flex()
             .flex_col()
             .when(tools.inspect_loading, |view| {
-                view.child(muted("正在读取容器详情…", cx).p_4())
+                view.child(muted(t!("container_detail.loading_inspect"), cx).p_4())
             })
             .when_some(tools.inspect_error.as_ref(), |view, error| {
                 view.child(
@@ -375,7 +377,7 @@ impl RuskerApp {
             .flex_col()
             .gap_4()
             .when(tools.inspect_loading, |view| {
-                view.child(muted("正在读取容器详情…", cx))
+                view.child(muted(t!("container_detail.loading_inspect"), cx))
             })
             .when_some(tools.inspect_error.as_ref(), |view, error| {
                 view.child(
@@ -388,7 +390,7 @@ impl RuskerApp {
         let Some(fields) = &tools.inspect_fields else {
             return view;
         };
-        let header = |left: &'static str, right: &'static str| {
+        let header = |left: SharedString, right: SharedString| {
             div()
                 .flex()
                 .gap_4()
@@ -403,8 +405,20 @@ impl RuskerApp {
             .bg(cx.theme().background)
             .flex()
             .flex_col()
-            .child(div().px_4().py_3().font_semibold().child("环境变量"))
-            .child(header("变量名", "变量值").child(div().w(px(32.))));
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .font_semibold()
+                    .child(t!("container_detail.env_vars")),
+            )
+            .child(
+                header(
+                    t!("container_detail.env_name").into(),
+                    t!("container_detail.env_value").into(),
+                )
+                .child(div().w(px(32.))),
+            );
         for (index, (name, value)) in fields.env.iter().enumerate() {
             let entry = format!("{name}={value}");
             env = env.child(
@@ -425,7 +439,7 @@ impl RuskerApp {
                             .ghost()
                             .small()
                             .icon(IconName::Copy)
-                            .tooltip("复制环境变量（名称=值）")
+                            .tooltip(t!("container_detail.copy_env"))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(entry.clone()))
                             }),
@@ -433,14 +447,23 @@ impl RuskerApp {
             );
         }
         if fields.env.is_empty() {
-            env = env.child(muted("没有环境变量。", cx).px_4().py_3());
+            env = env.child(muted(t!("container_detail.no_env"), cx).px_4().py_3());
         }
         let mut ports = section_panel(cx)
             .bg(cx.theme().background)
             .flex()
             .flex_col()
-            .child(div().px_4().py_3().font_semibold().child("端口"))
-            .child(header("镜像暴露的端口", "绑定的端口"));
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .font_semibold()
+                    .child(t!("container_detail.ports")),
+            )
+            .child(header(
+                t!("container_detail.exposed_ports").into(),
+                t!("container_detail.bound_ports").into(),
+            ));
         for (exposed, bound) in &fields.ports {
             ports = ports.child(
                 div()
@@ -457,7 +480,7 @@ impl RuskerApp {
             );
         }
         if fields.ports.is_empty() {
-            ports = ports.child(muted("没有暴露或绑定的端口。", cx).px_4().py_3());
+            ports = ports.child(muted(t!("container_detail.no_ports"), cx).px_4().py_3());
         }
         view = view.child(env).child(ports);
         view
@@ -539,7 +562,10 @@ impl RuskerApp {
             }
             _ = this.update(cx, |this, cx| {
                 if this.selected_container.as_ref() == Some(&id) {
-                    this.append_shell_output("\r\n[Shell 会话已结束]\r\n", cx);
+                    this.append_shell_output(
+                        &format!("\r\n[{}]\r\n", t!("container_detail.shell_ended")),
+                        cx,
+                    );
                     if let Some(terminal) = &this.container_terminal {
                         terminal.update(cx, |terminal, cx| terminal.disconnect(cx));
                     }
@@ -774,10 +800,18 @@ impl RuskerApp {
             .flex()
             .flex_col()
             .when(tools.shell_connecting, |view| {
-                view.child(muted("正在连接 /bin/sh…", cx).px_4().py_2())
+                view.child(
+                    muted(t!("container_detail.connecting_shell"), cx)
+                        .px_4()
+                        .py_2(),
+                )
             })
             .when(!container.is_running(), |view| {
-                view.child(muted("请先启动容器再连接命令行。", cx).px_4().py_2())
+                view.child(
+                    muted(t!("container_detail.start_first_shell"), cx)
+                        .px_4()
+                        .py_2(),
+                )
             })
             .when_some(tools.shell_error.clone(), |view, error| {
                 view.child(
@@ -810,8 +844,8 @@ impl RuskerApp {
         let mut content = div().flex().flex_col();
         if !container.is_running() {
             content = content.child(empty_state(
-                "容器未运行",
-                "启动容器后可浏览文件；需要 sh、find、stat、tr、head 和 xargs。",
+                t!("container_detail.container_not_running"),
+                t!("container_detail.files_start_hint"),
                 cx,
             ));
         } else {
@@ -819,9 +853,9 @@ impl RuskerApp {
                 content = content.child(
                     muted(
                         if tools.listing.is_some() {
-                            "正在刷新目录，暂时保留上次内容…"
+                            t!("container_detail.refreshing_directory")
                         } else {
-                            "正在读取目录…"
+                            t!("container_detail.reading_directory")
                         },
                         cx,
                     )
@@ -834,7 +868,7 @@ impl RuskerApp {
                         .p_4()
                         .text_sm()
                         .text_color(cx.theme().danger)
-                        .child(format!("读取失败（如有内容则为上次结果）：{error}")),
+                        .child(t!("container_detail.read_failed", error = error).into_owned()),
                 );
             }
             if let Some(listing) = &tools.listing {
@@ -846,10 +880,14 @@ impl RuskerApp {
                         .gap_4()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(div().flex_1().child("名称"))
-                        .child(div().w(px(100.)).child("大小"))
-                        .child(div().w(px(190.)).child("修改时间"))
-                        .child(div().w(px(110.)).child("权限")),
+                        .child(div().flex_1().child(t!("container_detail.col_name")))
+                        .child(div().w(px(100.)).child(t!("container_detail.col_size")))
+                        .child(div().w(px(190.)).child(t!("container_detail.col_modified")))
+                        .child(
+                            div()
+                                .w(px(110.))
+                                .child(t!("container_detail.col_permissions")),
+                        ),
                 );
                 for (index, entry) in listing.entries.iter().enumerate() {
                     let directory = entry.kind == VolumeEntryKind::Directory;
@@ -909,12 +947,15 @@ impl RuskerApp {
                     );
                 }
                 if listing.entries.is_empty() {
-                    content = content.child(empty_state("空目录", "此目录没有文件。", cx));
+                    content = content.child(empty_state(
+                        t!("container_detail.empty_directory"),
+                        t!("container_detail.no_files"),
+                        cx,
+                    ));
                 }
                 if listing.truncated {
-                    content = content.child(
-                        muted("目录过大，仅显示扫描到的前 5000 项（非全目录排序）。", cx).p_4(),
-                    );
+                    content =
+                        content.child(muted(t!("container_detail.directory_too_large"), cx).p_4());
                 }
             }
         }
@@ -934,7 +975,7 @@ impl RuskerApp {
                             .ghost()
                             .small()
                             .icon(IconName::ArrowUp)
-                            .tooltip("上一级")
+                            .tooltip(t!("container_detail.parent_directory"))
                             .disabled(path == "/" || !container.is_running())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.load_container_directory(parent.clone(), cx)
@@ -951,11 +992,11 @@ impl RuskerApp {
                     )
                     .child(muted(
                         if tools.files_loading && tools.listing.is_some() {
-                            "只读 · 刷新中"
+                            t!("container_detail.read_only_refreshing")
                         } else if tools.files_cached {
-                            "只读 · 缓存（30 秒）"
+                            t!("container_detail.read_only_cached")
                         } else {
-                            "只读"
+                            t!("container_detail.read_only")
                         },
                         cx,
                     ))
@@ -964,7 +1005,7 @@ impl RuskerApp {
                             .ghost()
                             .small()
                             .icon(IconName::RotateCw)
-                            .tooltip("刷新目录")
+                            .tooltip(t!("container_detail.refresh_directory"))
                             .disabled(tools.files_loading || !container.is_running())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.request_container_directory(refresh_path.clone(), true, cx)
@@ -999,8 +1040,8 @@ impl RuskerApp {
             .gap_4();
         if !container.is_running() {
             return view.child(empty_state(
-                "容器未运行",
-                "启动容器后可查看资源统计。历史缓存仍按一小时规则保留和清理。",
+                t!("container_detail.container_not_running"),
+                t!("container_detail.stats_start_hint"),
                 cx,
             ));
         }
@@ -1009,7 +1050,7 @@ impl RuskerApp {
                 div()
                     .text_sm()
                     .text_color(cx.theme().danger)
-                    .child(format!("采样失败（自动重试）：{error}")),
+                    .child(t!("container_detail.sample_failed", error = error).into_owned()),
             );
         }
         if let Some(latest) = tools.stats_history.samples.back() {
@@ -1030,29 +1071,42 @@ impl RuskerApp {
                     .gap_4()
                     .child(stats_chart(
                         "container-cpu-chart",
-                        "CPU 使用率",
-                        "100% 表示占用一个逻辑 CPU".into(),
-                        vec![("CPU", cpu)],
+                        t!("container_detail.cpu_usage"),
+                        t!("container_detail.cpu_subtitle").into_owned(),
+                        vec![(t!("container_detail.series_cpu").into(), cpu)],
                         stats_points(history, |s| [s.cpu_percent, None]),
                         ChartUnit::Percent,
                         hover.clone(),
                     ))
                     .child(stats_chart(
                         "container-memory-chart",
-                        "内存使用量",
-                        format!("上限 {}", format_bytes(stats.memory_limit)),
-                        vec![("内存", format_bytes(stats.memory_bytes))],
+                        t!("container_detail.memory_usage"),
+                        t!(
+                            "container_detail.memory_limit",
+                            limit = format_bytes(stats.memory_limit)
+                        )
+                        .into_owned(),
+                        vec![(
+                            t!("container_detail.series_memory").into(),
+                            format_bytes(stats.memory_bytes),
+                        )],
                         stats_points(history, |s| [Some(s.memory_bytes as f64), None]),
                         ChartUnit::Bytes,
                         hover.clone(),
                     ))
                     .child(stats_chart(
                         "container-disk-chart",
-                        "磁盘读写",
-                        "自容器启动以来的累计值".into(),
+                        t!("container_detail.disk_io"),
+                        t!("container_detail.cumulative_since_start").into_owned(),
                         vec![
-                            ("读取", format_bytes(stats.block_read)),
-                            ("写入", format_bytes(stats.block_write)),
+                            (
+                                t!("container_detail.series_read").into(),
+                                format_bytes(stats.block_read),
+                            ),
+                            (
+                                t!("container_detail.series_write").into(),
+                                format_bytes(stats.block_write),
+                            ),
                         ],
                         stats_points(history, |s| {
                             [Some(s.block_read as f64), Some(s.block_write as f64)]
@@ -1062,11 +1116,17 @@ impl RuskerApp {
                     ))
                     .child(stats_chart(
                         "container-network-chart",
-                        "网络 I/O",
-                        "自容器启动以来的累计值".into(),
+                        t!("container_detail.network_io"),
+                        t!("container_detail.cumulative_since_start").into_owned(),
                         vec![
-                            ("接收", format_bytes(stats.network_rx)),
-                            ("发送", format_bytes(stats.network_tx)),
+                            (
+                                t!("container_detail.series_receive").into(),
+                                format_bytes(stats.network_rx),
+                            ),
+                            (
+                                t!("container_detail.series_send").into(),
+                                format_bytes(stats.network_tx),
+                            ),
                         ],
                         stats_points(history, |s| {
                             [Some(s.network_rx as f64), Some(s.network_tx as f64)]
@@ -1076,7 +1136,7 @@ impl RuskerApp {
                     )),
             );
         } else if tools.stats_error.is_none() {
-            view = view.child(muted("正在采集资源统计…", cx));
+            view = view.child(muted(t!("container_detail.collecting_stats"), cx));
         }
         view
     }
@@ -1179,7 +1239,7 @@ mod tests {
         assert!(fields
             .ports
             .contains(&("80/tcp".into(), "0.0.0.0:32768, [::]:32768".into())));
-        assert!(fields.ports.contains(&("53/udp".into(), "未绑定".into())));
+        assert!(fields.ports.contains(&("53/udp".into(), "Unbound".into())));
         assert!(fields
             .ports
             .contains(&("443/tcp".into(), "127.0.0.1:8443".into())));
@@ -1191,7 +1251,10 @@ mod tests {
         assert!(fields.env.is_empty());
         assert!(fields.ports.is_empty());
         let fields = super::inspect_fields(r#"{"HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"","HostPort":""}]}},"NetworkSettings":{"Ports":{"80/tcp":null}}}"#).unwrap();
-        assert_eq!(fields.ports, [("80/tcp".into(), "0.0.0.0:自动分配".into())]);
+        assert_eq!(
+            fields.ports,
+            [("80/tcp".into(), "0.0.0.0:Auto-assigned".into())]
+        );
     }
 
     #[test]

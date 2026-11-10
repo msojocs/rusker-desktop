@@ -22,12 +22,13 @@ pub enum ThemePreference {
 }
 
 impl ThemePreference {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::System => "跟随系统",
-            Self::Light => "浅色",
-            Self::Dark => "深色",
+            Self::System => t!("settings.theme.system"),
+            Self::Light => t!("settings.theme.light"),
+            Self::Dark => t!("settings.theme.dark"),
         }
+        .into_owned()
     }
 }
 
@@ -49,13 +50,14 @@ impl ProxyMode {
     pub const ENGINE: [Self; 3] = [Self::System, Self::None, Self::Manual];
     pub const CONTAINER: [Self; 4] = [Self::SameAsHost, Self::System, Self::None, Self::Manual];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::SameAsHost => "与主机代理相同",
-            Self::System => "系统代理",
-            Self::None => "不使用代理",
-            Self::Manual => "手动配置",
+            Self::SameAsHost => t!("settings.proxy_mode.same_as_host"),
+            Self::System => t!("settings.proxy_mode.system"),
+            Self::None => t!("settings.proxy_mode.none"),
+            Self::Manual => t!("settings.proxy_mode.manual"),
         }
+        .into_owned()
     }
 }
 
@@ -162,7 +164,7 @@ impl DockerProxySettings {
             return Ok(());
         }
         if self.http_proxy.trim().is_empty() && self.https_proxy.trim().is_empty() {
-            return Err("手动配置时，HTTP 或 HTTPS 代理至少填写一项".into());
+            return Err(t!("settings.error.manual_proxy_required").into_owned());
         }
         validate_proxy_url("HTTP", &self.http_proxy)?;
         validate_proxy_url("HTTPS", &self.https_proxy)?;
@@ -267,9 +269,12 @@ impl Default for ResourceSaverSettings {
 impl ResourceSaverSettings {
     pub fn validate(&self) -> Result<(), String> {
         if !(RESOURCE_SAVER_MIN_SECS..=RESOURCE_SAVER_MAX_SECS).contains(&self.threshold_secs) {
-            return Err(format!(
-                "资源节省阈值需在 {RESOURCE_SAVER_MIN_SECS} 到 {RESOURCE_SAVER_MAX_SECS} 秒之间"
-            ));
+            return Err(t!(
+                "settings.error.resource_saver_threshold",
+                min = RESOURCE_SAVER_MIN_SECS,
+                max = RESOURCE_SAVER_MAX_SECS
+            )
+            .into_owned());
         }
         Ok(())
     }
@@ -287,7 +292,7 @@ impl VmSettings {
     pub fn validate(&self) -> Result<(), String> {
         let location = self.disk_image_location.trim();
         if !location.is_empty() && !Path::new(location).is_absolute() {
-            return Err("磁盘镜像位置必须是绝对路径".into());
+            return Err(t!("settings.error.disk_location_not_absolute").into_owned());
         }
         Ok(())
     }
@@ -314,11 +319,12 @@ pub enum PortBinding {
 impl PortBinding {
     pub const ALL: [Self; 2] = [Self::Open, Self::LocalhostOnly];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Open => "开放（默认）",
-            Self::LocalhostOnly => "仅本机",
+            Self::Open => t!("settings.port_binding.open"),
+            Self::LocalhostOnly => t!("settings.port_binding.localhost_only"),
         }
+        .into_owned()
     }
 }
 
@@ -335,11 +341,12 @@ pub enum NetworkingMode {
 impl NetworkingMode {
     pub const ALL: [Self; 2] = [Self::Ipv4Only, Self::DualStack];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Ipv4Only => "仅 IPv4",
-            Self::DualStack => "IPv4 与 IPv6 双栈",
+            Self::Ipv4Only => t!("settings.networking_mode.ipv4_only"),
+            Self::DualStack => t!("settings.networking_mode.dual_stack"),
         }
+        .into_owned()
     }
 }
 
@@ -414,35 +421,67 @@ impl NetworkSettings {
 /// Parses an IPv4 network such as `172.17.0.0/16`, rejecting host bits and
 /// prefixes too long for a bridge with containers.
 fn parse_ipv4_subnet(value: &str) -> Result<(Ipv4Addr, u8), String> {
-    let invalid =
-        || format!("Docker 子网“{value}”无效，应为 IPv4 CIDR，例如 {DEFAULT_DOCKER_SUBNET}");
+    let invalid = || {
+        t!(
+            "settings.error.subnet_invalid",
+            value = value,
+            example = DEFAULT_DOCKER_SUBNET
+        )
+        .into_owned()
+    };
     let (address, prefix) = value.split_once('/').ok_or_else(invalid)?;
     let address: Ipv4Addr = address.trim().parse().map_err(|_| invalid())?;
     let prefix: u8 = prefix.trim().parse().map_err(|_| invalid())?;
     if !(8..=28).contains(&prefix) {
-        return Err(format!(
-            "Docker 子网前缀长度需在 /8 到 /28 之间，当前为 /{prefix}"
-        ));
+        return Err(t!("settings.error.subnet_prefix", prefix = prefix).into_owned());
     }
     let mask = u32::MAX << (32 - prefix);
     let network = Ipv4Addr::from(u32::from(address) & mask);
     if network != address {
-        return Err(format!(
-            "Docker 子网“{value}”包含主机位，网段地址应为 {network}/{prefix}"
-        ));
+        return Err(t!(
+            "settings.error.subnet_host_bits",
+            value = value,
+            network = network,
+            prefix = prefix
+        )
+        .into_owned());
     }
     if address.is_loopback() || address.is_multicast() || address.is_unspecified() {
-        return Err(format!(
-            "Docker 子网“{value}”不能使用回环、组播或未指定地址"
-        ));
+        return Err(t!("settings.error.subnet_reserved", value = value).into_owned());
     }
     Ok((network, prefix))
+}
+
+/// UI language. Language names are shown in their own language so they
+/// stay recognizable whatever the current locale is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LanguagePreference {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "zh-CN")]
+    SimplifiedChinese,
+}
+
+impl LanguagePreference {
+    pub const ALL: [Self; 3] = [Self::System, Self::English, Self::SimplifiedChinese];
+
+    pub fn label(self) -> String {
+        match self {
+            Self::System => t!("settings.language.system").into(),
+            Self::English => "English".into(),
+            Self::SimplifiedChinese => "简体中文".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
     pub theme: ThemePreference,
+    pub language: LanguagePreference,
     pub docker_proxy: DockerProxySettings,
     /// Proxy for outbound traffic from containers (Docker Desktop's
     /// "Containers proxy").
@@ -458,14 +497,14 @@ pub struct AppSettings {
 impl AppSettings {
     pub fn validate(&self) -> Result<(), String> {
         if self.docker_proxy.mode == ProxyMode::SameAsHost {
-            return Err("Engine 代理不能选择“与主机代理相同”".into());
+            return Err(t!("settings.error.engine_proxy_same_as_host").into_owned());
         }
         self.docker_proxy
             .validate()
-            .map_err(|error| format!("Engine 代理：{error}"))?;
+            .map_err(|error| t!("settings.error.engine_proxy", error = error).into_owned())?;
         self.container_proxy
             .validate()
-            .map_err(|error| format!("容器代理：{error}"))?;
+            .map_err(|error| t!("settings.error.container_proxy", error = error).into_owned())?;
         self.resource_saver.validate()?;
         self.vm.validate()?;
         self.network.validate()
@@ -474,6 +513,7 @@ impl AppSettings {
     pub fn normalized(&self) -> Self {
         Self {
             theme: self.theme,
+            language: self.language,
             docker_proxy: self.docker_proxy.normalized(),
             container_proxy: self.container_proxy.normalized(),
             wsl: self.wsl.normalized(),
@@ -526,7 +566,11 @@ impl SettingsStore {
                 return Ok(AppSettings::default());
             }
             Err(source) => {
-                return Err(SettingsError::io("读取设置", path, source));
+                return Err(SettingsError::io(
+                    t!("settings.action.read_settings"),
+                    path,
+                    source,
+                ));
             }
         };
         let settings: AppSettings = serde_json::from_str(&content)
@@ -560,8 +604,9 @@ impl SettingsStore {
     }
 
     fn write_text(&self, path: &Path, content: &str) -> Result<(), SettingsError> {
-        fs::create_dir_all(&self.root)
-            .map_err(|source| SettingsError::io("创建配置目录", &self.root, source))?;
+        fs::create_dir_all(&self.root).map_err(|source| {
+            SettingsError::io(t!("settings.action.create_config_dir"), &self.root, source)
+        })?;
         let mut options = OpenOptions::new();
         options.create(true).truncate(true).write(true);
         #[cfg(unix)]
@@ -569,16 +614,18 @@ impl SettingsStore {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options
-            .open(path)
-            .map_err(|source| SettingsError::io("写入设置", path, source))?;
-        file.write_all(content.as_bytes())
-            .map_err(|source| SettingsError::io("写入设置", path, source))?;
+        let mut file = options.open(path).map_err(|source| {
+            SettingsError::io(t!("settings.action.write_settings"), path, source)
+        })?;
+        file.write_all(content.as_bytes()).map_err(|source| {
+            SettingsError::io(t!("settings.action.write_settings"), path, source)
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-                .map_err(|source| SettingsError::io("设置文件权限", path, source))?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| {
+                SettingsError::io(t!("settings.action.set_permissions"), path, source)
+            })?;
         }
         Ok(())
     }
@@ -723,7 +770,13 @@ pub fn apply_client_proxy(path: &Path, proxy: &ResolvedProxy) -> Result<bool, Se
     let current = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(source) => return Err(SettingsError::io("读取 Docker 客户端配置", path, source)),
+        Err(source) => {
+            return Err(SettingsError::io(
+                t!("settings.action.read_client_config"),
+                path,
+                source,
+            ))
+        }
     };
     let Some(updated) = merge_client_proxies(&current, &proxy.client_proxies())
         .map_err(SettingsError::Validation)?
@@ -731,11 +784,17 @@ pub fn apply_client_proxy(path: &Path, proxy: &ResolvedProxy) -> Result<bool, Se
         return Ok(false);
     };
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|source| SettingsError::io("创建 Docker 客户端配置目录", parent, source))?;
+        fs::create_dir_all(parent).map_err(|source| {
+            SettingsError::io(
+                t!("settings.action.create_client_config_dir"),
+                parent,
+                source,
+            )
+        })?;
     }
-    fs::write(path, updated)
-        .map_err(|source| SettingsError::io("写入 Docker 客户端配置", path, source))?;
+    fs::write(path, updated).map_err(|source| {
+        SettingsError::io(t!("settings.action.write_client_config"), path, source)
+    })?;
     Ok(true)
 }
 
@@ -749,11 +808,9 @@ fn merge_client_proxies(
     } else {
         match serde_json::from_str::<Value>(current) {
             Ok(Value::Object(map)) => map,
-            Ok(_) => return Err("Docker 客户端 config.json 不是 JSON 对象，未修改".into()),
+            Ok(_) => return Err(t!("settings.error.client_config_not_object").into_owned()),
             Err(error) => {
-                return Err(format!(
-                    "Docker 客户端 config.json 格式无效，未修改：{error}"
-                ))
+                return Err(t!("settings.error.client_config_invalid", error = error).into_owned())
             }
         }
     };
@@ -769,7 +826,7 @@ fn merge_client_proxies(
         .entry("proxies")
         .or_insert_with(|| Value::Object(Map::new()));
     let Value::Object(proxies) = proxies else {
-        return Err("Docker 客户端 config.json 中的 proxies 不是 JSON 对象，未修改".into());
+        return Err(t!("settings.error.client_proxies_not_object").into_owned());
     };
     match wanted {
         Some(value) => {
@@ -789,27 +846,27 @@ fn merge_client_proxies(
 
 #[derive(Debug, Error)]
 pub enum SettingsError {
-    #[error("无法确定应用配置目录")]
+    #[error("{}", t!("settings.error.directory_unavailable"))]
     DirectoryUnavailable,
-    #[error("{action}“{path}”失败：{source}")]
+    #[error("{}", t!("settings.error.io", action = action, path = path.display(), source = source))]
     Io {
-        action: &'static str,
+        action: String,
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("设置文件“{path}”格式无效：{source}")]
+    #[error("{}", t!("settings.error.json", path = path.display(), source = source))]
     Json {
         path: PathBuf,
         source: serde_json::Error,
     },
-    #[error("设置无效：{0}")]
+    #[error("{}", t!("settings.error.validation", detail = .0))]
     Validation(String),
 }
 
 impl SettingsError {
-    fn io(action: &'static str, path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+    fn io(action: impl Into<String>, path: impl Into<PathBuf>, source: std::io::Error) -> Self {
         Self::Io {
-            action,
+            action: action.into(),
             path: path.into(),
             source,
         }
@@ -828,20 +885,25 @@ fn validate_proxy_url(label: &str, value: &str) -> Result<(), String> {
     if value.is_empty() {
         return Ok(());
     }
-    let url = Url::parse(value).map_err(|error| format!("{label} 代理地址无效：{error}"))?;
+    let url = Url::parse(value).map_err(|error| {
+        t!(
+            "settings.error.proxy_url_invalid",
+            label = label,
+            error = error
+        )
+        .into_owned()
+    })?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err(format!(
-            "{label} 代理仅支持带主机名的 http:// 或 https:// 地址"
-        ));
+        return Err(t!("settings.error.proxy_url_scheme", label = label).into_owned());
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(format!("{label} 代理不支持在地址中保存用户名或密码"));
+        return Err(t!("settings.error.proxy_url_credentials", label = label).into_owned());
     }
     if url.query().is_some()
         || url.fragment().is_some()
         || !url.path().is_empty() && url.path() != "/"
     {
-        return Err(format!("{label} 代理地址不能包含路径、查询参数或片段"));
+        return Err(t!("settings.error.proxy_url_path", label = label).into_owned());
     }
     Ok(())
 }
@@ -853,7 +915,7 @@ fn validate_no_proxy(value: &str) -> Result<(), String> {
         .filter(|entry| !entry.is_empty())
     {
         if entry.chars().any(char::is_whitespace) || entry.contains("://") {
-            return Err(format!("NO_PROXY 条目“{entry}”无效"));
+            return Err(t!("settings.error.no_proxy_entry", entry = entry).into_owned());
         }
     }
     Ok(())
@@ -1143,6 +1205,7 @@ mod tests {
 
         let settings = AppSettings {
             theme: ThemePreference::Dark,
+            language: LanguagePreference::default(),
             docker_proxy: proxy(),
             container_proxy: DockerProxySettings::default(),
             wsl: WslSettings {

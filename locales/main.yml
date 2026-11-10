@@ -1,0 +1,4 @@
+_version: 2
+main.settings_corrupt:
+  en: "%{error}; using default settings for now, saving will overwrite the damaged file"
+  zh-CN: "%{error}；当前使用默认设置，保存后将覆盖损坏的配置"

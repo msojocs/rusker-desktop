@@ -1,0 +1,121 @@
+_version: 2
+desktop_import.intro:
+  en: "Copy stopped containers from the Docker Desktop or Rancher Desktop Linux Engine into Rusker. Scanning only reads source information and does not require the target Engine to be connected."
+  zh-CN: "从 Docker Desktop 或 Rancher Desktop 的 Linux Engine 复制已停止的容器到 Rusker。扫描只读取源信息，不要求目标 Engine 已连接。"
+desktop_import.source_label:
+  en: "Import source"
+  zh-CN: "导入来源"
+desktop_import.hint.docker_desktop:
+  en: "Start Docker Desktop and switch to Linux containers first"
+  zh-CN: "请先启动 Docker Desktop 并切换到 Linux 容器"
+desktop_import.hint.rancher_desktop:
+  en: "Start Rancher Desktop and select dockerd (moby); the containerd/nerdctl backend is not supported"
+  zh-CN: "请先启动 Rancher Desktop 并选择 dockerd (moby)；不支持 containerd/nerdctl 后端"
+desktop_import.callout.title:
+  en: "Copy import, not a migration or sync"
+  zh-CN: "复制导入，不是迁移或同步"
+desktop_import.callout.body:
+  en: "Copies rootfs, configuration, and local volumes; the filesystem image is flattened and the original image layer history is not preserved. Source containers and original volume data are unchanged; volume copying creates and cleans up read-only helper containers and may prepare a busybox image. Reserve space for target data and for the rootfs temporary archive on the system disk. Containers with the same name on the target are not overwritten, and new containers stay stopped. Bind directories, custom networks, container dependencies, and source volumes in use by other running containers block the import. Source volumes shared within a batch map to a single new volume. Keep source containers stopped during the import."
+  zh-CN: "复制 rootfs、配置与本地卷；文件系统镜像会扁平化，不保留原镜像分层历史。源容器与原卷数据保持不变；卷复制会创建/清理只读辅助容器，可能准备 busybox 镜像。请为目标数据及系统盘上的 rootfs 临时归档预留空间。目标同名容器不会被覆盖，新容器保持停止。bind 目录、自定义网络、容器依赖，以及其他运行中容器正在使用的源卷会阻止导入。同批共享源卷映射到同一个新卷。导入期间保持源容器停止。"
+desktop_import.unavailable.not_managed:
+  en: "Import is only supported into a Rusker-managed Engine; unset DOCKER_HOST and restart Rusker."
+  zh-CN: "仅支持导入到 Rusker 管理的 Engine；请取消 DOCKER_HOST 后重新启动 Rusker。"
+desktop_import.unavailable.not_connected:
+  en: "The target Engine is not connected yet. You can scan sources first; connecting the Rusker Engine is required before importing."
+  zh-CN: "目标 Engine 尚未连接。可以先扫描来源；连接 Rusker Engine 后才能导入。"
+desktop_import.unavailable.busy:
+  en: "A scan, import, or other operation is in progress. Wait for it to finish before importing."
+  zh-CN: "扫描、导入或其他操作正在进行，请等待完成后再导入。"
+desktop_import.blocked.stop_first:
+  en: "Stop this container in %{source} first, then rescan."
+  zh-CN: "请先在 %{source} 中停止此容器，再重新扫描。"
+desktop_import.blocked.name_conflict:
+  en: "The target Engine already has a container with the same name and will not overwrite it; resolve the name conflict first."
+  zh-CN: "目标 Engine 已有同名容器，不会覆盖；请先处理名称冲突。"
+desktop_import.error.engine_unavailable:
+  en: "Container engine service unavailable. Please restart Rusker."
+  zh-CN: "容器引擎服务不可用，请重启 Rusker"
+desktop_import.error.scan_failed:
+  en: "Scanning %{source} failed: %{error}. %{hint}."
+  zh-CN: "扫描 %{source} 失败：%{error}。%{hint}。"
+desktop_import.error.source_changed:
+  en: "The import source has changed. Please rescan and confirm."
+  zh-CN: "导入来源已变化，请重新扫描并确认。"
+desktop_import.error.selection_changed:
+  en: "The state of the selected containers has changed. Please rescan and select again."
+  zh-CN: "所选容器状态已变化，请重新扫描并选择。"
+desktop_import.error.import_failed:
+  en: "Import failed: %{error}. The target may already contain partial data; check the target containers and volumes before retrying."
+  zh-CN: "导入失败：%{error}。目标可能已有部分数据，请查看目标容器和卷后再重试。"
+desktop_import.error.import_failed_short:
+  en: "%{source} import failed. See Settings for details."
+  zh-CN: "%{source} 导入失败，请在设置中查看详情"
+desktop_import.confirm.title:
+  en: "Import %{count} %{source} containers?"
+  zh-CN: "导入 %{count} 个 %{source} 容器？"
+desktop_import.confirm.description:
+  en: "%{names}\n\nCopies the container rootfs, configuration, and local volume data into Rusker, which may take a while. Both the target disk and the system disk used for the rootfs temporary archive need enough space. The filesystem image is flattened and the original image layer history is not preserved.\n\nSource containers must stay stopped. Source containers and original volume data are not modified; volume copying creates and cleans up read-only helper containers and may prepare a busybox image. Source volumes in use by other running containers block the import. Source volumes shared within a batch map to a single new volume.\n\nContainers with the same name on the target are not overwritten, and new containers do not start automatically. Bind directories, custom networks, and container dependencies are not supported and block the import. Do not quit Rusker, change the target Engine, or change application settings during the import."
+  zh-CN: "%{names}\n\n将复制容器 rootfs、配置及本地卷数据到 Rusker，可能耗时较长。目标磁盘和用于 rootfs 临时归档的系统盘均需足够空间。文件系统镜像会被扁平化，不保留原镜像分层历史。\n\n源容器必须保持停止，源容器与原卷数据不会被修改；卷复制会创建并清理只读辅助容器，可能准备 busybox 镜像。正在被其他运行中容器使用的源卷会阻止导入。同批共享源卷映射为同一个新卷。\n\n不会覆盖目标同名容器，新容器不会自动启动。bind 目录、自定义网络或容器依赖不受支持，会阻止导入。导入期间不能退出 Rusker、修改目标 Engine 或应用设置。"
+desktop_import.confirm.ok:
+  en: "Confirm Import"
+  zh-CN: "确认导入"
+desktop_import.confirm.cancel:
+  en: "Cancel"
+  zh-CN: "取消"
+desktop_import.progress.preparing:
+  en: "Preparing import…"
+  zh-CN: "正在准备导入…"
+desktop_import.progress.importing_from:
+  en: "Importing containers from %{source}…"
+  zh-CN: "正在从 %{source} 导入容器…"
+desktop_import.progress.reading:
+  en: "Reading %{source} containers…"
+  zh-CN: "正在读取 %{source} 容器…"
+desktop_import.progress.finished:
+  en: "Import finished"
+  zh-CN: "导入已结束"
+desktop_import.result.summary:
+  en: "Import complete: %{succeeded} succeeded, %{failed} failed"
+  zh-CN: "导入完成：%{succeeded} 项成功，%{failed} 项失败"
+desktop_import.result.see_details:
+  en: "%{summary}; see Settings for the full per-item results"
+  zh-CN: "%{summary}；请在设置中查看完整逐项结果"
+desktop_import.action.scan:
+  en: "Scan %{source}"
+  zh-CN: "扫描 %{source}"
+desktop_import.action.scanning:
+  en: "Scanning…"
+  zh-CN: "扫描中…"
+desktop_import.action.import_selected:
+  en: "Import selected (%{count})"
+  zh-CN: "导入所选（%{count}）"
+desktop_import.select_all:
+  en: "Select all importable containers"
+  zh-CN: "全选可导入容器"
+desktop_import.empty:
+  en: "No containers in %{source}."
+  zh-CN: "%{source} 中没有容器。"
+desktop_import.container.meta:
+  en: "Image: %{image} · State: %{state}"
+  zh-CN: "镜像：%{image} · 状态：%{state}"
+desktop_import.container.source_id:
+  en: "Source ID: %{id}"
+  zh-CN: "源 ID：%{id}"
+desktop_import.container.blocked:
+  en: "Cannot import: %{reason}"
+  zh-CN: "不能导入：%{reason}"
+desktop_import.running.notice:
+  en: "Importing. Do not quit Rusker or start source containers."
+  zh-CN: "正在导入，请勿退出 Rusker 或启动源容器"
+desktop_import.report.title:
+  en: "Last import result: %{succeeded} succeeded, %{failed} failed"
+  zh-CN: "最近一次导入结果：%{succeeded} 项成功，%{failed} 项失败"
+desktop_import.report.hint:
+  en: "Successfully created containers do not start automatically; go to the Containers page to check and start them manually. The full per-item results below are kept only for this session."
+  zh-CN: "成功创建的容器不会自动启动；请到容器页检查后手动启动。以下为完整逐项结果，仅在本次会话保留。"
+desktop_import.report.success:
+  en: "Succeeded: %{item}"
+  zh-CN: "成功：%{item}"
+desktop_import.report.failure:
+  en: "Failed: %{item}"
+  zh-CN: "失败：%{item}"

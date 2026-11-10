@@ -1,0 +1,274 @@
+_version: 2
+images.title:
+  en: "Images"
+  zh-CN: "镜像"
+images.error.engine_unavailable:
+  en: "Container engine unavailable"
+  zh-CN: "容器引擎不可用"
+images.error.image_missing:
+  en: "The container's image is no longer in the local image list. Refresh and try again."
+  zh-CN: "容器使用的镜像已不在本地镜像列表中，请刷新后重试。"
+images.remove.in_use:
+  en: "This image is used by a container (including stopped ones), so the Engine will refuse to delete it. Delete those containers first."
+  zh-CN: "此镜像正被容器使用（包括已停止的容器），Engine 会拒绝删除。请先删除相关容器。"
+images.remove.untag:
+  en: "This image has other tags. Only this tag will be removed; the image data is kept."
+  zh-CN: "该镜像还有其他标签，此操作只移除这个标签，镜像数据保留。"
+images.remove.permanent:
+  en: "The image will be permanently deleted. This action cannot be undone."
+  zh-CN: "镜像将被永久删除，此操作不可撤销。"
+images.remove.title:
+  en: "Delete image %{name}?"
+  zh-CN: "删除镜像 %{name}？"
+images.remove_many.untagged:
+  en: "<none> (%{id})"
+  zh-CN: "<none>（%{id}）"
+images.remove_many.unused_intro:
+  en: "The following images are not used by any container (including stopped ones) and will be deleted:"
+  zh-CN: "以下镜像未被任何容器（包括已停止的容器）使用，将被删除："
+images.remove_many.intro:
+  en: "The following images will be deleted. This action cannot be undone:"
+  zh-CN: "以下镜像将被删除，此操作不可撤销："
+images.remove_many.in_use_note:
+  en: "Images still used by containers will be refused by the Engine; the rest will be deleted."
+  zh-CN: "仍被容器使用的镜像会被 Engine 拒绝删除，其余照常删除。"
+images.remove_many.prune_title:
+  en: "Clean up %{count} unused images?"
+  zh-CN: "清理 %{count} 个未使用的镜像？"
+images.remove_many.title:
+  en: "Delete %{count} images?"
+  zh-CN: "删除 %{count} 个镜像？"
+images.remove_many.busy:
+  en: "Deleting %{count} images…"
+  zh-CN: "删除 %{count} 个镜像…"
+images.remove_many.done:
+  en: "Deleted %{count} images"
+  zh-CN: "已删除 %{count} 个镜像"
+images.remove_many.partial:
+  en: "Deleted %{removed} images, %{failed} failed:\n%{failures}"
+  zh-CN: "已删除 %{removed} 个镜像，%{failed} 个失败：\n%{failures}"
+images.action.delete:
+  en: "Delete"
+  zh-CN: "删除"
+images.action.cancel:
+  en: "Cancel"
+  zh-CN: "取消"
+images.action.run:
+  en: "Run"
+  zh-CN: "运行"
+images.action.refresh:
+  en: "Refresh"
+  zh-CN: "刷新"
+images.action.filter:
+  en: "Filter"
+  zh-CN: "筛选"
+images.action.clear_selection:
+  en: "Clear selection"
+  zh-CN: "取消选择"
+images.action.delete_selected:
+  en: "Delete selected (%{count})"
+  zh-CN: "删除所选（%{count}）"
+images.action.prune:
+  en: "Clean up unused (%{count})"
+  zh-CN: "清理未使用（%{count}）"
+images.action.prune_tooltip:
+  en: "Delete all images not used by any container"
+  zh-CN: "删除所有未被任何容器使用的镜像"
+images.pull.title:
+  en: "Pull image"
+  zh-CN: "拉取镜像"
+images.pull.reference:
+  en: "Image reference"
+  zh-CN: "镜像引用"
+images.pull.hint:
+  en: "Pulls latest when no tag is given. Uses the registry mirrors and proxy configured for the Engine."
+  zh-CN: "省略标签时拉取 latest；使用 Engine 配置的镜像源和代理。"
+images.pull.submit:
+  en: "Pull"
+  zh-CN: "拉取"
+images.pull.error.empty:
+  en: "Enter an image reference to pull"
+  zh-CN: "请输入要拉取的镜像引用"
+images.pull.error.whitespace:
+  en: "Image reference cannot contain whitespace"
+  zh-CN: "镜像引用不能包含空白字符"
+images.pull.connecting:
+  en: "Connecting to registry…"
+  zh-CN: "正在连接镜像仓库…"
+images.pull.busy:
+  en: "Pulling image %{reference}…"
+  zh-CN: "拉取镜像 %{reference}…"
+images.pull.in_progress:
+  en: "Pulling image"
+  zh-CN: "正在拉取镜像"
+images.pull.done:
+  en: "Image pulled"
+  zh-CN: "镜像拉取完成"
+images.pull.failed:
+  en: "Image pull failed"
+  zh-CN: "镜像拉取失败"
+images.usage.in_use:
+  en: "%{used} / %{total} in use"
+  zh-CN: "%{used} / %{total} 使用中"
+images.usage.count:
+  en: "%{count} images"
+  zh-CN: "%{count} 个镜像"
+images.usage.used_by:
+  en: "Used by %{count} containers"
+  zh-CN: "被 %{count} 个容器使用"
+images.usage.unused:
+  en: "Not used by any container"
+  zh-CN: "未被容器使用"
+images.refresh.last:
+  en: "Last refreshed: %{time}"
+  zh-CN: "上次刷新：%{time}"
+images.refresh.never:
+  en: "Not refreshed yet"
+  zh-CN: "尚未刷新"
+images.list.shown:
+  en: "Showing %{count} items"
+  zh-CN: "显示 %{count} 项"
+images.list.select_all:
+  en: "Select all in list"
+  zh-CN: "全选当前列表"
+images.column.name:
+  en: "Name"
+  zh-CN: "名称"
+images.column.tag:
+  en: "Tag"
+  zh-CN: "标签"
+images.column.id:
+  en: "Image ID"
+  zh-CN: "镜像 ID"
+images.column.created:
+  en: "Created"
+  zh-CN: "创建时间"
+images.column.size:
+  en: "Size"
+  zh-CN: "大小"
+images.column.actions:
+  en: "Actions"
+  zh-CN: "操作"
+images.empty.title:
+  en: "No images yet"
+  zh-CN: "还没有镜像"
+images.empty.description:
+  en: "Click “Pull image” to get one from a registry."
+  zh-CN: "点击“拉取镜像”从镜像仓库获取一个。"
+images.empty.no_match:
+  en: "No matching images"
+  zh-CN: "没有匹配的镜像"
+images.empty.no_match_hint:
+  en: "Adjust your search or filters."
+  zh-CN: "调整搜索或筛选条件。"
+images.menu.view_details:
+  en: "View image details"
+  zh-CN: "查看镜像详情"
+images.menu.view_containers:
+  en: "View containers"
+  zh-CN: "查看使用的容器"
+images.menu.view_containers_count:
+  en: "View containers (%{count})"
+  zh-CN: "查看使用的容器（%{count}）"
+images.menu.pull_latest:
+  en: "Pull latest"
+  zh-CN: "拉取最新版本"
+images.menu.copy_id:
+  en: "Copy image ID"
+  zh-CN: "复制镜像 ID"
+images.menu.copy_reference:
+  en: "Copy image reference"
+  zh-CN: "复制镜像引用"
+images.detail.engine_unavailable:
+  en: "Container engine unavailable. Connect to the engine and try again."
+  zh-CN: "容器引擎不可用，请连接引擎后重试。"
+images.detail.back:
+  en: "Back to images"
+  zh-CN: "返回镜像列表"
+images.detail.copy_id:
+  en: "Copy full image ID"
+  zh-CN: "复制完整镜像 ID"
+images.detail.more:
+  en: "More image actions"
+  zh-CN: "更多镜像操作"
+images.detail.delete:
+  en: "Delete image"
+  zh-CN: "删除镜像"
+images.detail.layers:
+  en: "Layers"
+  zh-CN: "镜像层"
+images.detail.layers_count:
+  en: "Layers (%{count})"
+  zh-CN: "镜像层（%{count}）"
+images.detail.refresh:
+  en: "Refresh image details"
+  zh-CN: "刷新镜像详情"
+images.detail.tab.vulnerabilities:
+  en: "Vulnerabilities"
+  zh-CN: "漏洞"
+images.detail.tab.packages:
+  en: "Packages"
+  zh-CN: "软件包"
+images.detail.tab.info:
+  en: "Image info"
+  zh-CN: "镜像信息"
+images.detail.loading:
+  en: "Loading layers…"
+  zh-CN: "正在读取镜像层…"
+images.detail.loading_hint:
+  en: "Fetching build history from the container engine."
+  zh-CN: "从容器引擎获取构建历史。"
+images.detail.retry:
+  en: "Retry"
+  zh-CN: "重试"
+images.detail.no_layers:
+  en: "No layer history"
+  zh-CN: "没有镜像层历史"
+images.detail.no_layers_hint:
+  en: "The engine returned no build history for this image."
+  zh-CN: "引擎未返回该镜像的构建历史。"
+images.detail.no_command:
+  en: "(No build command)"
+  zh-CN: "（未提供构建命令）"
+images.detail.build_command:
+  en: "Build command"
+  zh-CN: "构建命令"
+images.detail.copy_command:
+  en: "Copy full build command"
+  zh-CN: "复制完整构建命令"
+images.detail.layer_id:
+  en: "Layer ID"
+  zh-CN: "层 ID"
+images.detail.comment:
+  en: "Comment"
+  zh-CN: "备注"
+images.detail.packages_title:
+  en: "No package list generated yet"
+  zh-CN: "尚未生成软件包清单"
+images.detail.vulnerabilities_title:
+  en: "This image hasn't been analyzed for vulnerabilities"
+  zh-CN: "此镜像尚未进行漏洞分析"
+images.detail.packages_description:
+  en: "A package list must be generated by an SBOM analysis tool; it can't be derived from the image build history alone."
+  zh-CN: "软件包清单需要通过 SBOM 分析工具生成，无法仅从镜像构建历史中获取。"
+images.detail.vulnerabilities_description:
+  en: "Rusker isn't connected to an image security scanning service yet, so vulnerability results aren't available. Not analyzed doesn't mean no vulnerabilities."
+  zh-CN: "Rusker 尚未接入镜像安全扫描服务，当前无法提供漏洞检测结果。未分析不代表没有漏洞。"
+images.detail.no_upload:
+  en: "Images are never uploaded to third-party services automatically."
+  zh-CN: "镜像不会被自动上传至第三方服务。"
+images.detail.view_info:
+  en: "View image info"
+  zh-CN: "查看镜像信息"
+images.detail.no_tags:
+  en: "No tags"
+  zh-CN: "无标签"
+images.detail.platform:
+  en: "Platform"
+  zh-CN: "平台"
+images.detail.digests:
+  en: "Digests"
+  zh-CN: "摘要"
+images.detail.containers:
+  en: "Containers using it"
+  zh-CN: "使用的容器"

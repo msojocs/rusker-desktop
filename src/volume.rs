@@ -79,17 +79,17 @@ pub fn unused_volumes<'a>(
 pub fn validate_volume_name(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
-        return Err("卷名称不能为空".into());
+        return Err(t!("volume.name_empty").into_owned());
     };
     if !first.is_ascii_alphanumeric()
         || !chars.all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
         })
     {
-        return Err("卷名称只能包含字母、数字、下划线、点和连字符，且必须以字母或数字开头".into());
+        return Err(t!("volume.name_invalid").into_owned());
     }
     if name.len() < 2 {
-        return Err("卷名称至少需要 2 个字符".into());
+        return Err(t!("volume.name_too_short").into_owned());
     }
     Ok(())
 }
@@ -100,7 +100,7 @@ pub fn container_path(relative: &str) -> Result<String, String> {
     let mut path = String::from(VOLUME_MOUNT);
     for segment in relative.split('/').filter(|segment| !segment.is_empty()) {
         if segment == "." || segment == ".." || segment.contains('\0') {
-            return Err(format!("无效的卷内路径：{relative}"));
+            return Err(t!("volume.invalid_path", relative = relative).into_owned());
         }
         path.push('/');
         path.push_str(segment);

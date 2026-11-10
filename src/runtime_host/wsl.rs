@@ -573,7 +573,11 @@ impl WslHost {
             PathBuf::from(path).join("runtime-host")
         } else {
             ProjectDirs::from("dev", "Rusker", "Rusker Desktop")
-                .ok_or_else(|| RuntimeHostError::State("无法确定应用数据目录".into()))?
+                .ok_or_else(|| {
+                    RuntimeHostError::State(
+                        t!("runtime_host.error.app_data_dir_unavailable").into_owned(),
+                    )
+                })?
                 .data_local_dir()
                 .join("runtime-host")
         };
@@ -668,16 +672,24 @@ impl WslHost {
             return Ok(Vec::new());
         }
         if target.join(data_disk::DATA_DISK_FILE).exists() {
-            return Err(RuntimeHostError::Conflict(format!(
-                "目标目录已有 {}，拒绝覆盖",
-                data_disk::DATA_DISK_FILE
-            )));
+            return Err(RuntimeHostError::Conflict(
+                t!(
+                    "runtime_host.error.target_dir_has_existing",
+                    path = data_disk::DATA_DISK_FILE
+                )
+                .into_owned(),
+            ));
         }
         let was_running = self.session.is_running();
         self.stop_engine().await;
         let mut terminate = wsl_command();
         terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
-        execute(terminate, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await?;
+        execute(
+            terminate,
+            t!("runtime_host.action.stop_wsl_environment"),
+            COMMAND_TIMEOUT,
+        )
+        .await?;
         self.detach_data_disk().await;
         let directory = target.to_path_buf();
         let moving = disk.clone();
@@ -702,7 +714,13 @@ impl WslHost {
         // when the engine fails to come back.
         Ok(restarted
             .err()
-            .map(|error| format!("磁盘已移动，但 Engine 未能恢复：{error}"))
+            .map(|error| {
+                t!(
+                    "runtime_host.error.disk_moved_engine_not_restored",
+                    error = error
+                )
+                .into_owned()
+            })
             .into_iter()
             .collect())
     }
@@ -725,10 +743,13 @@ impl WslHost {
             }
         };
         if !disk.path.exists() {
-            return Err(RuntimeHostError::Conflict(format!(
-                "Docker 数据磁盘 {} 不存在；如果手动移动过该文件，请将其放回原位置",
-                disk.path.display()
-            )));
+            return Err(RuntimeHostError::Conflict(
+                t!(
+                    "runtime_host.error.disk_missing",
+                    path = disk.path.display()
+                )
+                .into_owned(),
+            ));
         }
         let wwid = disk.wwid()?;
         // Fails harmlessly when the disk is still attached from an earlier
@@ -738,7 +759,12 @@ impl WslHost {
             .args(["--mount", "--vhd"])
             .arg(&disk.path)
             .arg("--bare");
-        let attached = execute(attach, "挂载 Docker 数据磁盘", COMMAND_TIMEOUT).await;
+        let attached = execute(
+            attach,
+            t!("runtime_host.action.mount_data_disk"),
+            COMMAND_TIMEOUT,
+        )
+        .await;
         let mut mount = managed_command("root");
         mount
             .arg("/bin/sh")
@@ -746,7 +772,13 @@ impl WslHost {
             .arg(data_disk::MOUNT_SCRIPT)
             .arg("rusker-data")
             .arg(&wwid);
-        match execute(mount, "准备 Docker 数据磁盘", INSTALL_TIMEOUT).await {
+        match execute(
+            mount,
+            t!("runtime_host.action.prepare_data_disk"),
+            INSTALL_TIMEOUT,
+        )
+        .await
+        {
             Ok(_) => Ok(wwid),
             Err(error) => Err(attached.err().unwrap_or(error)),
         }
@@ -760,7 +792,12 @@ impl WslHost {
         };
         let mut unmount = wsl_command();
         unmount.arg("--unmount").arg(&disk.path);
-        let _ = execute(unmount, "卸载 Docker 数据磁盘", COMMAND_TIMEOUT).await;
+        let _ = execute(
+            unmount,
+            t!("runtime_host.action.unmount_data_disk"),
+            COMMAND_TIMEOUT,
+        )
+        .await;
     }
 
     /// Number of running containers, asked inside the distribution so the
@@ -769,7 +806,12 @@ impl WslHost {
     pub(crate) async fn running_containers(&self) -> Result<usize, RuntimeHostError> {
         let mut command = managed_command("root");
         command.args(["/usr/bin/docker", "ps", "--quiet"]);
-        let output = execute(command, "检查运行中的容器", COMMAND_TIMEOUT).await?;
+        let output = execute(
+            command,
+            t!("runtime_host.action.check_running_containers"),
+            COMMAND_TIMEOUT,
+        )
+        .await?;
         Ok(decode(&output.stdout)
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -793,7 +835,13 @@ impl WslHost {
             "-c",
             &format!("{ENGINE_SIGNALS_SCRIPT}{PAUSE_SCRIPT}"),
         ]);
-        if let Err(error) = execute(pause, "暂停空闲 Engine", COMMAND_TIMEOUT).await {
+        if let Err(error) = execute(
+            pause,
+            t!("runtime_host.action.pause_idle_engine"),
+            COMMAND_TIMEOUT,
+        )
+        .await
+        {
             // A timeout can kill wsl.exe before the shell's rollback trap ran.
             // Preserve the gate if rollback fails so clients retry resume,
             // rather than sending requests to a partially frozen daemon.
@@ -834,7 +882,12 @@ impl WslHost {
             "-c",
             &format!("{ENGINE_SIGNALS_SCRIPT}resume_engine"),
         ]);
-        execute(resume, "恢复 Engine", COMMAND_TIMEOUT).await?;
+        execute(
+            resume,
+            t!("runtime_host.action.resume_engine"),
+            COMMAND_TIMEOUT,
+        )
+        .await?;
         Ok(())
     }
 
@@ -899,7 +952,7 @@ impl WslHost {
         if !self.session.is_running() {
             if user_config.is_some() {
                 return Err(RuntimeHostError::State(
-                    "Engine 未运行，无法修改 daemon.json；启动 Engine 后再应用".into(),
+                    t!("runtime_host.error.engine_not_running_cannot_modify").into_owned(),
                 ));
             }
             return Ok(ProxyApplyOutcome::Deferred);
@@ -922,7 +975,7 @@ impl WslHost {
     pub async fn read_daemon_config(&self) -> Result<String, RuntimeHostError> {
         if !self.session.is_running() {
             return Err(RuntimeHostError::State(
-                "Engine 未运行，启动后才能查看和修改 daemon.json".into(),
+                t!("runtime_host.error.engine_not_running_daemon_config").into_owned(),
             ));
         }
         self.ensure_owned().await?;
@@ -935,7 +988,12 @@ impl WslHost {
         read.arg("/bin/sh")
             .arg("-c")
             .arg("cat /etc/docker/daemon.json 2>/dev/null || true");
-        let current = execute(read, "读取 daemon.json", COMMAND_TIMEOUT).await?;
+        let current = execute(
+            read,
+            t!("runtime_host.action.read_daemon_json"),
+            COMMAND_TIMEOUT,
+        )
+        .await?;
         Ok(decode(&current.stdout))
     }
 
@@ -964,7 +1022,7 @@ impl WslHost {
         execute_with_input(
             write,
             format!("{text}\n").as_bytes(),
-            "校验并写入 daemon.json",
+            t!("runtime_host.action.validate_and_write_daemon_json"),
             COMMAND_TIMEOUT,
         )
         .await?;
@@ -989,7 +1047,7 @@ impl WslHost {
         execute_with_input(
             write,
             updated.as_bytes(),
-            "写入 daemon.json Engine 配置",
+            t!("runtime_host.action.write_daemon_engine_config"),
             COMMAND_TIMEOUT,
         )
         .await?;
@@ -1015,9 +1073,13 @@ impl WslHost {
             .iter()
             .find(|distribution| distribution.name == MANAGED_DISTRO_NAME);
         if managed.is_some() && !self.receipt_valid() {
-            return Err(RuntimeHostError::Conflict(format!(
-                "检测到同名 WSL 发行版“{MANAGED_DISTRO_NAME}”，但没有 Rusker 所有权标记；为避免误操作用户环境，已停止管理操作"
-            )));
+            return Err(RuntimeHostError::Conflict(
+                t!(
+                    "runtime_host.error.unmanaged_distro_conflict",
+                    name = MANAGED_DISTRO_NAME
+                )
+                .into_owned(),
+            ));
         }
         let installed = managed.is_some();
         let running = managed
@@ -1031,7 +1093,7 @@ impl WslHost {
             probe_gpu().await
         } else {
             NvidiaGpuStatus {
-                detail: "受管 Engine 未运行".into(),
+                detail: t!("runtime_host.error.engine_not_running").into_owned(),
                 ..NvidiaGpuStatus::default()
             }
         };
@@ -1044,18 +1106,27 @@ impl WslHost {
         }
         if installed && running && !engine_ready && !paused {
             warnings.push(if session_alive {
-                "受管 Engine 尚未就绪；请稍候刷新，或查看 dockerd 日志".into()
+                t!("runtime_host.warning.engine_not_ready").into_owned()
             } else {
-                "专用发行版正在运行，但没有由本应用持有的 Engine 会话；点击“启动”接管".into()
+                t!("runtime_host.warning.distro_running_no_session").into_owned()
             });
         }
         // Only asked while running: any `wsl.exe -d` would boot the VM.
         if installed && running {
             if let Some(version) = image_version().await.filter(|v| v != ROOTFS_IMAGE) {
                 warnings.push(if version.is_empty() {
-                    format!("专用发行版仍是旧的 Ubuntu 运行环境；点击“修复环境”换用 Rusker 系统镜像 {ROOTFS_IMAGE}（容器、镜像和卷保留在数据磁盘中）")
+                    t!(
+                        "runtime_host.warning.old_ubuntu_environment",
+                        image = ROOTFS_IMAGE
+                    )
+                    .into_owned()
                 } else {
-                    format!("专用发行版的系统镜像为 {version}，当前版本需要 {ROOTFS_IMAGE}；点击“修复环境”升级（容器、镜像和卷保留在数据磁盘中）")
+                    t!(
+                        "runtime_host.warning.image_version_outdated",
+                        version = version,
+                        image = ROOTFS_IMAGE
+                    )
+                    .into_owned()
                 });
             }
         }
@@ -1125,7 +1196,12 @@ impl WslHost {
             .arg(&install_dir)
             .arg(&rootfs)
             .args(["--version", "2"]);
-        if let Err(error) = execute(command, "导入 Rusker WSL2 发行版", INSTALL_TIMEOUT).await
+        if let Err(error) = execute(
+            command,
+            t!("runtime_host.action.import_wsl_distro"),
+            INSTALL_TIMEOUT,
+        )
+        .await
         {
             let _ = fs::remove_dir_all(&install_dir);
             return Err(error);
@@ -1133,7 +1209,12 @@ impl WslHost {
         if let Err(error) = self.write_receipt() {
             let mut unregister = wsl_command();
             unregister.args(["--unregister", MANAGED_DISTRO_NAME]);
-            let _ = execute(unregister, "回滚未登记的发行版", COMMAND_TIMEOUT).await;
+            let _ = execute(
+                unregister,
+                t!("runtime_host.action.rollback_unregistered_distro"),
+                COMMAND_TIMEOUT,
+            )
+            .await;
             return Err(error);
         }
 
@@ -1144,12 +1225,22 @@ impl WslHost {
             .arg(VERIFY_IMAGE_SCRIPT)
             .arg("rusker-verify")
             .arg(ROOTFS_IMAGE);
-        execute(verify, "校验 Rusker 系统镜像", COMMAND_TIMEOUT).await?;
+        execute(
+            verify,
+            t!("runtime_host.action.verify_system_image"),
+            COMMAND_TIMEOUT,
+        )
+        .await?;
         self.ensure_owned().await?;
         let restore_problem = self.restore_daemon_config().await?;
         let mut terminate = wsl_command();
         terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
-        execute(terminate, "应用专用发行版配置", COMMAND_TIMEOUT).await?;
+        execute(
+            terminate,
+            t!("runtime_host.action.apply_distro_config"),
+            COMMAND_TIMEOUT,
+        )
+        .await?;
         self.start_engine().await?;
         match restore_problem {
             Some(message) => Err(RuntimeHostError::State(message)),
@@ -1168,30 +1259,44 @@ impl WslHost {
         self.attach_data_disk().await?;
         let mut check = managed_command("root");
         check.arg("/bin/sh").arg("-c").arg(DATA_ON_DATA_DISK_SCRIPT);
-        execute(check, "确认 Docker 数据位于数据磁盘", COMMAND_TIMEOUT)
-            .await
-            .map_err(|error| {
-                RuntimeHostError::State(format!(
-                    "Docker 数据尚未迁移到数据磁盘，为避免丢失数据，已停止替换系统盘：{error}"
-                ))
-            })?;
+        execute(
+            check,
+            t!("runtime_host.action.verify_data_on_data_disk"),
+            COMMAND_TIMEOUT,
+        )
+        .await
+        .map_err(|error| {
+            RuntimeHostError::State(
+                t!("runtime_host.error.data_not_migrated", error = error).into_owned(),
+            )
+        })?;
         let config = self.read_daemon_json().await?;
         // A file still pending from an interrupted install is the user's
         // config; the current one may already be the image default.
         let preserved = self.preserved_config_path();
         if !config.trim().is_empty() && !preserved.exists() {
             fs::write(&preserved, config).map_err(|source| RuntimeHostError::Io {
-                action: "保存 daemon.json",
+                action: t!("runtime_host.action.save_daemon_json").into_owned(),
                 source,
             })?;
         }
         let mut terminate = wsl_command();
         terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
-        execute(terminate, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await?;
+        execute(
+            terminate,
+            t!("runtime_host.action.stop_wsl_environment"),
+            COMMAND_TIMEOUT,
+        )
+        .await?;
         self.detach_data_disk().await;
         let mut unregister = wsl_command();
         unregister.args(["--unregister", MANAGED_DISTRO_NAME]);
-        execute(unregister, "移除旧系统盘", INSTALL_TIMEOUT).await?;
+        execute(
+            unregister,
+            t!("runtime_host.action.remove_old_system_disk"),
+            INSTALL_TIMEOUT,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1215,7 +1320,7 @@ impl WslHost {
                 execute_with_input(
                     write,
                     merged.as_bytes(),
-                    "恢复 daemon.json",
+                    t!("runtime_host.action.restore_daemon_json"),
                     COMMAND_TIMEOUT,
                 )
                 .await
@@ -1232,10 +1337,14 @@ impl WslHost {
             Err(message) => {
                 let rejected = self.root.join("daemon.json.rejected");
                 let _ = fs::rename(&path, &rejected);
-                Ok(Some(format!(
-                    "环境已安装，但原 daemon.json 无法用于新版 dockerd，已改用默认配置；原文件保存在 {}：{message}",
-                    rejected.display()
-                )))
+                Ok(Some(
+                    t!(
+                        "runtime_host.error.daemon_config_rejected",
+                        path = rejected.display(),
+                        message = message
+                    )
+                    .into_owned(),
+                ))
             }
         }
     }
@@ -1279,7 +1388,12 @@ impl WslHost {
         self.stop_engine().await;
         let mut command = wsl_command();
         command.args(["--terminate", MANAGED_DISTRO_NAME]);
-        execute(command, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await?;
+        execute(
+            command,
+            t!("runtime_host.action.stop_wsl_environment"),
+            COMMAND_TIMEOUT,
+        )
+        .await?;
         self.detach_data_disk().await;
         Ok(())
     }
@@ -1298,7 +1412,12 @@ impl WslHost {
         if self.receipt_valid() {
             let mut terminate = wsl_command();
             terminate.args(["--terminate", MANAGED_DISTRO_NAME]);
-            let _ = execute(terminate, "停止 Rusker WSL2 环境", COMMAND_TIMEOUT).await;
+            let _ = execute(
+                terminate,
+                t!("runtime_host.action.stop_wsl_environment"),
+                COMMAND_TIMEOUT,
+            )
+            .await;
             self.detach_data_disk().await;
         }
     }
@@ -1315,7 +1434,14 @@ impl WslHost {
             .map(|(name, _)| name)
         {
             if let Err(error) = self.set_integration(distribution, true).await {
-                warnings.push(format!("恢复 {distribution} 集成失败：{error}"));
+                warnings.push(
+                    t!(
+                        "runtime_host.error.restore_integration_failed",
+                        distribution = distribution,
+                        error = error
+                    )
+                    .into_owned(),
+                );
             }
         }
         let mut snapshot = self.snapshot(integrations).await?;
@@ -1336,20 +1462,28 @@ impl WslHost {
         let Some(target) = distros.iter().find(|candidate| {
             candidate.name == distribution && candidate.name != MANAGED_DISTRO_NAME
         }) else {
-            return Err(RuntimeHostError::Conflict(format!(
-                "WSL 发行版“{distribution}”不存在"
-            )));
+            return Err(RuntimeHostError::Conflict(
+                t!(
+                    "runtime_host.error.distribution_not_found",
+                    distribution = distribution
+                )
+                .into_owned(),
+            ));
         };
         if target.version != 2 {
-            return Err(RuntimeHostError::Conflict(format!(
-                "“{distribution}”不是 WSL2 发行版"
-            )));
+            return Err(RuntimeHostError::Conflict(
+                t!(
+                    "runtime_host.error.not_wsl2_distribution",
+                    distribution = distribution
+                )
+                .into_owned(),
+            ));
         }
         if enabled {
             self.probe_engine()
                 .await
                 .map_err(|message| RuntimeHostError::Command {
-                    action: "检查受管 Engine".into(),
+                    action: t!("runtime_host.action.check_managed_engine").into_owned(),
                     message,
                 })?;
             self.copy_managed_cli(distribution).await
@@ -1358,7 +1492,10 @@ impl WslHost {
             command.arg("/bin/sh").arg("-c").arg(REMOVE_CLI_SCRIPT);
             execute(
                 command,
-                &format!("停用 {distribution} 集成"),
+                t!(
+                    "runtime_host.action.disable_integration",
+                    distribution = distribution
+                ),
                 COMMAND_TIMEOUT,
             )
             .await?;
@@ -1369,12 +1506,17 @@ impl WslHost {
     async fn ensure_owned(&self) -> Result<(), RuntimeHostError> {
         if !self.receipt_valid() {
             return Err(RuntimeHostError::Conflict(
-                "专用发行版没有 Rusker 本地所有权记录，拒绝执行管理操作".into(),
+                t!("runtime_host.error.no_ownership_record").into_owned(),
             ));
         }
         let mut command = managed_command("root");
         command.args(["/usr/bin/test", "-f", MANAGED_MARKER]);
-        execute(command, "验证专用发行版标记", COMMAND_TIMEOUT).await?;
+        execute(
+            command,
+            t!("runtime_host.action.verify_distro_marker"),
+            COMMAND_TIMEOUT,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1392,7 +1534,12 @@ impl WslHost {
             if self.write_managed_keys().await? {
                 let mut stop = managed_command("root");
                 stop.arg("/bin/sh").arg("-c").arg(STOP_SCRIPT);
-                let _ = execute(stop, "停止旧 dockerd", DOCKERD_STOP_TIMEOUT).await;
+                let _ = execute(
+                    stop,
+                    t!("runtime_host.action.stop_old_dockerd"),
+                    DOCKERD_STOP_TIMEOUT,
+                )
+                .await;
             }
             let mut command = managed_command("root");
             command
@@ -1407,7 +1554,7 @@ impl WslHost {
             let child = command
                 .spawn()
                 .map_err(|source| RuntimeHostError::Command {
-                    action: "启动受管 Docker Engine 会话".into(),
+                    action: t!("runtime_host.action.start_managed_engine_session").into_owned(),
                     message: source.to_string(),
                 })?;
             self.session.replace(child);
@@ -1428,7 +1575,12 @@ impl WslHost {
         self.saver.set_active(false);
         let mut command = managed_command("root");
         command.arg("/bin/sh").arg("-c").arg(STOP_SCRIPT);
-        let _ = execute(command, "停止 dockerd", DOCKERD_STOP_TIMEOUT).await;
+        let _ = execute(
+            command,
+            t!("runtime_host.action.stop_dockerd"),
+            DOCKERD_STOP_TIMEOUT,
+        )
+        .await;
         if let Some(mut child) = self.session.take() {
             if timeout(Duration::from_secs(5), child.wait()).await.is_err() {
                 let _ = child.start_kill();
@@ -1489,8 +1641,12 @@ impl WslHost {
         while started.elapsed() < READY_TIMEOUT {
             if !self.session.is_running() {
                 return Err(RuntimeHostError::Command {
-                    action: "启动受管 Docker Engine".into(),
-                    message: format!("Engine 会话已退出。最近日志：\n{}", engine_log_tail().await),
+                    action: t!("runtime_host.action.start_managed_engine").into_owned(),
+                    message: t!(
+                        "runtime_host.error.engine_session_exited",
+                        log = engine_log_tail().await
+                    )
+                    .into_owned(),
                 });
             }
             match self.probe_engine().await {
@@ -1500,8 +1656,13 @@ impl WslHost {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
         Err(RuntimeHostError::Command {
-            action: "等待受管 Engine 就绪".into(),
-            message: format!("{last_error}。最近日志：\n{}", engine_log_tail().await),
+            action: t!("runtime_host.action.wait_engine_ready").into_owned(),
+            message: t!(
+                "runtime_host.error.engine_ready_with_log",
+                error = last_error,
+                log = engine_log_tail().await
+            )
+            .into_owned(),
         })
     }
 
@@ -1516,23 +1677,34 @@ impl WslHost {
             .arg(MANAGED_CLI_SCRIPT)
             .args(["rusker-cli", "fingerprint"]);
         let fingerprint = decode(
-            &execute(fingerprint, "计算受管 Docker CLI 指纹", COMMAND_TIMEOUT)
-                .await?
-                .stdout,
+            &execute(
+                fingerprint,
+                t!("runtime_host.action.compute_cli_fingerprint"),
+                COMMAND_TIMEOUT,
+            )
+            .await?
+            .stdout,
         )
         .trim()
         .to_string();
         if fingerprint.len() != 64 {
-            return Err(RuntimeHostError::State(format!(
-                "受管 Docker CLI 指纹无效：{fingerprint}"
-            )));
+            return Err(RuntimeHostError::State(
+                t!(
+                    "runtime_host.error.invalid_cli_fingerprint",
+                    fingerprint = fingerprint
+                )
+                .into_owned(),
+            ));
         }
 
         let mut state = wsl_command_for(distribution, "root");
         state.arg("/bin/sh").arg("-c").arg(INTEGRATION_STATE_SCRIPT);
         let installed = execute(
             state,
-            &format!("检查 {distribution} 集成状态"),
+            t!(
+                "runtime_host.action.check_integration_state",
+                distribution = distribution
+            ),
             COMMAND_TIMEOUT,
         )
         .await
@@ -1558,7 +1730,10 @@ impl WslHost {
         stream_between(
             source,
             target,
-            &format!("启用 {distribution} 集成"),
+            t!(
+                "runtime_host.action.enable_integration",
+                distribution = distribution
+            ),
             TRANSFER_TIMEOUT,
         )
         .await
@@ -1576,11 +1751,11 @@ impl WslHost {
 
     fn write_receipt(&self) -> Result<(), RuntimeHostError> {
         fs::create_dir_all(&self.root).map_err(|source| RuntimeHostError::Io {
-            action: "创建运行环境数据目录",
+            action: t!("runtime_host.action.create_runtime_data_dir").into_owned(),
             source,
         })?;
         fs::write(self.receipt_path(), MANAGED_RECEIPT).map_err(|source| RuntimeHostError::Io {
-            action: "写入专用发行版所有权记录",
+            action: t!("runtime_host.action.write_ownership_record").into_owned(),
             source,
         })
     }
@@ -1592,7 +1767,7 @@ impl WslHost {
         let _ = fs::remove_dir_all(self.root.join("rootfs"));
         let filename = rootfs_filename(std::env::consts::ARCH)?;
         let exe = std::env::current_exe().map_err(|source| RuntimeHostError::Io {
-            action: "定位应用程序目录",
+            action: t!("runtime_host.action.locate_app_directory").into_owned(),
             source,
         })?;
         let path = exe
@@ -1603,10 +1778,13 @@ impl WslHost {
         if path.is_file() {
             Ok(path)
         } else {
-            Err(RuntimeHostError::State(format!(
-                "找不到 WSL2 系统镜像 {}；请重新安装 Rusker Desktop",
-                path.display()
-            )))
+            Err(RuntimeHostError::State(
+                t!(
+                    "runtime_host.error.system_image_missing",
+                    path = path.display()
+                )
+                .into_owned(),
+            ))
         }
     }
 }
@@ -1622,7 +1800,12 @@ struct DistroInfo {
 async fn list_distributions() -> Result<Vec<DistroInfo>, RuntimeHostError> {
     let mut command = wsl_command();
     command.args(["--list", "--verbose"]);
-    let output = execute(command, "枚举 WSL2 发行版", COMMAND_TIMEOUT).await?;
+    let output = execute(
+        command,
+        t!("runtime_host.action.list_wsl_distributions"),
+        COMMAND_TIMEOUT,
+    )
+    .await?;
     Ok(parse_distributions(&decode(&output.stdout)))
 }
 
@@ -1704,17 +1887,18 @@ fn strip_verbatim(path: &str) -> &str {
 
 pub(super) async fn execute(
     mut command: Command,
-    action: &str,
+    action: impl Into<String>,
     duration: Duration,
 ) -> Result<Output, RuntimeHostError> {
+    let action = action.into();
     match timeout(duration, command.output()).await {
-        Ok(Ok(output)) => check_output(output, action),
+        Ok(Ok(output)) => check_output(output, &action),
         Ok(Err(source)) => Err(RuntimeHostError::Command {
-            action: action.into(),
+            action,
             message: source.to_string(),
         }),
         Err(_) => Err(RuntimeHostError::Timeout {
-            action: action.into(),
+            action,
             seconds: duration.as_secs(),
         }),
     }
@@ -1739,8 +1923,12 @@ fn editable_daemon_config(current: &str) -> Result<String, String> {
     } else {
         match serde_json::from_str::<Value>(current) {
             Ok(Value::Object(object)) => object,
-            Ok(_) => return Err("/etc/docker/daemon.json 不是 JSON 对象".into()),
-            Err(error) => return Err(format!("/etc/docker/daemon.json 格式无效：{error}")),
+            Ok(_) => return Err(t!("runtime_host.error.daemon_json_not_object").into_owned()),
+            Err(error) => {
+                return Err(
+                    t!("runtime_host.error.daemon_json_invalid", error = error).into_owned()
+                );
+            }
         }
     };
     for key in MANAGED_DAEMON_KEYS {
@@ -1760,24 +1948,26 @@ pub fn validate_daemon_config(text: &str) -> Result<(), String> {
 fn parse_editable_daemon_config(text: &str) -> Result<Map<String, Value>, String> {
     let document = match serde_json::from_str::<Value>(text) {
         Ok(Value::Object(object)) => object,
-        Ok(_) => return Err("daemon.json 必须是 JSON 对象".into()),
-        Err(error) => return Err(format!("daemon.json 不是有效的 JSON：{error}")),
+        Ok(_) => return Err(t!("runtime_host.error.daemon_json_must_be_object").into_owned()),
+        Err(error) => {
+            return Err(t!(
+                "runtime_host.error.daemon_json_not_valid_json",
+                error = error
+            )
+            .into_owned());
+        }
     };
     if document.contains_key("proxies") {
-        return Err("请在“代理”设置中配置 Engine 代理，不要在 daemon.json 中填写 proxies".into());
+        return Err(t!("runtime_host.error.proxies_in_daemon_json").into_owned());
     }
     if let Some(key) = ENGINE_NETWORK_KEYS
         .iter()
         .find(|key| document.contains_key(**key))
     {
-        return Err(format!(
-            "请在“网络”设置中配置，不要在 daemon.json 中填写 {key}"
-        ));
+        return Err(t!("runtime_host.error.network_key_in_daemon_json", key = key).into_owned());
     }
     if document.contains_key("hosts") {
-        return Err(
-            "Rusker 通过启动参数设置 dockerd 监听地址，daemon.json 中不能包含 hosts".into(),
-        );
+        return Err(t!("runtime_host.error.hosts_in_daemon_json").into_owned());
     }
     Ok(document)
 }
@@ -1795,8 +1985,16 @@ fn merge_managed_keys(
     } else {
         match serde_json::from_str::<Value>(current) {
             Ok(Value::Object(object)) => object,
-            Ok(_) => return Err("/etc/docker/daemon.json 不是 JSON 对象，未修改".into()),
-            Err(error) => return Err(format!("/etc/docker/daemon.json 格式无效，未修改：{error}")),
+            Ok(_) => {
+                return Err(t!("runtime_host.error.daemon_json_not_object_unchanged").into_owned());
+            }
+            Err(error) => {
+                return Err(t!(
+                    "runtime_host.error.daemon_json_invalid_unchanged",
+                    error = error
+                )
+                .into_owned());
+            }
         }
     };
     let effective = |value: Option<&Value>| {
@@ -1831,33 +2029,33 @@ fn merge_managed_keys(
 pub(super) async fn execute_with_input(
     mut command: Command,
     input: &[u8],
-    action: &str,
+    action: impl Into<String>,
     duration: Duration,
 ) -> Result<Output, RuntimeHostError> {
+    let action = action.into();
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let failed = |source: std::io::Error| RuntimeHostError::Command {
-        action: action.into(),
+        action: action.clone(),
         message: source.to_string(),
     };
     let operation = async {
         let mut child = command.spawn().map_err(failed)?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| RuntimeHostError::State("无法打开命令的标准输入".into()))?;
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            RuntimeHostError::State(t!("runtime_host.error.cannot_open_command_stdin").into_owned())
+        })?;
         stdin.write_all(input).await.map_err(failed)?;
         stdin.shutdown().await.map_err(failed)?;
         drop(stdin);
         child.wait_with_output().await.map_err(failed)
     };
     match timeout(duration, operation).await {
-        Ok(Ok(output)) => check_output(output, action),
+        Ok(Ok(output)) => check_output(output, &action),
         Ok(Err(error)) => Err(error),
         Err(_) => Err(RuntimeHostError::Timeout {
-            action: action.into(),
+            action,
             seconds: duration.as_secs(),
         }),
     }
@@ -1868,9 +2066,10 @@ pub(super) async fn execute_with_input(
 async fn stream_between(
     mut source: Command,
     mut target: Command,
-    action: &str,
+    action: impl Into<String>,
     duration: Duration,
 ) -> Result<(), RuntimeHostError> {
+    let action = action.into();
     source
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1880,7 +2079,7 @@ async fn stream_between(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let spawn_error = |source: std::io::Error| RuntimeHostError::Command {
-        action: action.into(),
+        action: action.clone(),
         message: source.to_string(),
     };
     let operation = async {
@@ -1889,7 +2088,7 @@ async fn stream_between(
         let (Some(mut output), Some(mut input)) = (producer.stdout.take(), consumer.stdin.take())
         else {
             return Err(RuntimeHostError::State(
-                "无法连接集成命令的标准输入输出".into(),
+                t!("runtime_host.error.cannot_connect_integration_stdio").into_owned(),
             ));
         };
         let copy = async move {
@@ -1904,14 +2103,14 @@ async fn stream_between(
         );
         // The consumer's error is the meaningful one (e.g. "refusing to
         // overwrite"); a producer failure is usually just a broken pipe.
-        check_output(consumed.map_err(spawn_error)?, action)?;
-        check_output(produced.map_err(spawn_error)?, action)?;
+        check_output(consumed.map_err(spawn_error)?, &action)?;
+        check_output(produced.map_err(spawn_error)?, &action)?;
         Ok(())
     };
     match timeout(duration, operation).await {
         Ok(result) => result,
         Err(_) => Err(RuntimeHostError::Timeout {
-            action: action.into(),
+            action,
             seconds: duration.as_secs(),
         }),
     }
@@ -1931,15 +2130,20 @@ fn check_output(output: Output, action: &str) -> Result<Output, RuntimeHostError
     let message: String = message.chars().take(4096).collect();
     Err(RuntimeHostError::Command {
         action: action.into(),
-        message: format!(
-            "命令退出状态 {}{}",
-            output.status,
-            if message.is_empty() {
-                String::new()
-            } else {
-                format!("：{message}")
-            }
-        ),
+        message: if message.is_empty() {
+            t!(
+                "runtime_host.error.command_exit_status",
+                status = output.status
+            )
+            .into_owned()
+        } else {
+            t!(
+                "runtime_host.error.command_exit_status_with_message",
+                status = output.status,
+                message = message
+            )
+            .into_owned()
+        },
     })
 }
 
@@ -1960,7 +2164,13 @@ pub(crate) fn dial_stdio_command() -> Command {
 async fn engine_log_tail() -> String {
     let mut command = managed_command("root");
     command.args(["/usr/bin/tail", "-n", "20", "/var/log/rusker-dockerd.log"]);
-    match execute(command, "读取 dockerd 日志", COMMAND_TIMEOUT).await {
+    match execute(
+        command,
+        t!("runtime_host.action.read_dockerd_log"),
+        COMMAND_TIMEOUT,
+    )
+    .await
+    {
         Ok(output) => decode(&output.stdout).trim().to_string(),
         Err(error) => error.to_string(),
     }
@@ -1969,7 +2179,13 @@ async fn engine_log_tail() -> String {
 async fn probe_gpu() -> NvidiaGpuStatus {
     let mut probe = managed_command("root");
     probe.arg("/bin/sh").arg("-c").arg(GPU_PROBE_SCRIPT);
-    let output = match execute(probe, "检测 NVIDIA GPU", COMMAND_TIMEOUT).await {
+    let output = match execute(
+        probe,
+        t!("runtime_host.action.detect_nvidia_gpu"),
+        COMMAND_TIMEOUT,
+    )
+    .await
+    {
         Ok(output) => output,
         Err(error) => {
             return NvidiaGpuStatus {
@@ -1987,29 +2203,37 @@ async fn probe_gpu() -> NvidiaGpuStatus {
 
     let mut runtimes = managed_command("root");
     runtimes.args(["/usr/bin/docker", "info", "--format", "{{json .Runtimes}}"]);
-    let runtime_registered = execute(runtimes, "检查 NVIDIA Docker runtime", COMMAND_TIMEOUT)
-        .await
-        .ok()
-        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-        .and_then(|value| {
-            value
-                .as_object()
-                .map(|object| object.contains_key("nvidia"))
-        })
-        .unwrap_or(false);
+    let runtime_registered = execute(
+        runtimes,
+        t!("runtime_host.action.check_nvidia_docker_runtime"),
+        COMMAND_TIMEOUT,
+    )
+    .await
+    .ok()
+    .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+    .and_then(|value| {
+        value
+            .as_object()
+            .map(|object| object.contains_key("nvidia"))
+    })
+    .unwrap_or(false);
     if runtime_registered {
         NvidiaGpuStatus {
             available: true,
             name: (!name.is_empty()).then(|| name.clone()),
             detail: if name.is_empty() {
-                "NVIDIA runtime 已就绪".into()
+                t!("runtime_host.gpu.nvidia_runtime_ready").into_owned()
             } else {
-                format!("{name}；NVIDIA runtime 已就绪")
+                t!(
+                    "runtime_host.gpu.nvidia_runtime_ready_with_name",
+                    name = name
+                )
+                .into_owned()
             },
         }
     } else {
         NvidiaGpuStatus {
-            detail: "已检测到 GPU，但 Docker 未注册 nvidia runtime；请修复运行环境".into(),
+            detail: t!("runtime_host.gpu.nvidia_runtime_missing").into_owned(),
             name: (!name.is_empty()).then_some(name),
             available: false,
         }
@@ -2021,10 +2245,14 @@ async fn probe_gpu() -> NvidiaGpuStatus {
 async fn image_version() -> Option<String> {
     let mut command = managed_command("root");
     command.arg("/bin/sh").arg("-c").arg(IMAGE_VERSION_SCRIPT);
-    execute(command, "读取系统镜像版本", COMMAND_TIMEOUT)
-        .await
-        .ok()
-        .map(|output| decode(&output.stdout).trim().to_string())
+    execute(
+        command,
+        t!("runtime_host.action.read_system_image_version"),
+        COMMAND_TIMEOUT,
+    )
+    .await
+    .ok()
+    .map(|output| decode(&output.stdout).trim().to_string())
 }
 
 /// The supervisor with the data disk mount script inlined; `$1` is the WWID.
@@ -2036,22 +2264,25 @@ fn prepare_empty_directory(path: &Path) -> Result<(), RuntimeHostError> {
     match fs::read_dir(path) {
         Ok(mut entries) => {
             if entries.next().is_some() {
-                return Err(RuntimeHostError::Conflict(format!(
-                    "专用发行版目录 {} 非空，拒绝覆盖",
-                    path.display()
-                )));
+                return Err(RuntimeHostError::Conflict(
+                    t!(
+                        "runtime_host.error.distro_dir_not_empty",
+                        path = path.display()
+                    )
+                    .into_owned(),
+                ));
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
             return Err(RuntimeHostError::Io {
-                action: "检查专用发行版目录",
+                action: t!("runtime_host.action.check_distro_directory").into_owned(),
                 source,
             })
         }
     }
     fs::create_dir_all(path).map_err(|source| RuntimeHostError::Io {
-        action: "创建专用发行版目录",
+        action: t!("runtime_host.action.create_distro_directory").into_owned(),
         source,
     })
 }
@@ -2063,9 +2294,9 @@ fn rootfs_filename(architecture: &str) -> Result<String, RuntimeHostError> {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
         other => {
-            return Err(RuntimeHostError::State(format!(
-                "暂不支持 {other} 架构的 Rusker 系统镜像"
-            )))
+            return Err(RuntimeHostError::State(
+                t!("runtime_host.error.unsupported_architecture", arch = other).into_owned(),
+            ))
         }
     };
     Ok(format!("{ROOTFS_IMAGE}-{arch}.tar.xz"))
@@ -2078,7 +2309,7 @@ fn restored_daemon_config(saved: &str, image: &str) -> Result<String, String> {
     let Value::Object(mut saved) =
         serde_json::from_str::<Value>(saved).map_err(|error| error.to_string())?
     else {
-        return Err("daemon.json 必须是 JSON 对象".into());
+        return Err(t!("runtime_host.error.daemon_json_must_be_object").into_owned());
     };
     if let Ok(Value::Object(image)) = serde_json::from_str::<Value>(image) {
         if let Some(Value::Object(image_runtimes)) = image.get("runtimes") {

@@ -197,7 +197,12 @@ where
             .ok()
             .and_then(|text| text.split(';').next())
             .and_then(|size| u64::from_str_radix(size.trim(), 16).ok())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "无效的分块长度"))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    t!("runtime_host.error.invalid_chunk_length").into_owned(),
+                )
+            })?;
         if size == 0 {
             // Trailers end with a blank line.
             loop {

@@ -73,7 +73,7 @@ impl RuskerApp {
         self.images.detail.selected_layer = None;
         let Some(engine) = self.engine.clone() else {
             self.images.detail.loading = false;
-            self.images.detail.error = Some("容器引擎不可用，请连接引擎后重试。".into());
+            self.images.detail.error = Some(t!("images.detail.engine_unavailable").into_owned());
             cx.notify();
             return;
         };
@@ -122,7 +122,7 @@ impl RuskerApp {
                     .small()
                     .pointer(true)
                     .icon(IconName::ChevronLeft)
-                    .tooltip("返回镜像列表")
+                    .tooltip(t!("images.detail.back").into_owned())
                     .on_click(cx.listener(|this, _, _, cx| this.close_image_detail(cx))),
             )
             .child(
@@ -154,7 +154,7 @@ impl RuskerApp {
                                 list_action_button("copy-image-detail-id", cx.theme().primary, cx)
                                     .xsmall()
                                     .icon(IconName::Copy)
-                                    .tooltip("复制完整镜像 ID")
+                                    .tooltip(t!("images.detail.copy_id").into_owned())
                                     .on_click(move |_, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             copy_id.clone(),
@@ -169,11 +169,15 @@ impl RuskerApp {
                     .items_center()
                     .gap_5()
                     .child(header_fact(
-                        "创建时间",
+                        t!("images.column.created").into_owned(),
                         format_relative(row.created, now()),
                         cx,
                     ))
-                    .child(header_fact("大小", format_bytes(row.size), cx)),
+                    .child(header_fact(
+                        t!("images.column.size").into_owned(),
+                        format_bytes(row.size),
+                        cx,
+                    )),
             )
             .child(
                 div()
@@ -185,7 +189,7 @@ impl RuskerApp {
                             .primary()
                             .pointer(!busy)
                             .icon(IconName::Play)
-                            .label("运行")
+                            .label(t!("images.action.run").into_owned())
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_create_container_dialog(
@@ -200,7 +204,7 @@ impl RuskerApp {
                             .outline()
                             .pointer(!busy)
                             .icon(IconName::ChevronDown)
-                            .tooltip("更多镜像操作")
+                            .tooltip(t!("images.detail.more").into_owned())
                             .disabled(busy)
                             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                                 image_menu(menu, &menu_row, menu_weak.clone())
@@ -211,7 +215,7 @@ impl RuskerApp {
                             .danger()
                             .pointer(!busy)
                             .icon(AssetIcon::Trash)
-                            .tooltip("删除镜像")
+                            .tooltip(t!("images.detail.delete").into_owned())
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.confirm_remove_image_row(&remove_row, window, cx);
@@ -224,8 +228,8 @@ impl RuskerApp {
         let detail = &self.images.detail;
         let busy = self.busy.is_some();
         let layers_title = match &detail.data {
-            Some(data) => format!("镜像层（{}）", data.layers.len()),
-            None => "镜像层".into(),
+            Some(data) => t!("images.detail.layers_count", count = data.layers.len()).into_owned(),
+            None => t!("images.detail.layers").into_owned(),
         };
         div()
             .flex_1()
@@ -245,7 +249,7 @@ impl RuskerApp {
                         list_action_button("refresh-image-detail", cx.theme().foreground, cx)
                             .small()
                             .icon(IconName::RotateCw)
-                            .tooltip("刷新镜像详情")
+                            .tooltip(t!("images.detail.refresh").into_owned())
                             .loading(detail.loading)
                             .disabled(detail.loading || busy)
                             .on_click(cx.listener(|this, _, _, cx| this.load_image_detail(cx))),
@@ -268,9 +272,21 @@ impl RuskerApp {
                     .underline()
                     .h(px(52.))
                     .selected_index(detail.tab)
-                    .child(Tab::new().cursor_pointer().label("漏洞"))
-                    .child(Tab::new().cursor_pointer().label("软件包"))
-                    .child(Tab::new().cursor_pointer().label("镜像信息"))
+                    .child(
+                        Tab::new()
+                            .cursor_pointer()
+                            .label(t!("images.detail.tab.vulnerabilities").into_owned()),
+                    )
+                    .child(
+                        Tab::new()
+                            .cursor_pointer()
+                            .label(t!("images.detail.tab.packages").into_owned()),
+                    )
+                    .child(
+                        Tab::new()
+                            .cursor_pointer()
+                            .label(t!("images.detail.tab.info").into_owned()),
+                    )
                     .on_click(move |index, _, cx| {
                         _ = tab_weak.update(cx, |this, cx| {
                             this.images.detail.tab = *index;
@@ -302,7 +318,7 @@ impl RuskerApp {
                 div().px_6().pt_4().child(
                     Breadcrumb::new()
                         .child(
-                            BreadcrumbItem::new("镜像")
+                            BreadcrumbItem::new(t!("images.title").into_owned())
                                 .text_color(cx.theme().primary)
                                 .on_click(move |_, _, cx| {
                                     _ = back.update(cx, |this, cx| this.close_image_detail(cx));
@@ -337,8 +353,8 @@ impl RuskerApp {
             .overflow_y_scroll();
         if detail.loading {
             return panel.child(empty_state(
-                "正在读取镜像层…",
-                "从容器引擎获取构建历史。",
+                t!("images.detail.loading").into_owned(),
+                t!("images.detail.loading_hint").into_owned(),
                 cx,
             ));
         }
@@ -359,7 +375,7 @@ impl RuskerApp {
                         button("retry-image-detail")
                             .outline()
                             .pointer(true)
-                            .label("重试")
+                            .label(t!("images.detail.retry").into_owned())
                             .on_click(cx.listener(|this, _, _, cx| this.load_image_detail(cx))),
                     ),
             );
@@ -369,8 +385,8 @@ impl RuskerApp {
         };
         if data.layers.is_empty() {
             return panel.child(empty_state(
-                "没有镜像层历史",
-                "引擎未返回该镜像的构建历史。",
+                t!("images.detail.no_layers").into_owned(),
+                t!("images.detail.no_layers_hint").into_owned(),
                 cx,
             ));
         }
@@ -392,7 +408,7 @@ impl RuskerApp {
     ) -> Div {
         let selected = self.images.detail.selected_layer == Some(index);
         let command = if layer.created_by.trim().is_empty() {
-            "（未提供构建命令）".to_string()
+            t!("images.detail.no_command").into_owned()
         } else {
             layer.created_by.clone()
         };
@@ -453,7 +469,7 @@ impl RuskerApp {
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .child(muted("构建命令", cx))
+                                .child(muted(t!("images.detail.build_command").into_owned(), cx))
                                 .child(
                                     list_action_button(
                                         ("copy-image-layer", index),
@@ -462,7 +478,7 @@ impl RuskerApp {
                                     )
                                     .xsmall()
                                     .icon(IconName::Copy)
-                                    .tooltip("复制完整构建命令")
+                                    .tooltip(t!("images.detail.copy_command").into_owned())
                                     .on_click(
                                         move |_, _, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
@@ -478,12 +494,24 @@ impl RuskerApp {
                                 .font_family(cx.theme().mono_font_family.clone())
                                 .child(command),
                         )
-                        .child(detail_row("创建时间", format_timestamp(layer.created), cx))
+                        .child(detail_row(
+                            t!("images.column.created").into_owned(),
+                            format_timestamp(layer.created),
+                            cx,
+                        ))
                         .when(!layer.id.is_empty(), |this| {
-                            this.child(detail_row("层 ID", layer.id.clone(), cx))
+                            this.child(detail_row(
+                                t!("images.detail.layer_id").into_owned(),
+                                layer.id.clone(),
+                                cx,
+                            ))
                         })
                         .when(!layer.comment.is_empty(), |this| {
-                            this.child(detail_row("备注", layer.comment.clone(), cx))
+                            this.child(detail_row(
+                                t!("images.detail.comment").into_owned(),
+                                layer.comment.clone(),
+                                cx,
+                            ))
                         }),
                 )
             })
@@ -511,24 +539,31 @@ impl RuskerApp {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Icon::new(AssetIcon::Layers2).size(px(32.)).text_color(cx.theme().muted_foreground)),
+                    .child(
+                        Icon::new(AssetIcon::Layers2)
+                            .size(px(32.))
+                            .text_color(cx.theme().muted_foreground),
+                    ),
             )
             .child(div().text_lg().font_semibold().child(if packages {
-                "尚未生成软件包清单"
+                t!("images.detail.packages_title").into_owned()
             } else {
-                "此镜像尚未进行漏洞分析"
+                t!("images.detail.vulnerabilities_title").into_owned()
             }))
-            .child(muted(if packages {
-                "软件包清单需要通过 SBOM 分析工具生成，无法仅从镜像构建历史中获取。"
-            } else {
-                "Rusker 尚未接入镜像安全扫描服务，当前无法提供漏洞检测结果。未分析不代表没有漏洞。"
-            }, cx))
-            .child(muted("镜像不会被自动上传至第三方服务。", cx))
+            .child(muted(
+                if packages {
+                    t!("images.detail.packages_description").into_owned()
+                } else {
+                    t!("images.detail.vulnerabilities_description").into_owned()
+                },
+                cx,
+            ))
+            .child(muted(t!("images.detail.no_upload").into_owned(), cx))
             .child(
                 button("show-image-metadata")
                     .outline()
                     .pointer(true)
-                    .label("查看镜像信息")
+                    .label(t!("images.detail.view_info").into_owned())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.images.detail.tab = 2;
                         cx.notify();
@@ -549,7 +584,7 @@ impl RuskerApp {
                     .join("\n")
             })
             .filter(|tags| !tags.is_empty())
-            .unwrap_or_else(|| "无标签".into());
+            .unwrap_or_else(|| t!("images.detail.no_tags").into_owned());
         let digests = image
             .map(|image| image.digests.join("\n"))
             .filter(|digests| !digests.is_empty())
@@ -570,17 +605,41 @@ impl RuskerApp {
             .flex()
             .flex_col()
             .gap_4()
-            .child(detail_row("镜像 ID", row.id.clone(), cx))
-            .child(detail_row("平台", platform, cx))
-            .child(detail_row("标签", tags, cx))
-            .child(detail_row("摘要", digests, cx))
-            .child(detail_row("创建时间", format_timestamp(row.created), cx))
-            .child(detail_row("大小", format_bytes(row.size), cx))
-            .child(detail_row("使用的容器", row.containers.to_string(), cx))
+            .child(detail_row(
+                t!("images.column.id").into_owned(),
+                row.id.clone(),
+                cx,
+            ))
+            .child(detail_row(
+                t!("images.detail.platform").into_owned(),
+                platform,
+                cx,
+            ))
+            .child(detail_row(t!("images.column.tag").into_owned(), tags, cx))
+            .child(detail_row(
+                t!("images.detail.digests").into_owned(),
+                digests,
+                cx,
+            ))
+            .child(detail_row(
+                t!("images.column.created").into_owned(),
+                format_timestamp(row.created),
+                cx,
+            ))
+            .child(detail_row(
+                t!("images.column.size").into_owned(),
+                format_bytes(row.size),
+                cx,
+            ))
+            .child(detail_row(
+                t!("images.detail.containers").into_owned(),
+                row.containers.to_string(),
+                cx,
+            ))
     }
 }
 
-fn header_fact(label: &'static str, value: String, cx: &gpui_kit::App) -> Div {
+fn header_fact(label: String, value: String, cx: &gpui_kit::App) -> Div {
     div()
         .flex()
         .flex_col()

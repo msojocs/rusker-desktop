@@ -32,22 +32,22 @@ use crate::settings::{DockerProxySettings, NetworkSettings, ResourceSaverSetting
 
 #[derive(Debug, Error)]
 pub enum RuntimeHostError {
-    #[error("当前平台不支持 Rusker WSL2 运行环境")]
+    #[error("{}", t!("runtime_host.error.unsupported_platform"))]
     Unsupported,
     #[error("{0}")]
     Conflict(String),
-    #[error("{action}失败：{message}")]
+    #[error("{}", t!("runtime_host.error.command_failed", action = action, message = message))]
     Command { action: String, message: String },
-    #[error("{action}超时（{seconds} 秒）")]
+    #[error("{}", t!("runtime_host.error.command_timeout", action = action, seconds = seconds))]
     Timeout { action: String, seconds: u64 },
-    #[error("{action}失败：{source}")]
+    #[error("{}", t!("runtime_host.error.io_failed", action = action, source = source))]
     Io {
-        action: &'static str,
+        action: String,
         source: std::io::Error,
     },
-    #[error("运行环境状态文件无效：{0}")]
+    #[error("{}", t!("runtime_host.error.state_invalid", detail = .0))]
     State(String),
-    #[error("WSL2 后台任务异常结束：{0}")]
+    #[error("{}", t!("runtime_host.error.task_ended", detail = .0))]
     Task(String),
 }
 
@@ -70,7 +70,7 @@ impl RuntimeHostService {
             .thread_name("rusker-runtime-host")
             .build()
             .map_err(|source| RuntimeHostError::Io {
-                action: "创建 WSL2 后台运行时",
+                action: t!("runtime_host.action.create_runtime").into_owned(),
                 source,
             })?;
         let host = Arc::new(wsl::WslHost::discover()?);
@@ -338,8 +338,20 @@ impl RuntimeHostService {
             let mut failures = Vec::new();
             for (distribution, enabled) in changes {
                 if let Err(error) = host.set_integration(&distribution, enabled).await {
-                    let action = if enabled { "启用" } else { "停用" };
-                    failures.push(format!("{action} {distribution} 集成失败：{error}"));
+                    let action = if enabled {
+                        t!("runtime_host.action.enable").into_owned()
+                    } else {
+                        t!("runtime_host.action.disable").into_owned()
+                    };
+                    failures.push(
+                        t!(
+                            "runtime_host.error.integration_failed",
+                            action = action,
+                            distribution = distribution,
+                            error = error
+                        )
+                        .into_owned(),
+                    );
                     if enabled {
                         effective.remove(&distribution);
                     } else {
@@ -384,9 +396,14 @@ async fn engine_watchdog(host: Arc<wsl::WslHost>, lock: Arc<Mutex<()>>) {
         match host.recover(attempt).await {
             Ok(()) => attempt = 0,
             Err(error) if attempt >= MAX_RECOVERY_ATTEMPTS => {
-                host.give_up_recovery(format!(
-                    "Engine 意外退出，自动重启 {attempt} 次均失败：{error}"
-                ));
+                host.give_up_recovery(
+                    t!(
+                        "runtime_host.error.engine_recovery_failed",
+                        attempt = attempt,
+                        error = error
+                    )
+                    .into_owned(),
+                );
                 attempt = 0;
             }
             Err(_) => {}

@@ -118,9 +118,9 @@ impl DataDisk {
     pub fn wwid(&self) -> Result<String, RuntimeHostError> {
         let id = &self.id;
         if id.len() != 32 || !id.chars().all(|character| character.is_ascii_hexdigit()) {
-            return Err(RuntimeHostError::State(format!(
-                "Docker 数据磁盘 ID 无效：{id}"
-            )));
+            return Err(RuntimeHostError::State(
+                t!("runtime_host.error.disk_id_invalid", id = id).into_owned(),
+            ));
         }
         Ok(format!("60022480{}{}", &id[..12], &id[20..]).to_lowercase())
     }
@@ -132,12 +132,19 @@ pub fn state_path(root: &Path) -> PathBuf {
 
 pub fn load(root: &Path) -> Result<Option<DataDisk>, RuntimeHostError> {
     match fs::read_to_string(state_path(root)) {
-        Ok(text) => serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|error| RuntimeHostError::State(format!("{STATE_FILE}：{error}"))),
+        Ok(text) => serde_json::from_str(&text).map(Some).map_err(|error| {
+            RuntimeHostError::State(
+                t!(
+                    "runtime_host.error.state_file_invalid",
+                    file = STATE_FILE,
+                    error = error
+                )
+                .into_owned(),
+            )
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(RuntimeHostError::Io {
-            action: "读取 Docker 数据磁盘记录",
+            action: t!("runtime_host.action.read_disk_record").into_owned(),
             source,
         }),
     }
@@ -146,7 +153,7 @@ pub fn load(root: &Path) -> Result<Option<DataDisk>, RuntimeHostError> {
 /// Atomically replaces the state file.
 pub fn save(root: &Path, disk: &DataDisk) -> Result<(), RuntimeHostError> {
     let io = |source| RuntimeHostError::Io {
-        action: "写入 Docker 数据磁盘记录",
+        action: t!("runtime_host.action.write_disk_record").into_owned(),
         source,
     };
     fs::create_dir_all(root).map_err(io)?;
@@ -160,15 +167,18 @@ pub fn save(root: &Path, disk: &DataDisk) -> Result<(), RuntimeHostError> {
 /// Creates a new, empty dynamically expanding VHDX in `directory`.
 pub fn create(directory: &Path) -> Result<DataDisk, RuntimeHostError> {
     fs::create_dir_all(directory).map_err(|source| RuntimeHostError::Io {
-        action: "创建 Docker 数据磁盘目录",
+        action: t!("runtime_host.action.create_disk_directory").into_owned(),
         source,
     })?;
     let path = directory.join(DATA_DISK_FILE);
     if path.exists() {
-        return Err(RuntimeHostError::Conflict(format!(
-            "{} 已存在，拒绝覆盖",
-            path.display()
-        )));
+        return Err(RuntimeHostError::Conflict(
+            t!(
+                "runtime_host.error.already_exists_refuse_overwrite",
+                path = path.display()
+            )
+            .into_owned(),
+        ));
     }
     let id = random_id(&path);
     create_vhdx(&path, &id, DATA_DISK_MAX_SIZE)?;
@@ -180,27 +190,41 @@ pub fn create(directory: &Path) -> Result<DataDisk, RuntimeHostError> {
 /// after the copy succeeded.
 pub fn move_file(disk: &DataDisk, directory: &Path) -> Result<DataDisk, RuntimeHostError> {
     let io = |action, source| RuntimeHostError::Io { action, source };
-    fs::create_dir_all(directory).map_err(|source| io("创建目标目录", source))?;
+    fs::create_dir_all(directory).map_err(|source| {
+        io(
+            t!("runtime_host.action.create_target_dir").into_owned(),
+            source,
+        )
+    })?;
     let target = directory.join(DATA_DISK_FILE);
     if target.exists() {
-        return Err(RuntimeHostError::Conflict(format!(
-            "目标目录已有 {}，拒绝覆盖",
-            target.display()
-        )));
+        return Err(RuntimeHostError::Conflict(
+            t!(
+                "runtime_host.error.target_dir_has_existing",
+                path = target.display()
+            )
+            .into_owned(),
+        ));
     }
     if fs::rename(&disk.path, &target).is_err() {
         let partial = directory.join(format!("{DATA_DISK_FILE}.partial"));
         if let Err(source) = fs::copy(&disk.path, &partial) {
             let _ = fs::remove_file(&partial);
-            return Err(io("复制 Docker 数据磁盘", source));
+            return Err(io(t!("runtime_host.action.copy_disk").into_owned(), source));
         }
         if let Err(source) = fs::rename(&partial, &target) {
             let _ = fs::remove_file(&partial);
-            return Err(io("保存复制的 Docker 数据磁盘", source));
+            return Err(io(
+                t!("runtime_host.action.save_copied_disk").into_owned(),
+                source,
+            ));
         }
         if let Err(source) = fs::remove_file(&disk.path) {
             let _ = fs::remove_file(&target);
-            return Err(io("删除原 Docker 数据磁盘", source));
+            return Err(io(
+                t!("runtime_host.action.remove_original_disk").into_owned(),
+                source,
+            ));
         }
     }
     Ok(DataDisk {
@@ -361,7 +385,7 @@ fn create_vhdx(path: &Path, id: &[u8; 16], size: u64) -> Result<(), RuntimeHostE
     };
     if status != 0 {
         return Err(RuntimeHostError::Io {
-            action: "创建 Docker 数据磁盘",
+            action: t!("runtime_host.action.create_disk").into_owned(),
             source: std::io::Error::from_raw_os_error(status as i32),
         });
     }

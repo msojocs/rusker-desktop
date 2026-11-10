@@ -1,0 +1,43 @@
+_version: 2
+ui.cancel:
+  en: "Cancel"
+  zh-CN: "取消"
+ui.copy_json:
+  en: "Copy JSON"
+  zh-CN: "复制 JSON"
+ui.waiting_for_samples:
+  en: "Waiting for samples"
+  zh-CN: "等待采样"
+ui.terminal_search_placeholder:
+  en: "Search terminal output"
+  zh-CN: "搜索终端输出"
+ui.paste_too_large:
+  en: "A single paste cannot exceed 64 KiB"
+  zh-CN: "单次粘贴不能超过 64 KiB"
+ui.terminal_input_not_sent:
+  en: "Terminal input was not sent: %{error}"
+  zh-CN: "终端输入未发送：%{error}"
+ui.regex:
+  en: "Regular expression"
+  zh-CN: "正则表达式"
+ui.previous_match:
+  en: "Previous match (Shift+Enter)"
+  zh-CN: "上一处（Shift+Enter）"
+ui.next_match:
+  en: "Next match (Enter)"
+  zh-CN: "下一处（Enter）"
+ui.close_search:
+  en: "Close search (Esc)"
+  zh-CN: "关闭搜索（Esc）"
+ui.invalid_regex:
+  en: "Invalid regular expression: %{error}"
+  zh-CN: "无效正则表达式：%{error}"
+ui.search_ctrl_f:
+  en: "Search (Ctrl+F)"
+  zh-CN: "搜索（Ctrl+F）"
+ui.copy_output:
+  en: "Copy output"
+  zh-CN: "复制输出"
+ui.clear_screen:
+  en: "Clear screen"
+  zh-CN: "清屏"

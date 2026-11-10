@@ -17,7 +17,9 @@ pub enum TrayCommand {
 }
 
 pub struct TrayMenu {
-    _icon: TrayIcon,
+    icon: TrayIcon,
+    /// Items with their translation keys, relabeled on a language switch.
+    items: Vec<(MenuItem, &'static str)>,
     show_id: MenuId,
     minimize_id: MenuId,
     refresh_id: MenuId,
@@ -29,13 +31,14 @@ pub struct TrayMenu {
 
 impl TrayMenu {
     pub fn new() -> Result<Self, String> {
-        let show = MenuItem::new("显示主窗口", true, None);
-        let minimize = MenuItem::new("最小化到托盘", true, None);
-        let refresh = MenuItem::new("刷新容器状态", true, None);
-        let containers = MenuItem::new("打开容器", true, None);
-        let images = MenuItem::new("打开镜像", true, None);
-        let settings = MenuItem::new("打开设置", true, None);
-        let quit = MenuItem::new("退出 Rusker", true, None);
+        let item = |key: &'static str| MenuItem::new(t!(key), true, None);
+        let show = item("tray.show");
+        let minimize = item("tray.minimize");
+        let refresh = item("tray.refresh");
+        let containers = item("tray.containers");
+        let images = item("tray.images");
+        let settings = item("tray.settings");
+        let quit = item("tray.quit");
         let ids = (
             show.id().clone(),
             minimize.id().clone(),
@@ -58,20 +61,29 @@ impl TrayMenu {
             &PredefinedMenuItem::separator(),
             &quit,
         ])
-        .map_err(|error| format!("创建托盘菜单失败：{error}"))?;
+        .map_err(|error| t!("tray.error.menu", error = error).into_owned())?;
         let (rgba, width, height) = decode_icon(ICON_PNG)?;
         let icon = Icon::from_rgba(rgba, width, height)
-            .map_err(|error| format!("创建托盘图标失败：{error}"))?;
+            .map_err(|error| t!("tray.error.icon", error = error).into_owned())?;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
-            .with_tooltip("Rusker Desktop — 容器管理")
+            .with_tooltip(t!("tray.tooltip"))
             .with_icon(icon)
             .build()
-            .map_err(|error| format!("初始化系统托盘失败：{error}"))?;
+            .map_err(|error| t!("tray.error.init", error = error).into_owned())?;
 
         Ok(Self {
-            _icon: tray,
+            icon: tray,
+            items: vec![
+                (show, "tray.show"),
+                (minimize, "tray.minimize"),
+                (refresh, "tray.refresh"),
+                (containers, "tray.containers"),
+                (images, "tray.images"),
+                (settings, "tray.settings"),
+                (quit, "tray.quit"),
+            ],
             show_id: ids.0,
             minimize_id: ids.1,
             refresh_id: ids.2,
@@ -80,6 +92,14 @@ impl TrayMenu {
             settings_id: ids.5,
             quit_id: ids.6,
         })
+    }
+
+    /// Relabels the menu and tooltip in the current language.
+    pub fn retranslate(&self) {
+        for (item, key) in &self.items {
+            item.set_text(t!(*key));
+        }
+        _ = self.icon.set_tooltip(Some(t!("tray.tooltip")));
     }
 
     pub fn drain_commands(&self) -> Vec<TrayCommand> {
@@ -131,16 +151,16 @@ fn decode_icon(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     );
     let mut reader = decoder
         .read_info()
-        .map_err(|error| format!("解析托盘图标失败：{error}"))?;
+        .map_err(|error| t!("tray.error.decode", error = error).into_owned())?;
     let size = reader
         .output_buffer_size()
-        .ok_or_else(|| "解析托盘图标失败：图像过大".to_string())?;
+        .ok_or_else(|| t!("tray.error.decode", error = t!("tray.error.too_large")).into_owned())?;
     let mut buffer = vec![0; size];
     let info = reader
         .next_frame(&mut buffer)
-        .map_err(|error| format!("解析托盘图标失败：{error}"))?;
+        .map_err(|error| t!("tray.error.decode", error = error).into_owned())?;
     if info.color_type != png::ColorType::Rgba {
-        return Err(format!("托盘图标颜色格式不受支持：{:?}", info.color_type));
+        return Err(t!("tray.error.color", color = format!("{:?}", info.color_type)).into_owned());
     }
     buffer.truncate(info.buffer_size());
     Ok((buffer, info.width, info.height))

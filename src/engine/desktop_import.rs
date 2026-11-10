@@ -19,12 +19,10 @@ impl DesktopImportSource {
         }
     }
 
-    pub fn connection_hint(self) -> &'static str {
+    pub fn connection_hint(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::DockerDesktop => "请先启动 Docker Desktop 并切换到 Linux 容器",
-            Self::RancherDesktop => {
-                "请先启动 Rancher Desktop 并选择 dockerd (moby)；不支持 containerd/nerdctl 后端"
-            }
+            Self::DockerDesktop => t!("engine.desktop.hint_docker_desktop"),
+            Self::RancherDesktop => t!("engine.desktop.hint_rancher_desktop"),
         }
     }
 
@@ -58,7 +56,12 @@ impl DockerEngine {
         {
             // Never consult DOCKER_HOST or the active Docker context.
             let client = pooled_named_pipe(source.pipe())?;
-            let action = format!("连接 {}（{}）", source.label(), source.connection_hint());
+            let action = t!(
+                "engine.desktop.connect_source",
+                source = source.label(),
+                hint = source.connection_hint()
+            )
+            .into_owned();
             let client = with_timeout(&action, CONNECT_TIMEOUT, client.negotiate_version()).await?;
             if source == DesktopImportSource::RancherDesktop {
                 // Rancher shares docker_engine with other products. Compare daemon IDs
@@ -79,25 +82,28 @@ impl DockerEngine {
                 let output = timeout(CONNECT_TIMEOUT, command.output())
                     .await
                     .map_err(|_| EngineError::Timeout {
-                        action: "验证 Rancher Desktop 引擎身份".into(),
+                        action: t!("engine.desktop.verify_rancher_identity").into_owned(),
                         seconds: CONNECT_TIMEOUT.as_secs(),
                     })?
                     .map_err(|error| {
-                        EngineError::operation("验证 Rancher Desktop 引擎身份", error)
+                        EngineError::operation(t!("engine.desktop.verify_rancher_identity"), error)
                     })?;
                 if !output.status.success() {
                     return Err(EngineError::operation(
-                        "验证 Rancher Desktop 引擎身份",
-                        format!(
-                            "{}；{}",
-                            source.connection_hint(),
-                            String::from_utf8_lossy(&output.stderr).trim()
+                        t!("engine.desktop.verify_rancher_identity"),
+                        t!(
+                            "engine.desktop.hint_with_stderr",
+                            hint = source.connection_hint(),
+                            stderr = String::from_utf8_lossy(&output.stderr).trim()
                         ),
                     ));
                 }
-                let info =
-                    with_timeout("验证 Rancher Desktop 管道", REQUEST_TIMEOUT, client.info())
-                        .await?;
+                let info = with_timeout(
+                    &t!("engine.desktop.verify_rancher_pipe"),
+                    REQUEST_TIMEOUT,
+                    client.info(),
+                )
+                .await?;
                 verify_rancher_identity(
                     info.id.as_deref(),
                     &String::from_utf8_lossy(&output.stdout),
@@ -110,8 +116,11 @@ impl DockerEngine {
         }
         #[cfg(not(windows))]
         Err(EngineError::operation(
-            format!("连接 {}", source.label()),
-            "目前仅支持 Windows 的 Linux 容器后端",
+            t!(
+                "engine.desktop.connect_source_plain",
+                source = source.label()
+            ),
+            t!("engine.desktop.windows_only"),
         ))
     }
 
@@ -120,7 +129,7 @@ impl DockerEngine {
     ) -> Result<Vec<DesktopContainer>, EngineError> {
         let source = Self::desktop_source(source).await?;
         let containers = with_timeout(
-            "扫描源引擎容器",
+            &t!("engine.desktop.scan_source_containers"),
             REQUEST_TIMEOUT,
             source.client.list_containers(Some(
                 ListContainersOptionsBuilder::default().all(true).build(),
@@ -131,7 +140,7 @@ impl DockerEngine {
         for container in containers {
             let dto = container_dto(container);
             let inspected = with_timeout(
-                "读取源容器配置",
+                &t!("engine.desktop.read_source_container_config"),
                 REQUEST_TIMEOUT,
                 source.client.inspect_container(&dto.id, None),
             )
@@ -162,24 +171,26 @@ impl DockerEngine {
     ) -> Result<DesktopImportReport, EngineError> {
         if !self.managed_wsl {
             return Err(EngineError::operation(
-                "导入桌面引擎容器",
-                "目标必须是 Rusker 受管 Engine，请取消 DOCKER_HOST 覆盖",
+                t!("engine.desktop.import_desktop_containers"),
+                t!("engine.desktop.target_must_be_managed"),
             ));
         }
         let source = Self::desktop_source(source).await?;
+        let source_action = t!("engine.desktop.check_source_engine");
+        let target_action = t!("engine.desktop.check_target_engine");
         let (source_info, target_info) = tokio::try_join!(
-            with_timeout("检查源引擎", REQUEST_TIMEOUT, source.client.info()),
-            with_timeout("检查目标引擎", REQUEST_TIMEOUT, self.client.info()),
+            with_timeout(&source_action, REQUEST_TIMEOUT, source.client.info()),
+            with_timeout(&target_action, REQUEST_TIMEOUT, self.client.info()),
         )?;
         if source_info.id.is_none() || source_info.id == target_info.id {
             return Err(EngineError::operation(
-                "导入桌面引擎容器",
-                "源与目标引擎相同或无法确认源引擎身份",
+                t!("engine.desktop.import_desktop_containers"),
+                t!("engine.desktop.same_engine"),
             ));
         }
         // TempDir is private and removes archives (which can contain secrets) on every exit path.
         let scratch = tempfile::tempdir()
-            .map_err(|error| EngineError::operation("准备导入临时目录", error))?;
+            .map_err(|error| EngineError::operation(t!("engine.desktop.prepare_scratch"), error))?;
         let batch = format!(
             "{}-{}",
             std::process::id(),
@@ -195,12 +206,15 @@ impl DockerEngine {
             if !seen.insert(id.clone()) {
                 continue;
             }
-            let _ = progress.send(format!(
-                "正在导入 {}/{}：{}",
-                index + 1,
-                ids.len(),
-                short_id(id)
-            ));
+            let _ = progress.send(
+                t!(
+                    "engine.desktop.importing_progress",
+                    index = index + 1,
+                    total = ids.len(),
+                    id = short_id(id)
+                )
+                .into_owned(),
+            );
             let mut created_volumes = Vec::new();
             let image = format!("rusker-import/{batch}-{index}:latest");
             let result = self
@@ -218,16 +232,22 @@ impl DockerEngine {
             match result {
                 Ok(name) => report.imported.push(name),
                 Err(error) => {
-                    let mut detail = format!("{}：{error}", short_id(id));
+                    let mut detail =
+                        t!("engine.desktop.id_detail", id = short_id(id), error = error)
+                            .into_owned();
                     // Only resources created by this attempt are eligible for cleanup.
                     for (original, target) in created_volumes {
                         volumes.remove(&original);
                         if let Err(error) = self.remove_volume(&target).await {
-                            detail.push_str(&format!("；残留卷 {target} 清理失败：{error}"));
+                            detail.push_str(&t!(
+                                "engine.desktop.leftover_volume_cleanup_failed",
+                                target = target,
+                                error = error
+                            ));
                         }
                     }
                     // An interrupted create may have succeeded remotely. Do not delete its image.
-                    detail.push_str(&format!("；如传输中断，请检查目标容器及导入镜像 {image}"));
+                    detail.push_str(&t!("engine.desktop.interrupted_hint", image = image));
                     report.failures.push(detail);
                 }
             }
@@ -248,7 +268,7 @@ impl DockerEngine {
         progress: &watch::Sender<String>,
     ) -> Result<String, EngineError> {
         let inspect = with_timeout(
-            "读取源容器",
+            &t!("engine.desktop.read_source_container"),
             REQUEST_TIMEOUT,
             source.client.inspect_container(id, None),
         )
@@ -260,22 +280,30 @@ impl DockerEngine {
             .unwrap_or("")
             .trim_start_matches('/');
         if name.is_empty() {
-            return Err(EngineError::operation("导入容器", "源容器没有名称"));
+            return Err(EngineError::operation(
+                t!("engine.desktop.import_container"),
+                t!("engine.desktop.source_container_unnamed"),
+            ));
         }
         match timeout(REQUEST_TIMEOUT, self.client.inspect_container(name, None)).await {
             Ok(Err(BollardError::DockerResponseServerError {
                 status_code: 404, ..
             })) => {}
-            Ok(Err(error)) => return Err(EngineError::operation("检查目标容器名称", error)),
+            Ok(Err(error)) => {
+                return Err(EngineError::operation(
+                    t!("engine.desktop.check_target_container_name"),
+                    error,
+                ))
+            }
             Ok(Ok(_)) => {
                 return Err(EngineError::operation(
-                    "导入容器",
-                    format!("目标容器 {name} 已存在，不会覆盖"),
+                    t!("engine.desktop.import_container"),
+                    t!("engine.desktop.target_container_exists", name = name),
                 ))
             }
             Err(_) => {
                 return Err(EngineError::Timeout {
-                    action: "检查目标容器名称".into(),
+                    action: t!("engine.desktop.check_target_container_name").into_owned(),
                     seconds: REQUEST_TIMEOUT.as_secs(),
                 })
             }
@@ -299,15 +327,15 @@ impl DockerEngine {
                 target.clone()
             } else {
                 let volume = with_timeout(
-                    "检查源卷",
+                    &t!("engine.desktop.check_source_volume"),
                     REQUEST_TIMEOUT,
                     source.client.inspect_volume(original),
                 )
                 .await?;
                 if volume.driver != "local" || !volume.options.is_empty() {
                     return Err(EngineError::operation(
-                        "导入卷",
-                        format!("卷 {original} 不是普通本地卷，无法安全复制"),
+                        t!("engine.desktop.import_volume"),
+                        t!("engine.desktop.volume_not_plain_local", name = original),
                     ));
                 }
                 use sha2::{Digest as _, Sha256};
@@ -316,12 +344,19 @@ impl DockerEngine {
                 self.create_volume(Some(target.clone())).await?;
                 created_volumes.push((original.to_string(), target.clone()));
                 let archive = scratch.join("volume.tar");
-                let _ = progress.send(format!("{name}：复制数据卷 {original}"));
+                let _ = progress.send(
+                    t!(
+                        "engine.desktop.copy_volume_progress",
+                        name = name,
+                        volume = original
+                    )
+                    .into_owned(),
+                );
                 source.export_volume(original, &archive).await?;
                 self.import_volume(&target, &archive).await?;
-                tokio::fs::remove_file(&archive)
-                    .await
-                    .map_err(|error| EngineError::operation("清理临时卷归档", error))?;
+                tokio::fs::remove_file(&archive).await.map_err(|error| {
+                    EngineError::operation(t!("engine.desktop.cleanup_temp_volume_archive"), error)
+                })?;
                 volumes.insert(original.to_string(), target.clone());
                 target
             };
@@ -332,37 +367,35 @@ impl DockerEngine {
             ));
         }
         body.host_config.as_mut().unwrap().mounts = (!mounts.is_empty()).then_some(mounts);
-        let _ = progress.send(format!("{name}：复制容器文件系统（不包含镜像历史）"));
+        let _ = progress.send(t!("engine.desktop.copy_rootfs_progress", name = name).into_owned());
         let archive = scratch.join("rootfs.tar");
-        let mut file = tokio::fs::File::create(&archive)
-            .await
-            .map_err(|error| EngineError::operation("创建临时归档", error))?;
+        let mut file = tokio::fs::File::create(&archive).await.map_err(|error| {
+            EngineError::operation(t!("engine.desktop.create_temp_archive"), error)
+        })?;
         let export = source.client.clone().with_timeout(DATA_TIMEOUT);
         let stream = export.export_container(id);
         pin_mut!(stream);
         let copy = async {
-            while let Some(chunk) = stream
-                .try_next()
-                .await
-                .map_err(|error| EngineError::operation("导出容器文件系统", error))?
-            {
-                file.write_all(&chunk)
-                    .await
-                    .map_err(|error| EngineError::operation("写入临时归档", error))?;
+            while let Some(chunk) = stream.try_next().await.map_err(|error| {
+                EngineError::operation(t!("engine.desktop.export_container_fs"), error)
+            })? {
+                file.write_all(&chunk).await.map_err(|error| {
+                    EngineError::operation(t!("engine.desktop.write_temp_archive"), error)
+                })?;
             }
-            file.flush()
-                .await
-                .map_err(|error| EngineError::operation("写入临时归档", error))
+            file.flush().await.map_err(|error| {
+                EngineError::operation(t!("engine.desktop.write_temp_archive"), error)
+            })
         };
         timeout(DATA_TIMEOUT, copy)
             .await
             .map_err(|_| EngineError::Timeout {
-                action: "导出容器文件系统".into(),
+                action: t!("engine.desktop.export_container_fs").into_owned(),
                 seconds: DATA_TIMEOUT.as_secs(),
             })??;
         drop(file);
         let original_image = with_timeout(
-            "读取源镜像平台",
+            &t!("engine.desktop.read_source_image_platform"),
             REQUEST_TIMEOUT,
             source
                 .client
@@ -379,9 +412,9 @@ impl DockerEngine {
             .repo(image)
             .platform(&platform)
             .build();
-        let file = tokio::fs::File::open(&archive)
-            .await
-            .map_err(|error| EngineError::operation("读取临时归档", error))?;
+        let file = tokio::fs::File::open(&archive).await.map_err(|error| {
+            EngineError::operation(t!("engine.desktop.read_temp_archive"), error)
+        })?;
         let client = self.client.clone().with_timeout(DATA_TIMEOUT);
         let imported = client.create_image(
             Some(options),
@@ -390,14 +423,12 @@ impl DockerEngine {
         );
         pin_mut!(imported);
         let load = async {
-            while let Some(response) = imported
-                .try_next()
-                .await
-                .map_err(|error| EngineError::operation("导入文件系统镜像", error))?
-            {
+            while let Some(response) = imported.try_next().await.map_err(|error| {
+                EngineError::operation(t!("engine.desktop.import_fs_image"), error)
+            })? {
                 if let Some(error) = response.error_detail {
                     return Err(EngineError::operation(
-                        "导入文件系统镜像",
+                        t!("engine.desktop.import_fs_image"),
                         error.message.unwrap_or_default(),
                     ));
                 }
@@ -407,15 +438,15 @@ impl DockerEngine {
         timeout(DATA_TIMEOUT, load)
             .await
             .map_err(|_| EngineError::Timeout {
-                action: "导入文件系统镜像".into(),
+                action: t!("engine.desktop.import_fs_image").into_owned(),
                 seconds: DATA_TIMEOUT.as_secs(),
             })??;
-        tokio::fs::remove_file(&archive)
-            .await
-            .map_err(|error| EngineError::operation("清理临时容器归档", error))?;
+        tokio::fs::remove_file(&archive).await.map_err(|error| {
+            EngineError::operation(t!("engine.desktop.cleanup_temp_container_archive"), error)
+        })?;
         // Recheck after the long copy; a separately started source must not be reported as consistent.
         let current = with_timeout(
-            "复核源容器状态",
+            &t!("engine.desktop.recheck_source_state"),
             REQUEST_TIMEOUT,
             source.client.inspect_container(id, None),
         )
@@ -430,9 +461,10 @@ impl DockerEngine {
                 source.ensure_volume_quiet(volume).await?;
             }
         }
-        let _ = progress.send(format!("{name}：创建目标容器（保持停止）"));
+        let _ =
+            progress.send(t!("engine.desktop.create_target_progress", name = name).into_owned());
         let created = with_timeout(
-            "创建导入容器",
+            &t!("engine.desktop.create_imported_container"),
             ACTION_TIMEOUT,
             self.client.create_container(
                 Some(CreateContainerOptionsBuilder::default().name(name).build()),
@@ -440,13 +472,18 @@ impl DockerEngine {
             ),
         )
         .await?;
-        Ok(format!("{name}（{}）", short_id(&created.id)))
+        Ok(t!(
+            "engine.desktop.imported_name",
+            name = name,
+            id = short_id(&created.id)
+        )
+        .into_owned())
     }
 
     async fn ensure_volume_quiet(&self, name: &str) -> Result<(), EngineError> {
         let filters = HashMap::from([("volume".to_string(), vec![name.to_string()])]);
         let users = with_timeout(
-            "检查源卷使用状态",
+            &t!("engine.desktop.check_source_volume_usage"),
             REQUEST_TIMEOUT,
             self.client.list_containers(Some(
                 ListContainersOptionsBuilder::default()
@@ -467,8 +504,8 @@ impl DockerEngine {
             )
         }) {
             return Err(EngineError::operation(
-                "导入卷",
-                format!("卷 {name} 仍被运行中的源容器使用，请先停止所有使用者"),
+                t!("engine.desktop.import_volume"),
+                t!("engine.desktop.volume_in_use", name = name),
             ));
         }
         Ok(())
@@ -480,32 +517,37 @@ fn verify_rancher_identity(pipe_id: Option<&str>, wsl_id: &str) -> Result<(), En
     let wsl_id = wsl_id.trim();
     if wsl_id.is_empty() || pipe_id != Some(wsl_id) {
         return Err(EngineError::operation(
-            "验证 Rancher Desktop 引擎身份",
-            "docker_engine 管道不属于 Rancher Desktop 或无法确认身份；请关闭占用管道的其他桌面引擎，并确认 Rancher Desktop 使用 dockerd (moby)",
+            t!("engine.desktop.verify_rancher_identity"),
+            t!("engine.desktop.rancher_identity_mismatch"),
         ));
     }
     Ok(())
 }
 
 fn validate_source(inspect: &ContainerInspectResponse) -> Result<(), EngineError> {
-    let reject = |message| Err(EngineError::operation("导入源容器", message));
+    let reject = |message| {
+        Err(EngineError::operation(
+            t!("engine.desktop.import_source_container"),
+            message,
+        ))
+    };
     let state = inspect.state.as_ref();
     if state.is_none_or(|state| {
         state.running != Some(false)
             || state.paused.unwrap_or(false)
             || state.restarting.unwrap_or(false)
     }) {
-        return reject("请先在源桌面引擎中停止容器，再重新扫描");
+        return reject(t!("engine.desktop.stop_source_first"));
     }
     if inspect
         .platform
         .as_deref()
         .is_some_and(|platform| platform != "linux")
     {
-        return reject("目前仅支持 Linux 容器");
+        return reject(t!("engine.desktop.linux_only"));
     }
     if inspect.config.is_none() {
-        return reject("缺少容器配置");
+        return reject(t!("engine.desktop.missing_container_config"));
     }
     for mount in inspect.mounts.as_deref().unwrap_or_default() {
         match mount.typ.as_deref() {
@@ -516,7 +558,7 @@ fn validate_source(inspect: &ContainerInspectResponse) -> Result<(), EngineError
                         .as_deref()
                         .is_some_and(|path| path.starts_with('/')) => {}
             Some("tmpfs") => {}
-            _ => return reject("包含宿主机绑定目录或不支持的挂载，请手动迁移后重建"),
+            _ => return reject(t!("engine.desktop.unsupported_mounts")),
         }
     }
     if let Some(host) = &inspect.host_config {
@@ -525,7 +567,7 @@ fn validate_source(inspect: &ContainerInspectResponse) -> Result<(), EngineError
                 .iter()
                 .any(|mount| !matches!(mount.typ, Some(MountType::VOLUME | MountType::TMPFS)))
         }) {
-            return reject("包含宿主机绑定目录或不支持的挂载，请手动迁移后重建");
+            return reject(t!("engine.desktop.unsupported_mounts"));
         }
         // Created-but-never-started containers can have incomplete Mounts metadata.
         // Do not discard a bind unless inspect resolved it to a known local volume.
@@ -545,7 +587,7 @@ fn validate_source(inspect: &ContainerInspectResponse) -> Result<(), EngineError
                     })
             })
         }) {
-            return reject("挂载尚未解析为本地卷，请先核对源容器挂载配置");
+            return reject(t!("engine.desktop.unresolved_mounts"));
         }
         if host
             .network_mode
@@ -563,14 +605,14 @@ fn validate_source(inspect: &ContainerInspectResponse) -> Result<(), EngineError
                         .is_some_and(|mode| mode.starts_with("container:"))
                 })
         {
-            return reject("包含自定义网络或跨容器依赖，请手动迁移后重建");
+            return reject(t!("engine.desktop.custom_network_deps"));
         }
         if host
             .devices
             .as_ref()
             .is_some_and(|devices| !devices.is_empty())
         {
-            return reject("包含宿主机设备路径，请手动迁移后重建");
+            return reject(t!("engine.desktop.host_devices"));
         }
         if host.mounts.as_ref().is_some_and(|mounts| {
             mounts.iter().any(|mount| {
@@ -582,7 +624,7 @@ fn validate_source(inspect: &ContainerInspectResponse) -> Result<(), EngineError
                 })
             })
         }) {
-            return reject("包含卷子目录挂载，请手动迁移后重建");
+            return reject(t!("engine.desktop.volume_subpath"));
         }
     }
     if inspect
@@ -595,7 +637,7 @@ fn validate_source(inspect: &ContainerInspectResponse) -> Result<(), EngineError
                 .any(|name| !matches!(name.as_str(), "bridge" | "host" | "none"))
         })
     {
-        return reject("包含自定义网络，请手动迁移后重建");
+        return reject(t!("engine.desktop.custom_network"));
     }
     Ok(())
 }
@@ -606,10 +648,12 @@ fn create_body(
 ) -> Result<ContainerCreateBody, EngineError> {
     validate_source(inspect)?;
     // Docker's Config and create request share wire field names, including healthcheck and stop signal.
-    let config = serde_json::to_value(inspect.config.as_ref().unwrap())
-        .map_err(|error| EngineError::operation("转换容器配置", error))?;
-    let mut body: ContainerCreateBody = serde_json::from_value(config)
-        .map_err(|error| EngineError::operation("转换容器配置", error))?;
+    let config = serde_json::to_value(inspect.config.as_ref().unwrap()).map_err(|error| {
+        EngineError::operation(t!("engine.desktop.convert_container_config"), error)
+    })?;
+    let mut body: ContainerCreateBody = serde_json::from_value(config).map_err(|error| {
+        EngineError::operation(t!("engine.desktop.convert_container_config"), error)
+    })?;
     body.image = Some(image.into());
     let mut host = inspect.host_config.clone().unwrap_or_default();
     host.binds = None;
@@ -876,7 +920,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap_err();
-        assert!(error.to_string().contains("已存在"));
+        assert!(error.to_string().contains("already exists"));
         assert_eq!(source_task.await.unwrap().len(), 1);
         assert_eq!(target_task.await.unwrap().len(), 1);
     }
@@ -891,7 +935,7 @@ mod tests {
         .await;
         let error = source.ensure_volume_quiet("shared-data").await.unwrap_err();
         assert!(error.to_string().contains("shared-data"));
-        assert!(error.to_string().contains("停止所有使用者"));
+        assert!(error.to_string().contains("stop all of them first"));
         assert_eq!(task.await.unwrap().len(), 1);
     }
 
@@ -908,7 +952,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("受管 Engine"));
+        assert!(error.to_string().contains("managed engine"));
         assert!(task.await.unwrap().is_empty());
     }
 

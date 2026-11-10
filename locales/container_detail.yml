@@ -1,0 +1,151 @@
+_version: 2
+container_detail.auto_assigned:
+  en: "Auto-assigned"
+  zh-CN: "自动分配"
+container_detail.unbound:
+  en: "Unbound"
+  zh-CN: "未绑定"
+container_detail.engine_unavailable:
+  en: "The container engine is unavailable. Connect an engine and try again."
+  zh-CN: "容器引擎不可用，请连接引擎后重试。"
+container_detail.parse_failed:
+  en: "Failed to parse container details: %{error}"
+  zh-CN: "解析容器详情失败：%{error}"
+container_detail.loading_inspect:
+  en: "Loading container details..."
+  zh-CN: "正在读取容器详情…"
+container_detail.env_vars:
+  en: "Environment variables"
+  zh-CN: "环境变量"
+container_detail.env_name:
+  en: "Name"
+  zh-CN: "变量名"
+container_detail.env_value:
+  en: "Value"
+  zh-CN: "变量值"
+container_detail.copy_env:
+  en: "Copy environment variable (NAME=VALUE)"
+  zh-CN: "复制环境变量（名称=值）"
+container_detail.no_env:
+  en: "No environment variables."
+  zh-CN: "没有环境变量。"
+container_detail.ports:
+  en: "Ports"
+  zh-CN: "端口"
+container_detail.exposed_ports:
+  en: "Exposed by image"
+  zh-CN: "镜像暴露的端口"
+container_detail.bound_ports:
+  en: "Bound ports"
+  zh-CN: "绑定的端口"
+container_detail.no_ports:
+  en: "No exposed or bound ports."
+  zh-CN: "没有暴露或绑定的端口。"
+container_detail.shell_ended:
+  en: "Shell session ended"
+  zh-CN: "Shell 会话已结束"
+container_detail.connecting_shell:
+  en: "Connecting to /bin/sh..."
+  zh-CN: "正在连接 /bin/sh…"
+container_detail.start_first_shell:
+  en: "Start the container before opening a terminal."
+  zh-CN: "请先启动容器再连接命令行。"
+container_detail.container_not_running:
+  en: "Container is not running"
+  zh-CN: "容器未运行"
+container_detail.files_start_hint:
+  en: "Start the container to browse files. Requires sh, find, stat, tr, head and xargs."
+  zh-CN: "启动容器后可浏览文件；需要 sh、find、stat、tr、head 和 xargs。"
+container_detail.refreshing_directory:
+  en: "Refreshing directory; showing previous contents for now..."
+  zh-CN: "正在刷新目录，暂时保留上次内容…"
+container_detail.reading_directory:
+  en: "Loading directory..."
+  zh-CN: "正在读取目录…"
+container_detail.read_failed:
+  en: "Failed to read (showing previous contents if any): %{error}"
+  zh-CN: "读取失败（如有内容则为上次结果）：%{error}"
+container_detail.col_name:
+  en: "Name"
+  zh-CN: "名称"
+container_detail.col_size:
+  en: "Size"
+  zh-CN: "大小"
+container_detail.col_modified:
+  en: "Modified"
+  zh-CN: "修改时间"
+container_detail.col_permissions:
+  en: "Permissions"
+  zh-CN: "权限"
+container_detail.empty_directory:
+  en: "Empty directory"
+  zh-CN: "空目录"
+container_detail.no_files:
+  en: "This directory has no files."
+  zh-CN: "此目录没有文件。"
+container_detail.directory_too_large:
+  en: "Directory is too large; only the first 5000 scanned entries are shown (not sorted across the whole directory)."
+  zh-CN: "目录过大，仅显示扫描到的前 5000 项（非全目录排序）。"
+container_detail.parent_directory:
+  en: "Parent directory"
+  zh-CN: "上一级"
+container_detail.read_only:
+  en: "Read-only"
+  zh-CN: "只读"
+container_detail.read_only_refreshing:
+  en: "Read-only · Refreshing"
+  zh-CN: "只读 · 刷新中"
+container_detail.read_only_cached:
+  en: "Read-only · Cached (30s)"
+  zh-CN: "只读 · 缓存（30 秒）"
+container_detail.refresh_directory:
+  en: "Refresh directory"
+  zh-CN: "刷新目录"
+container_detail.stats_start_hint:
+  en: "Start the container to view resource usage. Historical cache is still kept and cleaned up on the one-hour schedule."
+  zh-CN: "启动容器后可查看资源统计。历史缓存仍按一小时规则保留和清理。"
+container_detail.sample_failed:
+  en: "Sampling failed (retrying automatically): %{error}"
+  zh-CN: "采样失败（自动重试）：%{error}"
+container_detail.collecting_stats:
+  en: "Collecting resource statistics..."
+  zh-CN: "正在采集资源统计…"
+container_detail.cpu_usage:
+  en: "CPU usage"
+  zh-CN: "CPU 使用率"
+container_detail.cpu_subtitle:
+  en: "100% equals one logical CPU"
+  zh-CN: "100% 表示占用一个逻辑 CPU"
+container_detail.series_cpu:
+  en: "CPU"
+  zh-CN: "CPU"
+container_detail.memory_usage:
+  en: "Memory usage"
+  zh-CN: "内存使用量"
+container_detail.memory_limit:
+  en: "Limit %{limit}"
+  zh-CN: "上限 %{limit}"
+container_detail.series_memory:
+  en: "Memory"
+  zh-CN: "内存"
+container_detail.disk_io:
+  en: "Disk I/O"
+  zh-CN: "磁盘读写"
+container_detail.cumulative_since_start:
+  en: "Cumulative since container start"
+  zh-CN: "自容器启动以来的累计值"
+container_detail.series_read:
+  en: "Read"
+  zh-CN: "读取"
+container_detail.series_write:
+  en: "Write"
+  zh-CN: "写入"
+container_detail.network_io:
+  en: "Network I/O"
+  zh-CN: "网络 I/O"
+container_detail.series_receive:
+  en: "Receive"
+  zh-CN: "接收"
+container_detail.series_send:
+  en: "Send"
+  zh-CN: "发送"

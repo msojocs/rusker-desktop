@@ -161,7 +161,7 @@ impl Render for JsonView {
                         .ghost()
                         .small()
                         .icon(IconName::Copy)
-                        .tooltip("复制 JSON")
+                        .tooltip(t!("ui.copy_json"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(this.json.clone()));
                         })),

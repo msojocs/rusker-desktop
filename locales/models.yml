@@ -1,0 +1,115 @@
+_version: 2
+format.just_now:
+  en: "Just now"
+  zh-CN: "刚刚"
+format.minutes_ago:
+  en: "%{count} minutes ago"
+  zh-CN: "%{count} 分钟前"
+format.hours_ago:
+  en: "%{count} hours ago"
+  zh-CN: "%{count} 小时前"
+format.days_ago:
+  en: "%{count} days ago"
+  zh-CN: "%{count} 天前"
+format.months_ago:
+  en: "%{count} months ago"
+  zh-CN: "%{count} 个月前"
+format.years_ago:
+  en: "%{count} years ago"
+  zh-CN: "%{count} 年前"
+format.logs_truncated:
+  en: "... Earlier logs truncated ..."
+  zh-CN: "… 较早日志已截断 …"
+model.action.start:
+  en: "Start container"
+  zh-CN: "启动容器"
+model.action.stop:
+  en: "Stop container"
+  zh-CN: "停止容器"
+model.action.restart:
+  en: "Restart container"
+  zh-CN: "重启容器"
+model.action.remove:
+  en: "Delete container"
+  zh-CN: "删除容器"
+image.filter.all:
+  en: "All images"
+  zh-CN: "全部镜像"
+image.filter.in_use:
+  en: "In use"
+  zh-CN: "使用中"
+image.filter.unused:
+  en: "Unused"
+  zh-CN: "未使用"
+image.filter.dangling:
+  en: "Dangling (untagged)"
+  zh-CN: "悬空（无标签）"
+volume.name_empty:
+  en: "Volume name cannot be empty"
+  zh-CN: "卷名称不能为空"
+volume.name_invalid:
+  en: "Volume name can only contain letters, digits, underscores, dots and hyphens, and must start with a letter or digit"
+  zh-CN: "卷名称只能包含字母、数字、下划线、点和连字符，且必须以字母或数字开头"
+volume.name_too_short:
+  en: "Volume name must be at least 2 characters"
+  zh-CN: "卷名称至少需要 2 个字符"
+volume.invalid_path:
+  en: "Invalid path inside the volume: %{relative}"
+  zh-CN: "无效的卷内路径：%{relative}"
+container.command_parse_failed:
+  en: "Failed to parse start command: %{error}"
+  zh-CN: "启动命令解析失败：%{error}"
+container.env_missing_name:
+  en: "Environment variable value \"%{value}\" is missing a variable name"
+  zh-CN: "环境变量值“%{value}”缺少变量名"
+container.env_invalid_name:
+  en: "Environment variable name \"%{name}\" cannot contain equals signs or whitespace"
+  zh-CN: "环境变量名“%{name}”不能包含等号或空白字符"
+container.env_duplicate:
+  en: "Environment variable %{name} is duplicated"
+  zh-CN: "环境变量 %{name} 重复"
+container.mount_host_empty:
+  en: "Host path mounted at %{target} cannot be empty"
+  zh-CN: "挂载到 %{target} 的宿主机路径不能为空"
+container.mount_container_missing:
+  en: "Host path %{source} is missing a container path"
+  zh-CN: "宿主机路径 %{source} 缺少容器路径"
+container.mount_not_absolute:
+  en: "Container path \"%{target}\" must be an absolute path starting with /"
+  zh-CN: "容器路径“%{target}”必须是以 / 开头的绝对路径"
+container.mount_has_colon:
+  en: "Container path \"%{target}\" cannot contain a colon"
+  zh-CN: "容器路径“%{target}”不能包含冒号"
+container.mount_duplicate:
+  en: "Container path %{target} is mounted more than once"
+  zh-CN: "容器路径 %{target} 被重复挂载"
+container.image_empty:
+  en: "Image reference cannot be empty"
+  zh-CN: "镜像引用不能为空"
+container.image_whitespace:
+  en: "Image reference cannot contain whitespace"
+  zh-CN: "镜像引用不能包含空白字符"
+container.port_must_be_positive:
+  en: "Ports must be greater than 0"
+  zh-CN: "端口必须大于 0"
+container.invalid_host_ip:
+  en: "Invalid host IP address: %{ip}"
+  zh-CN: "无效的宿主机 IP 地址：%{ip}"
+container.host_port_duplicate:
+  en: "Host port %{ip}:%{port} is bound more than once"
+  zh-CN: "宿主机端口 %{ip}:%{port} 被重复绑定"
+container.name_empty:
+  en: "Container name cannot be empty"
+  zh-CN: "容器名称不能为空"
+container.name_invalid:
+  en: "Container name can only contain letters, digits, underscores, dots and hyphens, and must start with a letter or digit"
+  zh-CN: "容器名称只能包含字母、数字、下划线、点和连字符，且必须以字母或数字开头"
+container.name_too_short:
+  en: "Container name must be at least 2 characters"
+  zh-CN: "容器名称至少需要 2 个字符"
+container.port_mapping_invalid:
+  en: "Port mapping \"%{entry}\" is invalid; expected host-port:container-port"
+  zh-CN: "端口映射“%{entry}”无效，应为 宿主机端口:容器端口"
+container.port_invalid:
+  en: "Port \"%{value}\" is invalid; expected an integer between 1 and 65535"
+  zh-CN: "端口“%{value}”无效，应为 1–65535 的整数"

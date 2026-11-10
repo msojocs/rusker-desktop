@@ -83,9 +83,14 @@ pub(super) async fn serve(host: Arc<WslHost>, lock: Arc<Mutex<()>>) {
     let mut server = match create(true) {
         Ok(server) => server,
         Err(error) => {
-            status.set_error(format!(
-                "无法创建 {MANAGED_PIPE}（可能已有另一个 Rusker 实例在运行）：{error}"
-            ));
+            status.set_error(
+                t!(
+                    "runtime_host.error.create_pipe_failed",
+                    pipe = MANAGED_PIPE,
+                    error = error
+                )
+                .into_owned(),
+            );
             return;
         }
     };
@@ -99,7 +104,14 @@ pub(super) async fn serve(host: Arc<WslHost>, lock: Arc<Mutex<()>>) {
             match create(false) {
                 Ok(next) => server = next,
                 Err(error) => {
-                    status.set_error(format!("重建 {MANAGED_PIPE} 失败：{error}"));
+                    status.set_error(
+                        t!(
+                            "runtime_host.error.recreate_pipe_failed",
+                            pipe = MANAGED_PIPE,
+                            error = error
+                        )
+                        .into_owned(),
+                    );
                     return;
                 }
             }
@@ -110,7 +122,14 @@ pub(super) async fn serve(host: Arc<WslHost>, lock: Arc<Mutex<()>>) {
         let next = match create(false) {
             Ok(next) => next,
             Err(error) => {
-                status.set_error(format!("重建 {MANAGED_PIPE} 失败：{error}"));
+                status.set_error(
+                    t!(
+                        "runtime_host.error.recreate_pipe_failed",
+                        pipe = MANAGED_PIPE,
+                        error = error
+                    )
+                    .into_owned(),
+                );
                 return;
             }
         };
@@ -120,8 +139,9 @@ pub(super) async fn serve(host: Arc<WslHost>, lock: Arc<Mutex<()>>) {
         let transport = transport.clone();
         tokio::spawn(async move {
             if let Err(error) = relay(client, &host, &lock, &transport).await {
-                host.proxy_status()
-                    .set_error(format!("Docker API 转发失败：{error}"));
+                host.proxy_status().set_error(
+                    t!("runtime_host.error.docker_api_relay_failed", error = error).into_owned(),
+                );
             }
         });
     }
@@ -186,7 +206,7 @@ async fn wake(host: &WslHost, lock: &Mutex<()>) -> io::Result<()> {
     } else {
         return Err(io::Error::new(
             io::ErrorKind::NotConnected,
-            "Engine 已手动停止",
+            t!("runtime_host.error.engine_stopped_manually").into_owned(),
         ));
     };
     result.map_err(|error| {

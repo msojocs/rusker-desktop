@@ -1,0 +1,391 @@
+_version: 2
+runtime_host.error.unsupported_platform:
+  en: "The current platform does not support the Rusker WSL2 runtime"
+  zh-CN: "当前平台不支持 Rusker WSL2 运行环境"
+runtime_host.error.command_failed:
+  en: "%{action} failed: %{message}"
+  zh-CN: "%{action}失败：%{message}"
+runtime_host.error.command_timeout:
+  en: "%{action} timed out (%{seconds}s)"
+  zh-CN: "%{action}超时（%{seconds} 秒）"
+runtime_host.error.io_failed:
+  en: "%{action} failed: %{source}"
+  zh-CN: "%{action}失败：%{source}"
+runtime_host.error.state_invalid:
+  en: "Runtime state file invalid: %{detail}"
+  zh-CN: "运行环境状态文件无效：%{detail}"
+runtime_host.error.task_ended:
+  en: "WSL2 background task ended unexpectedly: %{detail}"
+  zh-CN: "WSL2 后台任务异常结束：%{detail}"
+runtime_host.error.integration_failed:
+  en: "%{action} integration for %{distribution} failed: %{error}"
+  zh-CN: "%{action} %{distribution} 集成失败：%{error}"
+runtime_host.error.engine_recovery_failed:
+  en: "Engine exited unexpectedly; %{attempt} automatic restart attempts failed: %{error}"
+  zh-CN: "Engine 意外退出，自动重启 %{attempt} 次均失败：%{error}"
+runtime_host.error.disk_id_invalid:
+  en: "Docker data disk ID is invalid: %{id}"
+  zh-CN: "Docker 数据磁盘 ID 无效：%{id}"
+runtime_host.error.state_file_invalid:
+  en: "%{file}: %{error}"
+  zh-CN: "%{file}：%{error}"
+runtime_host.error.already_exists_refuse_overwrite:
+  en: "%{path} already exists; refusing to overwrite"
+  zh-CN: "%{path} 已存在，拒绝覆盖"
+runtime_host.error.target_dir_has_existing:
+  en: "Target directory already contains %{path}; refusing to overwrite"
+  zh-CN: "目标目录已有 %{path}，拒绝覆盖"
+runtime_host.error.start_engine_proxy_relay:
+  en: "Failed to start the Engine proxy relay: %{error}"
+  zh-CN: "无法启动 Engine 代理转发：%{error}"
+runtime_host.error.engine_proxy_stdio_unavailable:
+  en: "Unable to connect to the Engine proxy relay's stdin/stdout"
+  zh-CN: "无法连接 Engine 代理转发的标准输入输出"
+runtime_host.error.engine_proxy_unexpected_exit:
+  en: "Engine proxy relay process exited unexpectedly"
+  zh-CN: "Engine 代理转发进程意外退出"
+runtime_host.error.engine_proxy_exited:
+  en: "Engine proxy relay process exited: %{stderr}"
+  zh-CN: "Engine 代理转发进程退出：%{stderr}"
+runtime_host.error.frame_too_large:
+  en: "Frame too large"
+  zh-CN: "帧过大"
+runtime_host.error.connect_timeout:
+  en: "Connection timed out"
+  zh-CN: "连接超时"
+runtime_host.error.system_root_certs_unreadable:
+  en: "Unable to read system root certificates"
+  zh-CN: "无法读取系统根证书"
+runtime_host.error.invalid_connect_target:
+  en: "Invalid CONNECT target"
+  zh-CN: "CONNECT 目标无效"
+runtime_host.error.connect_failed:
+  en: "Unable to connect to %{host}:%{port}: %{error}"
+  zh-CN: "无法连接 %{host}:%{port}：%{error}"
+runtime_host.error.upstream_connect_failed:
+  en: "Unable to connect to upstream proxy %{host}:%{port}: %{error}"
+  zh-CN: "无法连接上游代理 %{host}:%{port}：%{error}"
+runtime_host.error.absolute_url_only:
+  en: "Only http:// absolute URLs are supported for proxied requests"
+  zh-CN: "仅支持 http:// 绝对地址的代理请求"
+runtime_host.error.server_closed_without_response:
+  en: "The server closed the connection without sending a response"
+  zh-CN: "服务器未返回响应即关闭了连接"
+runtime_host.error.protocol_upgrade_unsupported:
+  en: "The proxy does not support protocol upgrades"
+  zh-CN: "代理不支持协议升级"
+runtime_host.error.invalid_request_headers:
+  en: "Invalid request headers"
+  zh-CN: "请求头无效"
+runtime_host.error.invalid_response_headers:
+  en: "Invalid server response headers"
+  zh-CN: "服务器响应头无效"
+runtime_host.error.invalid_content_length:
+  en: "Invalid Content-Length"
+  zh-CN: "Content-Length 无效"
+runtime_host.error.content_length_mismatch:
+  en: "Inconsistent Content-Length"
+  zh-CN: "Content-Length 不一致"
+runtime_host.error.unsupported_transfer_encoding:
+  en: "Unsupported Transfer-Encoding"
+  zh-CN: "不支持的 Transfer-Encoding"
+runtime_host.error.invalid_chunk_length:
+  en: "Invalid chunk length"
+  zh-CN: "chunk 长度无效"
+runtime_host.error.head_too_large:
+  en: "Message headers too large"
+  zh-CN: "消息头过大"
+runtime_host.error.proxy_response_body:
+  en: "Rusker Engine proxy: %{message}\n"
+  zh-CN: "Rusker Engine 代理：%{message}\n"
+runtime_host.error.listen_failed:
+  en: "%{protocol} port %{port} could not be listened on Windows: %{error}"
+  zh-CN: "%{protocol} 端口 %{port} 无法在 Windows 上监听：%{error}"
+runtime_host.error.too_many_forwarded_ports:
+  en: "More than %{max} ports need forwarding; the remaining ports were not forwarded"
+  zh-CN: "需要转发的端口超过 %{max} 个，其余端口未转发"
+runtime_host.error.create_pipe_failed:
+  en: "Unable to create %{pipe} (another Rusker instance may already be running): %{error}"
+  zh-CN: "无法创建 %{pipe}（可能已有另一个 Rusker 实例在运行）：%{error}"
+runtime_host.error.recreate_pipe_failed:
+  en: "Failed to recreate %{pipe}: %{error}"
+  zh-CN: "重建 %{pipe} 失败：%{error}"
+runtime_host.error.docker_api_relay_failed:
+  en: "Docker API forwarding failed: %{error}"
+  zh-CN: "Docker API 转发失败：%{error}"
+runtime_host.error.engine_stopped_manually:
+  en: "The Engine has been stopped manually"
+  zh-CN: "Engine 已手动停止"
+runtime_host.error.app_data_dir_unavailable:
+  en: "Unable to determine the application data directory"
+  zh-CN: "无法确定应用数据目录"
+runtime_host.error.disk_moved_engine_not_restored:
+  en: "Disk moved, but the Engine could not be restored: %{error}"
+  zh-CN: "磁盘已移动，但 Engine 未能恢复：%{error}"
+runtime_host.error.disk_missing:
+  en: "Docker data disk %{path} does not exist; if you moved this file manually, please put it back"
+  zh-CN: "Docker 数据磁盘 %{path} 不存在；如果手动移动过该文件，请将其放回原位置"
+runtime_host.error.engine_not_running_cannot_modify:
+  en: "The Engine is not running; daemon.json cannot be modified. Start the Engine and apply again"
+  zh-CN: "Engine 未运行，无法修改 daemon.json；启动 Engine 后再应用"
+runtime_host.error.engine_not_running_daemon_config:
+  en: "The Engine is not running; start it to view and modify daemon.json"
+  zh-CN: "Engine 未运行，启动后才能查看和修改 daemon.json"
+runtime_host.error.unmanaged_distro_conflict:
+  en: "Detected a WSL distribution named \"%{name}\" without a Rusker ownership marker; management stopped to avoid touching your environment"
+  zh-CN: "检测到同名 WSL 发行版“%{name}”，但没有 Rusker 所有权标记；为避免误操作用户环境，已停止管理操作"
+runtime_host.error.engine_not_running:
+  en: "The managed Engine is not running"
+  zh-CN: "受管 Engine 未运行"
+runtime_host.warning.engine_not_ready:
+  en: "The managed Engine is not ready yet; please refresh shortly, or check the dockerd logs"
+  zh-CN: "受管 Engine 尚未就绪；请稍候刷新，或查看 dockerd 日志"
+runtime_host.warning.distro_running_no_session:
+  en: "The dedicated distribution is running but has no Engine session held by this app; click \"Start\" to take over"
+  zh-CN: "专用发行版正在运行，但没有由本应用持有的 Engine 会话；点击“启动”接管"
+runtime_host.warning.old_ubuntu_environment:
+  en: "The dedicated distribution is still the old Ubuntu environment; click \"Repair environment\" to switch to the Rusker system image %{image} (containers, images, and volumes remain on the data disk)"
+  zh-CN: "专用发行版仍是旧的 Ubuntu 运行环境；点击“修复环境”换用 Rusker 系统镜像 %{image}（容器、镜像和卷保留在数据磁盘中）"
+runtime_host.warning.image_version_outdated:
+  en: "The dedicated distribution's system image is %{version}, but %{image} is required; click \"Repair environment\" to upgrade (containers, images, and volumes remain on the data disk)"
+  zh-CN: "专用发行版的系统镜像为 %{version}，当前版本需要 %{image}；点击“修复环境”升级（容器、镜像和卷保留在数据磁盘中）"
+runtime_host.error.data_not_migrated:
+  en: "Docker data has not been migrated to the data disk; system disk replacement stopped to avoid data loss: %{error}"
+  zh-CN: "Docker 数据尚未迁移到数据磁盘，为避免丢失数据，已停止替换系统盘：%{error}"
+runtime_host.error.daemon_config_rejected:
+  en: "The environment was installed, but the original daemon.json cannot be used by the new dockerd; default configuration is now used. The original file is saved at %{path}: %{message}"
+  zh-CN: "环境已安装，但原 daemon.json 无法用于新版 dockerd，已改用默认配置；原文件保存在 %{path}：%{message}"
+runtime_host.error.restore_integration_failed:
+  en: "Failed to restore integration for %{distribution}: %{error}"
+  zh-CN: "恢复 %{distribution} 集成失败：%{error}"
+runtime_host.error.distribution_not_found:
+  en: "WSL distribution \"%{distribution}\" does not exist"
+  zh-CN: "WSL 发行版“%{distribution}”不存在"
+runtime_host.error.not_wsl2_distribution:
+  en: "\"%{distribution}\" is not a WSL2 distribution"
+  zh-CN: "“%{distribution}”不是 WSL2 发行版"
+runtime_host.error.no_ownership_record:
+  en: "The dedicated distribution has no local Rusker ownership record; refusing to perform management operations"
+  zh-CN: "专用发行版没有 Rusker 本地所有权记录，拒绝执行管理操作"
+runtime_host.error.engine_session_exited:
+  en: "The Engine session has exited. Recent logs:\n%{log}"
+  zh-CN: "Engine 会话已退出。最近日志：\n%{log}"
+runtime_host.error.engine_ready_with_log:
+  en: "%{error}. Recent logs:\n%{log}"
+  zh-CN: "%{error}。最近日志：\n%{log}"
+runtime_host.error.invalid_cli_fingerprint:
+  en: "Managed Docker CLI fingerprint is invalid: %{fingerprint}"
+  zh-CN: "受管 Docker CLI 指纹无效：%{fingerprint}"
+runtime_host.error.system_image_missing:
+  en: "WSL2 system image %{path} not found; please reinstall Rusker Desktop"
+  zh-CN: "找不到 WSL2 系统镜像 %{path}；请重新安装 Rusker Desktop"
+runtime_host.error.daemon_json_not_object:
+  en: "/etc/docker/daemon.json is not a JSON object"
+  zh-CN: "/etc/docker/daemon.json 不是 JSON 对象"
+runtime_host.error.daemon_json_invalid:
+  en: "/etc/docker/daemon.json is invalid: %{error}"
+  zh-CN: "/etc/docker/daemon.json 格式无效：%{error}"
+runtime_host.error.daemon_json_must_be_object:
+  en: "daemon.json must be a JSON object"
+  zh-CN: "daemon.json 必须是 JSON 对象"
+runtime_host.error.daemon_json_not_valid_json:
+  en: "daemon.json is not valid JSON: %{error}"
+  zh-CN: "daemon.json 不是有效的 JSON：%{error}"
+runtime_host.error.proxies_in_daemon_json:
+  en: "Configure the Engine proxy in the \"Proxy\" settings; do not set proxies in daemon.json"
+  zh-CN: "请在“代理”设置中配置 Engine 代理，不要在 daemon.json 中填写 proxies"
+runtime_host.error.network_key_in_daemon_json:
+  en: "Configure this in the \"Network\" settings; do not set %{key} in daemon.json"
+  zh-CN: "请在“网络”设置中配置，不要在 daemon.json 中填写 %{key}"
+runtime_host.error.hosts_in_daemon_json:
+  en: "Rusker sets the dockerd listen address via command-line arguments; daemon.json must not contain hosts"
+  zh-CN: "Rusker 通过启动参数设置 dockerd 监听地址，daemon.json 中不能包含 hosts"
+runtime_host.error.daemon_json_not_object_unchanged:
+  en: "/etc/docker/daemon.json is not a JSON object; not modified"
+  zh-CN: "/etc/docker/daemon.json 不是 JSON 对象，未修改"
+runtime_host.error.daemon_json_invalid_unchanged:
+  en: "/etc/docker/daemon.json is invalid; not modified: %{error}"
+  zh-CN: "/etc/docker/daemon.json 格式无效，未修改：%{error}"
+runtime_host.error.cannot_open_command_stdin:
+  en: "Unable to open the command's stdin"
+  zh-CN: "无法打开命令的标准输入"
+runtime_host.error.cannot_connect_integration_stdio:
+  en: "Unable to connect to the integration command's stdin/stdout"
+  zh-CN: "无法连接集成命令的标准输入输出"
+runtime_host.error.command_exit_status:
+  en: "Command exited with status %{status}"
+  zh-CN: "命令退出状态 %{status}"
+runtime_host.error.command_exit_status_with_message:
+  en: "Command exited with status %{status}: %{message}"
+  zh-CN: "命令退出状态 %{status}：%{message}"
+runtime_host.error.distro_dir_not_empty:
+  en: "Dedicated distribution directory %{path} is not empty; refusing to overwrite"
+  zh-CN: "专用发行版目录 %{path} 非空，拒绝覆盖"
+runtime_host.error.unsupported_architecture:
+  en: "The Rusker system image does not yet support the %{arch} architecture"
+  zh-CN: "暂不支持 %{arch} 架构的 Rusker 系统镜像"
+runtime_host.gpu.nvidia_runtime_ready:
+  en: "NVIDIA runtime is ready"
+  zh-CN: "NVIDIA runtime 已就绪"
+runtime_host.gpu.nvidia_runtime_ready_with_name:
+  en: "%{name}; NVIDIA runtime is ready"
+  zh-CN: "%{name}；NVIDIA runtime 已就绪"
+runtime_host.gpu.nvidia_runtime_missing:
+  en: "GPU detected, but Docker has not registered the nvidia runtime; please repair the runtime environment"
+  zh-CN: "已检测到 GPU，但 Docker 未注册 nvidia runtime；请修复运行环境"
+runtime_host.action.create_runtime:
+  en: "Create WSL2 background runtime"
+  zh-CN: "创建 WSL2 后台运行时"
+runtime_host.action.enable:
+  en: "Enable"
+  zh-CN: "启用"
+runtime_host.action.disable:
+  en: "Disable"
+  zh-CN: "停用"
+runtime_host.action.read_disk_record:
+  en: "Read Docker data disk record"
+  zh-CN: "读取 Docker 数据磁盘记录"
+runtime_host.action.write_disk_record:
+  en: "Write Docker data disk record"
+  zh-CN: "写入 Docker 数据磁盘记录"
+runtime_host.action.create_disk_directory:
+  en: "Create Docker data disk directory"
+  zh-CN: "创建 Docker 数据磁盘目录"
+runtime_host.action.create_target_dir:
+  en: "Create target directory"
+  zh-CN: "创建目标目录"
+runtime_host.action.copy_disk:
+  en: "Copy Docker data disk"
+  zh-CN: "复制 Docker 数据磁盘"
+runtime_host.action.save_copied_disk:
+  en: "Save copied Docker data disk"
+  zh-CN: "保存复制的 Docker 数据磁盘"
+runtime_host.action.remove_original_disk:
+  en: "Remove original Docker data disk"
+  zh-CN: "删除原 Docker 数据磁盘"
+runtime_host.action.create_disk:
+  en: "Create Docker data disk"
+  zh-CN: "创建 Docker 数据磁盘"
+runtime_host.action.check_engine_proxy_relay:
+  en: "Check Engine proxy relay"
+  zh-CN: "检查 Engine 代理转发程序"
+runtime_host.action.install_engine_proxy_relay:
+  en: "Install Engine proxy relay"
+  zh-CN: "安装 Engine 代理转发程序"
+runtime_host.action.stop_wsl_environment:
+  en: "Stop Rusker WSL2 environment"
+  zh-CN: "停止 Rusker WSL2 环境"
+runtime_host.action.mount_data_disk:
+  en: "Mount Docker data disk"
+  zh-CN: "挂载 Docker 数据磁盘"
+runtime_host.action.prepare_data_disk:
+  en: "Prepare Docker data disk"
+  zh-CN: "准备 Docker 数据磁盘"
+runtime_host.action.unmount_data_disk:
+  en: "Unmount Docker data disk"
+  zh-CN: "卸载 Docker 数据磁盘"
+runtime_host.action.check_running_containers:
+  en: "Check running containers"
+  zh-CN: "检查运行中的容器"
+runtime_host.action.pause_idle_engine:
+  en: "Pause idle Engine"
+  zh-CN: "暂停空闲 Engine"
+runtime_host.action.resume_engine:
+  en: "Resume Engine"
+  zh-CN: "恢复 Engine"
+runtime_host.action.read_daemon_json:
+  en: "Read daemon.json"
+  zh-CN: "读取 daemon.json"
+runtime_host.action.validate_and_write_daemon_json:
+  en: "Validate and write daemon.json"
+  zh-CN: "校验并写入 daemon.json"
+runtime_host.action.write_daemon_engine_config:
+  en: "Write daemon.json Engine configuration"
+  zh-CN: "写入 daemon.json Engine 配置"
+runtime_host.action.import_wsl_distro:
+  en: "Import Rusker WSL2 distribution"
+  zh-CN: "导入 Rusker WSL2 发行版"
+runtime_host.action.rollback_unregistered_distro:
+  en: "Roll back unregistered distribution"
+  zh-CN: "回滚未登记的发行版"
+runtime_host.action.verify_system_image:
+  en: "Verify Rusker system image"
+  zh-CN: "校验 Rusker 系统镜像"
+runtime_host.action.apply_distro_config:
+  en: "Apply dedicated distribution configuration"
+  zh-CN: "应用专用发行版配置"
+runtime_host.action.verify_data_on_data_disk:
+  en: "Verify Docker data is on the data disk"
+  zh-CN: "确认 Docker 数据位于数据磁盘"
+runtime_host.action.save_daemon_json:
+  en: "Save daemon.json"
+  zh-CN: "保存 daemon.json"
+runtime_host.action.remove_old_system_disk:
+  en: "Remove old system disk"
+  zh-CN: "移除旧系统盘"
+runtime_host.action.restore_daemon_json:
+  en: "Restore daemon.json"
+  zh-CN: "恢复 daemon.json"
+runtime_host.action.check_managed_engine:
+  en: "Check managed Engine"
+  zh-CN: "检查受管 Engine"
+runtime_host.action.disable_integration:
+  en: "Disable integration for %{distribution}"
+  zh-CN: "停用 %{distribution} 集成"
+runtime_host.action.verify_distro_marker:
+  en: "Verify dedicated distribution marker"
+  zh-CN: "验证专用发行版标记"
+runtime_host.action.stop_old_dockerd:
+  en: "Stop old dockerd"
+  zh-CN: "停止旧 dockerd"
+runtime_host.action.start_managed_engine_session:
+  en: "Start managed Docker Engine session"
+  zh-CN: "启动受管 Docker Engine 会话"
+runtime_host.action.stop_dockerd:
+  en: "Stop dockerd"
+  zh-CN: "停止 dockerd"
+runtime_host.action.start_managed_engine:
+  en: "Start managed Docker Engine"
+  zh-CN: "启动受管 Docker Engine"
+runtime_host.action.wait_engine_ready:
+  en: "Wait for managed Engine to be ready"
+  zh-CN: "等待受管 Engine 就绪"
+runtime_host.action.compute_cli_fingerprint:
+  en: "Compute managed Docker CLI fingerprint"
+  zh-CN: "计算受管 Docker CLI 指纹"
+runtime_host.action.check_integration_state:
+  en: "Check %{distribution} integration state"
+  zh-CN: "检查 %{distribution} 集成状态"
+runtime_host.action.enable_integration:
+  en: "Enable %{distribution} integration"
+  zh-CN: "启用 %{distribution} 集成"
+runtime_host.action.create_runtime_data_dir:
+  en: "Create runtime environment data directory"
+  zh-CN: "创建运行环境数据目录"
+runtime_host.action.write_ownership_record:
+  en: "Write dedicated distribution ownership record"
+  zh-CN: "写入专用发行版所有权记录"
+runtime_host.action.locate_app_directory:
+  en: "Locate application directory"
+  zh-CN: "定位应用程序目录"
+runtime_host.action.list_wsl_distributions:
+  en: "List WSL2 distributions"
+  zh-CN: "枚举 WSL2 发行版"
+runtime_host.action.read_dockerd_log:
+  en: "Read dockerd logs"
+  zh-CN: "读取 dockerd 日志"
+runtime_host.action.detect_nvidia_gpu:
+  en: "Detect NVIDIA GPU"
+  zh-CN: "检测 NVIDIA GPU"
+runtime_host.action.check_nvidia_docker_runtime:
+  en: "Check NVIDIA Docker runtime"
+  zh-CN: "检查 NVIDIA Docker runtime"
+runtime_host.action.read_system_image_version:
+  en: "Read system image version"
+  zh-CN: "读取系统镜像版本"
+runtime_host.action.check_distro_directory:
+  en: "Check dedicated distribution directory"
+  zh-CN: "检查专用发行版目录"
+runtime_host.action.create_distro_directory:
+  en: "Create dedicated distribution directory"
+  zh-CN: "创建专用发行版目录"

@@ -3,6 +3,11 @@
 // Child processes (wsl.exe, curl.exe) still use CREATE_NO_WINDOW.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[macro_use]
+extern crate rust_i18n;
+
+i18n!("locales", fallback = "en");
+
 mod app;
 mod ui;
 
@@ -57,17 +62,19 @@ impl AssetSource for AppAssets {
 }
 
 fn main() {
-    let (settings_store, settings, settings_warning) = match SettingsStore::discover() {
+    let (settings_store, settings, load_error) = match SettingsStore::discover() {
         Ok(store) => match store.load() {
             Ok(settings) => (Some(store), settings, None),
-            Err(error) => (
-                Some(store),
-                AppSettings::default(),
-                Some(format!("{error}；当前使用默认设置，保存后将覆盖损坏的配置")),
-            ),
+            Err(error) => (Some(store), AppSettings::default(), Some(Err(error))),
         },
-        Err(error) => (None, AppSettings::default(), Some(error.to_string())),
+        Err(error) => (None, AppSettings::default(), Some(Ok(error))),
     };
+    // Before any text is produced, including the warning below.
+    rusker_desktop::i18n::apply(settings.language);
+    let settings_warning = load_error.map(|error| match error {
+        Err(error) => t!("main.settings_corrupt", error = error).into_owned(),
+        Ok(error) => error.to_string(),
+    });
 
     gpui_kit::application()
         .with_assets(AppAssets)
@@ -112,6 +119,6 @@ fn main() {
                     app
                 })
             })
-            .expect("无法创建 Rusker Desktop 主窗口");
+            .expect("failed to open the Rusker Desktop main window");
         });
 }

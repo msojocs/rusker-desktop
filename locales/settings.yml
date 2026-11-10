@@ -1,0 +1,124 @@
+_version: 2
+settings.language.system:
+  en: Follow system
+  zh-CN: 跟随系统
+settings.theme.system:
+  en: "Follow system"
+  zh-CN: "跟随系统"
+settings.theme.light:
+  en: "Light"
+  zh-CN: "浅色"
+settings.theme.dark:
+  en: "Dark"
+  zh-CN: "深色"
+settings.proxy_mode.same_as_host:
+  en: "Same as host proxy"
+  zh-CN: "与主机代理相同"
+settings.proxy_mode.system:
+  en: "System proxy"
+  zh-CN: "系统代理"
+settings.proxy_mode.none:
+  en: "No proxy"
+  zh-CN: "不使用代理"
+settings.proxy_mode.manual:
+  en: "Manual configuration"
+  zh-CN: "手动配置"
+settings.port_binding.open:
+  en: "Open (default)"
+  zh-CN: "开放（默认）"
+settings.port_binding.localhost_only:
+  en: "Localhost only"
+  zh-CN: "仅本机"
+settings.networking_mode.ipv4_only:
+  en: "IPv4 only"
+  zh-CN: "仅 IPv4"
+settings.networking_mode.dual_stack:
+  en: "IPv4 and IPv6 dual stack"
+  zh-CN: "IPv4 与 IPv6 双栈"
+settings.error.manual_proxy_required:
+  en: "When using manual configuration, enter at least an HTTP or HTTPS proxy"
+  zh-CN: "手动配置时，HTTP 或 HTTPS 代理至少填写一项"
+settings.error.resource_saver_threshold:
+  en: "Resource saver threshold must be between %{min} and %{max} seconds"
+  zh-CN: "资源节省阈值需在 %{min} 到 %{max} 秒之间"
+settings.error.disk_location_not_absolute:
+  en: "Disk image location must be an absolute path"
+  zh-CN: "磁盘镜像位置必须是绝对路径"
+settings.error.subnet_invalid:
+  en: "Docker subnet \"%{value}\" is invalid; expected an IPv4 CIDR, for example %{example}"
+  zh-CN: "Docker 子网“%{value}”无效，应为 IPv4 CIDR，例如 %{example}"
+settings.error.subnet_prefix:
+  en: "Docker subnet prefix length must be between /8 and /28; got /%{prefix}"
+  zh-CN: "Docker 子网前缀长度需在 /8 到 /28 之间，当前为 /%{prefix}"
+settings.error.subnet_host_bits:
+  en: "Docker subnet \"%{value}\" has host bits set; the network address should be %{network}/%{prefix}"
+  zh-CN: "Docker 子网“%{value}”包含主机位，网段地址应为 %{network}/%{prefix}"
+settings.error.subnet_reserved:
+  en: "Docker subnet \"%{value}\" must not use a loopback, multicast, or unspecified address"
+  zh-CN: "Docker 子网“%{value}”不能使用回环、组播或未指定地址"
+settings.error.engine_proxy_same_as_host:
+  en: "The Engine proxy cannot use \"Same as host proxy\""
+  zh-CN: "Engine 代理不能选择“与主机代理相同”"
+settings.error.engine_proxy:
+  en: "Engine proxy: %{error}"
+  zh-CN: "Engine 代理：%{error}"
+settings.error.container_proxy:
+  en: "Container proxy: %{error}"
+  zh-CN: "容器代理：%{error}"
+settings.error.client_config_not_object:
+  en: "Docker client config.json is not a JSON object; not modified"
+  zh-CN: "Docker 客户端 config.json 不是 JSON 对象，未修改"
+settings.error.client_config_invalid:
+  en: "Docker client config.json is invalid; not modified: %{error}"
+  zh-CN: "Docker 客户端 config.json 格式无效，未修改：%{error}"
+settings.error.client_proxies_not_object:
+  en: "proxies in Docker client config.json is not a JSON object; not modified"
+  zh-CN: "Docker 客户端 config.json 中的 proxies 不是 JSON 对象，未修改"
+settings.error.directory_unavailable:
+  en: "Unable to determine the application config directory"
+  zh-CN: "无法确定应用配置目录"
+settings.error.io:
+  en: "Failed to %{action} \"%{path}\": %{source}"
+  zh-CN: "%{action}“%{path}”失败：%{source}"
+settings.error.json:
+  en: "Settings file \"%{path}\" is invalid: %{source}"
+  zh-CN: "设置文件“%{path}”格式无效：%{source}"
+settings.error.validation:
+  en: "Invalid settings: %{detail}"
+  zh-CN: "设置无效：%{detail}"
+settings.error.proxy_url_invalid:
+  en: "%{label} proxy address is invalid: %{error}"
+  zh-CN: "%{label} 代理地址无效：%{error}"
+settings.error.proxy_url_scheme:
+  en: "%{label} proxy only supports http:// or https:// addresses with a hostname"
+  zh-CN: "%{label} 代理仅支持带主机名的 http:// 或 https:// 地址"
+settings.error.proxy_url_credentials:
+  en: "%{label} proxy does not support storing a username or password in the address"
+  zh-CN: "%{label} 代理不支持在地址中保存用户名或密码"
+settings.error.proxy_url_path:
+  en: "%{label} proxy address cannot contain a path, query, or fragment"
+  zh-CN: "%{label} 代理地址不能包含路径、查询参数或片段"
+settings.error.no_proxy_entry:
+  en: "NO_PROXY entry \"%{entry}\" is invalid"
+  zh-CN: "NO_PROXY 条目“%{entry}”无效"
+settings.action.read_settings:
+  en: "read settings"
+  zh-CN: "读取设置"
+settings.action.create_config_dir:
+  en: "create config directory"
+  zh-CN: "创建配置目录"
+settings.action.write_settings:
+  en: "write settings"
+  zh-CN: "写入设置"
+settings.action.set_permissions:
+  en: "set file permissions"
+  zh-CN: "设置文件权限"
+settings.action.read_client_config:
+  en: "read Docker client config"
+  zh-CN: "读取 Docker 客户端配置"
+settings.action.create_client_config_dir:
+  en: "create Docker client config directory"
+  zh-CN: "创建 Docker 客户端配置目录"
+settings.action.write_client_config:
+  en: "write Docker client config"
+  zh-CN: "写入 Docker 客户端配置"

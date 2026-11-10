@@ -51,11 +51,18 @@ impl RowList {
         }
     }
 
-    fn placeholders(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Mounts => ("宿主机路径或卷名", "容器路径，如 /data"),
-            Self::Env => ("变量名", "值"),
-        }
+    fn placeholders(self) -> (SharedString, SharedString) {
+        let (left, right) = match self {
+            Self::Mounts => (
+                t!("run.placeholder.mount_source"),
+                t!("run.placeholder.mount_target"),
+            ),
+            Self::Env => (
+                t!("run.placeholder.env_name"),
+                t!("run.placeholder.env_value"),
+            ),
+        };
+        (left.into_owned().into(), right.into_owned().into())
     }
 
     fn id(self) -> &'static str {
@@ -86,6 +93,22 @@ impl RuskerApp {
         )
     }
 
+    /// Re-applies row placeholders after a language switch.
+    pub(super) fn apply_run_placeholders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for list in [RowList::Mounts, RowList::Env] {
+            let (left, right) = list.placeholders();
+            for (left_input, right_input) in list.rows(&mut self.run).clone() {
+                for (input, placeholder) in
+                    [(left_input, left.clone()), (right_input, right.clone())]
+                {
+                    input.update(cx, |input, cx| {
+                        input.set_placeholder(placeholder, window, cx)
+                    });
+                }
+            }
+        }
+    }
+
     fn add_run_row(&mut self, list: RowList, window: &mut Window, cx: &mut Context<Self>) {
         let row = Self::new_row(list, window, cx);
         list.rows(&mut self.run).push(row);
@@ -108,7 +131,7 @@ impl RuskerApp {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("选择".into()),
+            prompt: Some(t!("run.browse_prompt").into_owned().into()),
         });
         let window = self.window_handle;
         cx.spawn(async move |_, cx| {
@@ -189,7 +212,7 @@ impl RuskerApp {
                         .child(
                             button("cancel-create")
                                 .outline()
-                                .label("取消")
+                                .label(t!("run.cancel").into_owned())
                                 .disabled(submitting)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
@@ -197,7 +220,11 @@ impl RuskerApp {
                             button("submit-create")
                                 .primary()
                                 .icon(IconName::Play)
-                                .label(if submitting { "运行中…" } else { "运行" })
+                                .label(if submitting {
+                                    t!("run.submitting").into_owned()
+                                } else {
+                                    t!("run.submit").into_owned()
+                                })
                                 .disabled(submitting)
                                 .on_click(move |_, window, cx| {
                                     _ = submit.update(cx, |this, cx| {
@@ -245,7 +272,12 @@ impl RuskerApp {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_lg().font_semibold().child("运行新容器"))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_semibold()
+                            .child(t!("run.title").into_owned()),
+                    )
                     .when_some(self.run.image.clone(), |this, image| {
                         this.child(
                             div()
@@ -272,7 +304,12 @@ impl RuskerApp {
                         .items_center()
                         .gap_3()
                         .child(self.loading_ring(px(40.), Some(cx.theme().primary)))
-                        .child(div().text_base().font_medium().child("正在创建并启动容器…"))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_medium()
+                                .child(t!("run.creating").into_owned()),
+                        )
                         .child(
                             div()
                                 .text_sm()
@@ -284,9 +321,9 @@ impl RuskerApp {
         }
         if self.run.image.is_none() {
             form = form.child(form_field(
-                "镜像引用 *",
+                t!("run.field.image"),
                 &self.create_image_input,
-                "仅使用本地已有镜像；本步骤不会自动拉取。",
+                t!("run.hint.image"),
                 cx,
             ));
         }
@@ -297,7 +334,12 @@ impl RuskerApp {
                 .items_center()
                 .justify_between()
                 .cursor_pointer()
-                .child(div().text_base().font_medium().child("可选设置"))
+                .child(
+                    div()
+                        .text_base()
+                        .font_medium()
+                        .child(t!("run.optional_settings").into_owned()),
+                )
                 .child(Icon::new(if open {
                     IconName::ChevronUp
                 } else {
@@ -314,35 +356,35 @@ impl RuskerApp {
         if open {
             form = form
                 .child(form_field(
-                    "容器名称",
+                    t!("run.field.name"),
                     &self.create_name_input,
-                    "留空则自动生成随机名称。",
+                    t!("run.hint.name"),
                     cx,
                 ))
                 .child(form_field(
-                    "端口",
+                    t!("run.field.ports"),
                     &self.create_ports_input,
-                    "宿主机端口:容器端口，多个用逗号分隔，仅绑定到 127.0.0.1。",
+                    t!("run.hint.ports"),
                     cx,
                 ))
                 .child(self.render_row_section(
-                    "卷",
-                    "宿主机路径可直接使用 Windows 路径；不以路径开头时视为命名卷。",
+                    t!("run.field.volumes").into_owned(),
+                    t!("run.hint.volumes").into_owned(),
                     RowList::Mounts,
                     weak.clone(),
                     cx,
                 ))
                 .child(self.render_row_section(
-                    "环境变量",
-                    "同名变量会覆盖设置中的容器代理变量。",
+                    t!("run.field.env").into_owned(),
+                    t!("run.hint.env").into_owned(),
                     RowList::Env,
                     weak.clone(),
                     cx,
                 ))
                 .child(form_field(
-                    "启动命令",
+                    t!("run.field.command"),
                     &self.create_command_input,
-                    "覆盖镜像 CMD，支持引号；不会自动经过 shell 执行。",
+                    t!("run.hint.command"),
                     cx,
                 ))
                 .child(self.render_gpu_switch(weak, cx));
@@ -369,8 +411,8 @@ impl RuskerApp {
 
     fn render_row_section(
         &self,
-        title: &'static str,
-        hint: &'static str,
+        title: String,
+        hint: String,
         list: RowList,
         weak: WeakEntity<Self>,
         cx: &gpui_kit::App,
@@ -390,7 +432,7 @@ impl RuskerApp {
                         .ghost()
                         .xsmall()
                         .icon(Icon::new(IconName::Ellipsis).text_color(cx.theme().primary))
-                        .tooltip("选择文件夹")
+                        .tooltip(t!("run.browse_folder").into_owned())
                         .on_click(move |_, _, cx| {
                             _ = browse_weak.update(cx, |this, cx| {
                                 this.browse_mount_source(index, cx);
@@ -417,7 +459,7 @@ impl RuskerApp {
                                 .ghost()
                                 .small()
                                 .icon(IconName::Minus)
-                                .tooltip("移除")
+                                .tooltip(t!("run.remove_row").into_owned())
                                 .when(count <= 1, |button| button.invisible())
                                 .on_click(move |_, _, cx| {
                                     _ = remove_weak.update(cx, |this, cx| {
@@ -431,7 +473,7 @@ impl RuskerApp {
                                     .ghost()
                                     .small()
                                     .icon(Icon::new(IconName::Plus).text_color(cx.theme().primary))
-                                    .tooltip("添加一行")
+                                    .tooltip(t!("run.add_row").into_owned())
                                     .on_click(move |_, window, cx| {
                                         _ = add_weak.update(cx, |this, cx| {
                                             this.add_run_row(list, window, cx);
@@ -463,7 +505,7 @@ impl RuskerApp {
             .gap_1()
             .child(
                 Switch::new("create-nvidia-gpu")
-                    .label("使用全部 NVIDIA GPU")
+                    .label(t!("run.gpu.label").into_owned())
                     .checked(self.create_nvidia_gpu)
                     .disabled(!available)
                     .on_change(move |enabled, _, cx| {
@@ -478,9 +520,9 @@ impl RuskerApp {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(if available {
-                        "映射为 --gpus all；需要受管环境的 NVIDIA runtime。"
+                        t!("run.gpu.hint").into_owned()
                     } else {
-                        "未检测到可用的 NVIDIA GPU/runtime，请先在设置中检查 WSL2 环境。"
+                        t!("run.gpu.unavailable").into_owned()
                     }),
             )
     }
@@ -516,7 +558,7 @@ impl RuskerApp {
             self.settings.container_proxy_resolved().container_env(),
         );
         let Some(engine) = self.engine.clone() else {
-            self.create_error = Some("容器引擎不可用".into());
+            self.create_error = Some(t!("run.error.engine_unavailable").into_owned());
             cx.notify();
             return;
         };
@@ -526,7 +568,7 @@ impl RuskerApp {
         // Block other operations and drop in-flight refreshes, which could
         // otherwise overwrite the snapshot that contains the new container.
         self.refresh_revision.advance();
-        self.busy = Some("正在创建并启动容器…".into());
+        self.busy = Some(t!("run.creating").into_owned());
         cx.notify();
         let handle = engine.create_container(request);
         let window = self.window_handle;
@@ -548,7 +590,7 @@ impl RuskerApp {
                         });
                         this.navigate(Page::Containers, cx);
                         this.select_container(id, cx);
-                        this.notify_success("容器已创建并启动", cx);
+                        this.notify_success(t!("run.notice.created"), cx);
                     }
                     // Keep the dialog and its input so the user can fix it.
                     Err(error) => this.create_error = Some(error.to_string()),

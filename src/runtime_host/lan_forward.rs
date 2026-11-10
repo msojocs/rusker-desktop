@@ -446,16 +446,25 @@ mod windows {
                 Ok(listener) => {
                     listeners.insert((protocol, port), (scope, listener));
                 }
-                Err(error) => failures.push(format!(
-                    "{} 端口 {port} 无法在 Windows 上监听：{error}",
-                    protocol.label()
-                )),
+                Err(error) => failures.push(
+                    t!(
+                        "runtime_host.error.listen_failed",
+                        protocol = protocol.label(),
+                        port = port,
+                        error = error
+                    )
+                    .into_owned(),
+                ),
             }
         }
         if truncated {
-            failures.push(format!(
-                "需要转发的端口超过 {MAX_FORWARDED_PORTS} 个，其余端口未转发"
-            ));
+            failures.push(
+                t!(
+                    "runtime_host.error.too_many_forwarded_ports",
+                    max = MAX_FORWARDED_PORTS
+                )
+                .into_owned(),
+            );
         }
         let forwarded = listeners.keys().copied().collect();
         status.update(|state| {
