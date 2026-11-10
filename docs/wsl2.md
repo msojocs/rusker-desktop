@@ -47,11 +47,18 @@ Windows                                   WSL2 utility VM
 - **Resource Saver 是暂停，不是冷停**：启用资源节省后，没有运行中的容器和 Windows 管道客户端连接、且未启用任何 WSL 集成，空闲达到阈值时，Rusker 向 `dockerd` 及其直接管理的 `containerd` 发送 `SIGSTOP`；长期 WSL 会话、`rusker` 发行版和数据 VHD 挂载均保留，不终止发行版、不卸载磁盘。Windows named pipe 的下一请求在全局操作锁下通过 `SIGCONT` 恢复 Engine，等待 Docker API 就绪后再转发原请求；关闭资源节省开关也会恢复已暂停的 Engine。手动停止和退出仍走上述正常关闭流程。
 - 启用任意 WSL 集成时不自动进入资源节省模式，因为集成发行版直连共享 socket，不能触发 Windows 侧唤醒。暂停不保证释放 WSL 内存，建议按需启用 WSL `autoMemoryReclaim`；Rusker 不会自动修改用户全局 `.wslconfig`。这对齐 Docker 官方 Windows WSL 后端的 Resource Saver 语义，但不宣称 Docker 官方也使用 `SIGSTOP`/`SIGCONT`。详见[资源节省设置](settings.md#资源节省)。
 
-Windows 下的 `docker.exe` 可以这样使用受管 Engine（安装包自带 Docker CLI 并加入 Path，见[打包与发布](development.md#打包与发布)）：
+Windows 下的 `docker.exe`（安装包自带 Docker CLI 并加入 Path，见[打包与发布](development.md#打包与发布)）通过 `rusker` 上下文使用受管 Engine。受管 Engine 每次运行期间首次连接成功时，若 Docker CLI 当前使用其他上下文（如 `default` 或 Docker Desktop 的 `desktop-linux`），Rusker 会询问是否切换：
+
+- “切换”：在 Docker 客户端配置目录（`DOCKER_CONFIG`，默认 `%USERPROFILE%\.docker`）写入 `contexts\meta\<sha256("rusker")>\meta.json`，并把 `config.json` 的 `currentContext` 设为 `rusker`，其他键保持不变；效果等同下方命令。切换前使用的上下文记录在 `rusker` 上下文元数据的 `RuskerPreviousContext` 字段中（Docker CLI 会保留该字段），用于切回。该设置按 Windows 用户生效，其他软件自带的 `docker.exe` 读取同一配置，也会连接 Rusker。
+- “暂不”：本次运行不再询问。
+- “不再提示”：写入设置 `skip_docker_context_prompt`，以后不再询问。
+
+设置了 `DOCKER_HOST` 或 `DOCKER_CONTEXT` 时它们优先于 `currentContext`，不会询问。“设置 → Docker Engine → Docker CLI 上下文”显示当前上下文，并可随时切换；已使用 `rusker` 时可“切回”切换前的上下文（该上下文已被删除或未记录时切回 `default`，与 `docker context use default` 一样移除 `currentContext`）。切回不会删除 `rusker` 上下文。手动操作：
 
 ```powershell
 docker context create rusker --docker "host=npipe:////./pipe/rusker_engine"
 docker context use rusker
+docker context use default   # 切回原来的 Engine
 # 或单次：docker -H npipe:////./pipe/rusker_engine ps
 ```
 

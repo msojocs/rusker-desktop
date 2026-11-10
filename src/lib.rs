@@ -1,5 +1,6 @@
 pub mod container;
 pub mod diagnostics;
+pub mod docker_context;
 pub mod engine;
 pub mod format;
 pub mod image;

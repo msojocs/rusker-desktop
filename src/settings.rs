@@ -451,6 +451,8 @@ pub struct AppSettings {
     pub resource_saver: ResourceSaverSettings,
     pub vm: VmSettings,
     pub network: NetworkSettings,
+    /// "Don't ask again" for switching the Docker CLI to the Rusker context.
+    pub skip_docker_context_prompt: bool,
 }
 
 impl AppSettings {
@@ -478,6 +480,7 @@ impl AppSettings {
             resource_saver: self.resource_saver.clone(),
             vm: self.vm.normalized(),
             network: self.network.normalized(),
+            skip_docker_context_prompt: self.skip_docker_context_prompt,
         }
     }
 
@@ -1161,6 +1164,7 @@ mod tests {
                 port_binding: PortBinding::LocalhostOnly,
                 mode: NetworkingMode::DualStack,
             },
+            skip_docker_context_prompt: true,
         };
         store.save(&settings).expect("保存设置");
         #[cfg(unix)]
@@ -1190,6 +1194,7 @@ mod tests {
         assert_eq!(loaded.network.port_binding, PortBinding::LocalhostOnly);
         assert_eq!(loaded.network.mode, NetworkingMode::DualStack);
         assert!(loaded.network.host_networking);
+        assert!(loaded.skip_docker_context_prompt);
 
         let export = store.export_proxy(&loaded.docker_proxy).expect("导出代理");
         assert_eq!(export, directory.path().join("docker-proxies.json"));

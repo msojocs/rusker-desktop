@@ -9,6 +9,7 @@
 - 资源节省：开关与阈值（30 秒到 60 分钟，默认开启、300 秒）。
 - 代理：Docker Engine 拉取代理开关、`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`；Engine 不由 Rusker 管理时可导出 `daemon.json` 的 `proxies` 片段。
 - WSL 集成（仅 Windows）：其他 WSL2 发行版的 Docker CLI 集成开关，点击“应用”后生效。
+- Docker Engine（仅 Windows）：编辑受管 Engine 的 `daemon.json`；查看 Docker CLI 当前上下文，切换到 `rusker` 或切回之前的上下文（立即生效，无需点击“应用”，见 [WSL2 文档](wsl2.md)）。
 - 容器导入（仅 Windows）：选择 Docker Desktop 或 Rancher Desktop 来源，扫描其 Linux 容器，勾选已停止且符合条件的容器，确认后复制到 Rusker 管理的 Engine；显示实时进度和完整逐项结果。此操作独立于设置草稿，无需点击“应用”。
 
 ### 从 Docker Desktop / Rancher Desktop 导入容器

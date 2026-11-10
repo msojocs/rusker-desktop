@@ -29,6 +29,7 @@ use gpui_kit::{
     Styled as _, Subscription, Task, Transformation, Window, WindowAppearance, WindowControlArea,
 };
 use rusker_desktop::{
+    docker_context::CliContext,
     engine::{EngineError, EngineService},
     format::{
         container_matches, format_bytes, format_port_bindings, format_relative, format_timestamp,
@@ -55,6 +56,7 @@ use crate::ui::{button, detail_row, empty_state, muted, section_panel, stat_card
 
 mod container_detail;
 mod desktop_import;
+mod docker_context;
 mod images;
 mod notifications;
 mod run;
@@ -302,6 +304,10 @@ pub struct RuskerApp {
     runtime_busy: Option<String>,
     runtime_error: Option<String>,
     runtime_notice: Option<String>,
+    /// Docker CLI's current context, as last read (None: not read yet).
+    docker_context: Option<Result<CliContext, String>>,
+    /// The switch-context prompt was already considered this session.
+    docker_context_prompted: bool,
     tray: Option<TrayMenu>,
     _tray_task: Option<Task<()>>,
     refresh_revision: Revision,
@@ -603,6 +609,8 @@ impl RuskerApp {
             runtime_busy: None,
             runtime_error,
             runtime_notice: None,
+            docker_context: None,
+            docker_context_prompted: false,
             tray,
             _tray_task: None,
             refresh_revision: Revision::default(),
@@ -733,6 +741,9 @@ impl RuskerApp {
         }
         if page == Page::Settings {
             self.refresh_runtime_host(cx);
+            if self.manages_engine() {
+                self.load_docker_context();
+            }
             // Keep unsaved edits; otherwise pick up the current file.
             if self.daemon_pending(cx).is_none() {
                 self.load_daemon_config(cx);
@@ -1056,6 +1067,7 @@ impl RuskerApp {
                         this.apply_snapshot(snapshot);
                         this.after_volume_snapshot(cx);
                         this.sync_container_tools(cx);
+                        this.maybe_prompt_docker_context(cx);
                     }
                     Err(error) => {
                         this.connected = false;
@@ -3207,6 +3219,8 @@ impl RuskerApp {
                         .h(px(320.))
                         .disabled(!loaded || busy),
                 )
+                .child(div().my_2().h(px(1.)).bg(cx.theme().border))
+                .child(self.render_docker_context_setting(cx))
             })
     }
 
