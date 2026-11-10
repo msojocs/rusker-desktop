@@ -945,10 +945,19 @@ mod tests {
         let mut parser = vt100::Parser::default();
         parser.process("foo123\r\n你好42\r\nfoo.456".as_bytes());
         let pattern = compile_search_pattern(r"^foo\d+$", true).unwrap().unwrap();
-        assert_eq!(find_terminal_matches(parser.screen(), &pattern), [0..6]);
+        assert_eq!(
+            find_terminal_matches(parser.screen(), &pattern),
+            std::slice::from_ref(&(0..6))
+        );
         let pattern = compile_search_pattern(r"你好\d+", true).unwrap().unwrap();
-        assert_eq!(find_terminal_matches(parser.screen(), &pattern), [80..86]);
-        assert_eq!(find_literal_matches(parser.screen(), "foo."), [160..164]);
+        assert_eq!(
+            find_terminal_matches(parser.screen(), &pattern),
+            std::slice::from_ref(&(80..86))
+        );
+        assert_eq!(
+            find_literal_matches(parser.screen(), "foo."),
+            std::slice::from_ref(&(160..164))
+        );
         assert!(compile_search_pattern("[", true).is_err());
         assert!(compile_search_pattern("", true).unwrap().is_none());
         let pattern = compile_search_pattern("^", true).unwrap().unwrap();
@@ -976,11 +985,20 @@ mod tests {
         );
         parser.process(b"old\r\nnext\r\nlast");
         assert_eq!(parser.screen().scrollback_len(), 1);
-        assert_eq!(find_literal_matches(parser.screen(), "old"), [0..3]);
-        assert_eq!(find_literal_matches(parser.screen(), "last"), [20..24]);
+        assert_eq!(
+            find_literal_matches(parser.screen(), "old"),
+            std::slice::from_ref(&(0..3))
+        );
+        assert_eq!(
+            find_literal_matches(parser.screen(), "last"),
+            std::slice::from_ref(&(20..24))
+        );
         assert_eq!(parser.screen().scrollback(), 0);
         parser.screen_mut().set_scrollback(1);
-        assert_eq!(find_literal_matches(parser.screen(), "last"), [20..24]);
+        assert_eq!(
+            find_literal_matches(parser.screen(), "last"),
+            std::slice::from_ref(&(20..24))
+        );
         assert_eq!(parser.screen().scrollback(), 1);
     }
 
@@ -989,7 +1007,10 @@ mod tests {
         let mut parser =
             vt100::Parser::new(NonZeroU16::new(3).unwrap(), NonZeroU16::new(5).unwrap(), 10);
         parser.process(b"hello world");
-        assert_eq!(find_literal_matches(parser.screen(), "lo wo"), [3..8]);
+        assert_eq!(
+            find_literal_matches(parser.screen(), "lo wo"),
+            std::slice::from_ref(&(3..8))
+        );
         let mut parser = vt100::Parser::default();
         parser.process(b"hello\r\nworld");
         assert!(find_literal_matches(parser.screen(), "helloworld").is_empty());

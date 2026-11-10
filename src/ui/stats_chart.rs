@@ -36,7 +36,6 @@ pub fn stats_chart(
     points: Vec<ChartPoint>,
     unit: ChartUnit,
     hover: Entity<StatsHover>,
-    _cx: &App,
 ) -> impl IntoElement {
     StatsChart {
         id,

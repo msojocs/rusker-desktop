@@ -1036,7 +1036,6 @@ impl RuskerApp {
                         stats_points(history, |s| [s.cpu_percent, None]),
                         ChartUnit::Percent,
                         hover.clone(),
-                        cx,
                     ))
                     .child(stats_chart(
                         "container-memory-chart",
@@ -1046,7 +1045,6 @@ impl RuskerApp {
                         stats_points(history, |s| [Some(s.memory_bytes as f64), None]),
                         ChartUnit::Bytes,
                         hover.clone(),
-                        cx,
                     ))
                     .child(stats_chart(
                         "container-disk-chart",
@@ -1061,7 +1059,6 @@ impl RuskerApp {
                         }),
                         ChartUnit::Bytes,
                         hover.clone(),
-                        cx,
                     ))
                     .child(stats_chart(
                         "container-network-chart",
@@ -1076,7 +1073,6 @@ impl RuskerApp {
                         }),
                         ChartUnit::Bytes,
                         hover.clone(),
-                        cx,
                     )),
             );
         } else if tools.stats_error.is_none() {
