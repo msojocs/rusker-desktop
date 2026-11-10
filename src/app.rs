@@ -54,12 +54,14 @@ use crate::ui::theme::change_theme;
 use crate::ui::{button, detail_row, empty_state, muted, section_panel, stat_card};
 
 mod container_detail;
+mod desktop_import;
 mod images;
 mod notifications;
 mod run;
 mod volumes;
 
 use container_detail::{ContainerStatsState, ContainerTools};
+use desktop_import::DesktopImportState;
 use images::ImageState;
 use run::RunForm;
 use volumes::VolumeState;
@@ -96,6 +98,7 @@ enum SettingsSection {
     Network,
     WslIntegration,
     DockerEngine,
+    DesktopImport,
 }
 
 impl SettingsSection {
@@ -110,6 +113,7 @@ impl SettingsSection {
             sections.push(Self::Network);
             sections.push(Self::WslIntegration);
             sections.push(Self::DockerEngine);
+            sections.push(Self::DesktopImport);
         }
         sections
     }
@@ -123,6 +127,7 @@ impl SettingsSection {
             Self::Network => "网络",
             Self::WslIntegration => "WSL 集成",
             Self::DockerEngine => "Docker Engine",
+            Self::DesktopImport => "容器导入",
         }
     }
 }
@@ -248,6 +253,8 @@ pub struct RuskerApp {
     images: ImageState,
     run: RunForm,
     volumes: VolumeState,
+    /// Session-only source selection, progress and per-item import results.
+    desktop_import: DesktopImportState,
     volume_name_input: Entity<InputState>,
     settings: AppSettings,
     /// Edits not yet applied. Proxy addresses and the Resource Saver
@@ -560,6 +567,7 @@ impl RuskerApp {
             images: ImageState::default(),
             run: RunForm::default(),
             volumes: VolumeState::default(),
+            desktop_import: DesktopImportState::default(),
             volume_name_input,
             settings_draft: settings.clone(),
             settings,
@@ -673,6 +681,11 @@ impl RuskerApp {
     /// Quits the app, first stopping a managed engine with the stopping
     /// animation on screen instead of freezing in the quit hook.
     fn request_quit(&mut self, cx: &mut Context<Self>) {
+        if self.desktop_import_running() {
+            self.notify_error("正在导入容器，请等待完成后再退出，避免中断数据复制", cx);
+            cx.notify();
+            return;
+        }
         if self.quitting {
             return;
         }
@@ -733,7 +746,7 @@ impl RuskerApp {
 
     /// Reads the managed `daemon.json` into the Docker Engine editor.
     fn load_daemon_config(&mut self, cx: &mut Context<Self>) {
-        if !self.manages_engine() || self.daemon_loading {
+        if !self.manages_engine() || self.daemon_loading || self.desktop_import_running() {
             return;
         }
         let Some(host) = self.runtime_host.clone() else {
@@ -781,7 +794,7 @@ impl RuskerApp {
             self.refresh_runtime_host(cx);
             return;
         }
-        if self.runtime_busy.is_some() {
+        if self.runtime_busy.is_some() || self.desktop_import_running() {
             return;
         }
         let Some(host) = self.runtime_host.clone() else {
@@ -813,7 +826,7 @@ impl RuskerApp {
     }
 
     pub fn refresh_runtime_host(&mut self, cx: &mut Context<Self>) {
-        if !cfg!(windows) || self.runtime_busy.is_some() {
+        if !cfg!(windows) || self.runtime_busy.is_some() || self.desktop_import_running() {
             return;
         }
         let Some(host) = self.runtime_host.clone() else {
@@ -934,7 +947,7 @@ impl RuskerApp {
     }
 
     fn run_runtime_operation(&mut self, operation: RuntimeOperation, cx: &mut Context<Self>) {
-        if self.runtime_busy.is_some() {
+        if self.runtime_busy.is_some() || self.desktop_import_running() {
             return;
         }
         let Some(host) = self.runtime_host.clone() else {
@@ -1320,6 +1333,11 @@ impl RuskerApp {
     /// location changed (settings are only saved if that succeeds), then
     /// saves and applies everything else.
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        if self.desktop_import_running() {
+            self.settings_error = Some("正在导入容器，请完成后再应用设置".into());
+            cx.notify();
+            return;
+        }
         if self.settings_applying {
             return;
         }
@@ -1938,7 +1956,11 @@ impl RuskerApp {
 
     /// Whether a loading indicator is visible and needs animation frames.
     fn wants_motion(&self) -> bool {
-        self.engine_phase().is_some() || self.runtime_busy.is_some() || self.run.submitting
+        self.engine_phase().is_some()
+            || self.runtime_busy.is_some()
+            || self.run.submitting
+            || self.desktop_import_running()
+            || self.desktop_import_scanning()
     }
 
     /// Centered spinner with a title, faded and slid in when the phase
@@ -3010,7 +3032,7 @@ impl RuskerApp {
         } else {
             "已停止"
         };
-        let busy = self.runtime_busy.is_some();
+        let busy = self.runtime_busy.is_some() || self.desktop_import_running();
         let gpu_detail = if snapshot.gpu.detail.is_empty() {
             "正在检测 NVIDIA GPU 与 runtime"
         } else {
@@ -3107,7 +3129,7 @@ impl RuskerApp {
     fn render_docker_engine_settings(&self, cx: &mut Context<Self>) -> Div {
         let managed = self.manages_engine();
         let loaded = self.daemon_loaded.is_some();
-        let busy = self.runtime_busy.is_some();
+        let busy = self.runtime_busy.is_some() || self.desktop_import_running();
         div()
             .flex()
             .flex_col()
@@ -3190,7 +3212,7 @@ impl RuskerApp {
 
     fn render_wsl_integration(&self, cx: &mut Context<Self>) -> Div {
         let snapshot = &self.runtime_snapshot;
-        let busy = self.runtime_busy.is_some();
+        let busy = self.runtime_busy.is_some() || self.desktop_import_running();
         div()
             .flex()
             .flex_col()
@@ -3268,6 +3290,7 @@ impl RuskerApp {
                     SettingsSection::Network => self.render_network_settings(cx),
                     SettingsSection::WslIntegration => self.render_wsl_integration(cx),
                     SettingsSection::DockerEngine => self.render_docker_engine_settings(cx),
+                    SettingsSection::DesktopImport => self.render_desktop_import(cx),
                 };
                 div()
                     .py_6()
@@ -3443,8 +3466,9 @@ impl RuskerApp {
             ("没有未保存的更改".to_string(), cx.theme().muted_foreground)
         };
         let manages_engine = self.manages_engine();
-        let apply_blocked =
-            self.settings_store.is_none() || (manages_engine && self.runtime_busy.is_some());
+        let apply_blocked = self.settings_store.is_none()
+            || self.desktop_import_running()
+            || (manages_engine && self.runtime_busy.is_some());
         div()
             .flex_shrink_0()
             .px_8()
@@ -3521,7 +3545,7 @@ impl RuskerApp {
         }
         let location = self.disk_location_display();
         let move_pending = self.pending_disk_move(&self.settings_draft).is_some();
-        let busy = self.runtime_busy.is_some();
+        let busy = self.runtime_busy.is_some() || self.desktop_import_running();
         div()
             .flex()
             .flex_col()

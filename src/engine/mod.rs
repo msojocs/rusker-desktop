@@ -5,6 +5,7 @@ mod pull;
 mod stats_history;
 
 pub use container_detail::{ContainerShell, ContainerStats, ContainerStatsBatch};
+pub use docker::{DesktopContainer, DesktopImportReport, DesktopImportSource};
 pub use pull::{ImagePullLayer, ImagePullProgress};
 pub use stats_history::{StatsCache, StatsHistory, StatsSample, STATS_SAMPLE_INTERVAL};
 
@@ -94,6 +95,38 @@ impl EngineService {
             // Never replay a mutation after a transport error: the daemon may
             // already have applied it. The next user operation reconnects.
             result
+        })
+    }
+
+    pub fn desktop_containers(&self) -> JoinHandle<Result<Vec<DesktopContainer>, EngineError>> {
+        self.containers_from_desktop(DesktopImportSource::DockerDesktop)
+    }
+
+    pub fn containers_from_desktop(
+        &self,
+        source: DesktopImportSource,
+    ) -> JoinHandle<Result<Vec<DesktopContainer>, EngineError>> {
+        self.spawn(async move { docker::DockerEngine::desktop_containers(source).await })
+    }
+
+    pub fn import_desktop_containers(
+        &self,
+        ids: Vec<String>,
+        progress: tokio::sync::watch::Sender<String>,
+    ) -> JoinHandle<Result<DesktopImportReport, EngineError>> {
+        self.import_from_desktop(DesktopImportSource::DockerDesktop, ids, progress)
+    }
+
+    pub fn import_from_desktop(
+        &self,
+        source: DesktopImportSource,
+        ids: Vec<String>,
+        progress: tokio::sync::watch::Sender<String>,
+    ) -> JoinHandle<Result<DesktopImportReport, EngineError>> {
+        self.spawn_engine(move |engine| async move {
+            engine
+                .import_desktop_containers(source, ids, progress)
+                .await
         })
     }
 
