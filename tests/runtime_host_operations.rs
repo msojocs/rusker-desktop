@@ -37,6 +37,37 @@ async fn installs_and_starts_dedicated_wsl_runtime() {
     .expect("在 blocking 线程释放 runtime-host");
 }
 
+/// Opt-in first-launch test. Requires a missing managed distribution and a
+/// bundled system image; never removes an existing environment.
+#[cfg(windows)]
+#[test]
+fn startup_installs_missing_wsl_runtime() {
+    if std::env::var("RUSKER_WSL_RUNTIME_FIRST_LAUNCH").as_deref() != Ok("1") {
+        eprintln!("跳过：设置 RUSKER_WSL_RUNTIME_FIRST_LAUNCH=1 后验证首次启动自动安装");
+        return;
+    }
+
+    let client_runtime = tokio::runtime::Runtime::new().expect("测试运行时");
+    let service = RuntimeHostService::new().expect("创建 runtime-host");
+    let before = client_runtime
+        .block_on(service.snapshot(BTreeMap::new()))
+        .expect("Tokio snapshot task")
+        .expect("读取初始状态");
+    assert!(
+        !before.installed,
+        "需要尚未安装 rusker 发行版；测试不会移除已有环境"
+    );
+
+    let result = client_runtime.block_on(service.startup(BTreeMap::new()));
+    service.shutdown_blocking(Duration::from_secs(50));
+    let snapshot = result
+        .expect("Tokio startup task")
+        .expect("首次启动自动安装专用 WSL2 环境");
+    assert!(snapshot.installed);
+    assert!(snapshot.running);
+    assert!(snapshot.engine_ready, "warnings: {:?}", snapshot.warnings);
+}
+
 /// Opt-in lifecycle test against an already installed `rusker` distribution:
 /// launch-time auto start, Docker API through `\\.\pipe\rusker_engine`, and
 /// graceful shutdown. Set `RUSKER_WSL_HOLD_SECS` to keep the engine up for

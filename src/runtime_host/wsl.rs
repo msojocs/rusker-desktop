@@ -1252,18 +1252,22 @@ impl WslHost {
         self.start_engine().await
     }
 
-    /// Docker Desktop-style launch: start the engine automatically when the
-    /// managed environment is installed but not running.
+    /// Launch-time setup: install a missing managed environment, or start an
+    /// existing engine, then restore saved integrations.
     pub async fn startup(
         &self,
         integrations: &BTreeMap<String, bool>,
     ) -> Result<RuntimeHostSnapshot, RuntimeHostError> {
         self.saver.set_integrations(integrations);
         let snapshot = self.snapshot(integrations).await?;
-        if !snapshot.installed || snapshot.engine_ready {
+        if snapshot.engine_ready {
             return Ok(snapshot);
         }
-        self.start().await?;
+        if snapshot.installed {
+            self.start().await?;
+        } else {
+            self.install().await?;
+        }
         self.snapshot_after_integration(integrations).await
     }
 

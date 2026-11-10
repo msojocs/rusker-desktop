@@ -773,8 +773,8 @@ impl RuskerApp {
         (value.trim() != loaded.trim()).then_some(value)
     }
 
-    /// Launch-time hook: starts the managed engine before connecting to its
-    /// API. External engines can be connected to immediately.
+    /// Launch-time hook: installs a missing runtime and starts the managed
+    /// engine before connecting. External engines can connect immediately.
     pub fn startup_runtime_host(&mut self, cx: &mut Context<Self>) {
         if !self.manages_engine() {
             self.refresh(cx);
@@ -787,7 +787,7 @@ impl RuskerApp {
         let Some(host) = self.runtime_host.clone() else {
             return;
         };
-        self.runtime_busy = Some("正在检查并启动 WSL2 环境…".into());
+        self.runtime_busy = Some("正在准备 WSL2 环境（未安装时自动安装）…".into());
         self.engine_transition = Some(EngineTransition::Starting);
         self.runtime_error = None;
         cx.notify();

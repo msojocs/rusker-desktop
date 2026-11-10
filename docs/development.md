@@ -60,6 +60,8 @@ WSL2 相关的实机测试默认跳过，需显式开启：
 ```powershell
 # 安装/修复并启动专用发行版（测试程序在 target\debug\deps 下，需先把系统镜像放到 target\debug\deps\resources\wsl，见 docs/wsl2-rootfs.md）
 $env:RUSKER_WSL_RUNTIME_INTEGRATION='1'; cargo test --test runtime_host_operations
+# 首次启动自动安装（要求尚无 rusker 发行版，并按上面路径放置系统镜像；不会移除已有环境）
+$env:RUSKER_WSL_RUNTIME_FIRST_LAUNCH='1'; cargo test --test runtime_host_operations startup_installs_missing_wsl_runtime
 # 已安装时：自动启动、经 named pipe 访问、优雅关闭；可加 RUSKER_WSL_HOLD_SECS 保持运行
 $env:RUSKER_WSL_RUNTIME_LIFECYCLE='1'; cargo test --test runtime_host_operations
 # 在指定发行版启用并停用集成，并验证 docker run -i 的 stdin EOF

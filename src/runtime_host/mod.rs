@@ -211,8 +211,8 @@ impl RuntimeHostService {
         })
     }
 
-    /// Launch-time entry point: reads state and, like Docker Desktop, starts
-    /// an installed engine automatically.
+    /// Launch-time entry point: installs a missing managed environment and
+    /// starts the engine automatically.
     pub fn startup(
         &self,
         integrations: BTreeMap<String, bool>,
