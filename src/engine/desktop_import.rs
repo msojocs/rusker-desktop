@@ -50,6 +50,15 @@ pub struct DesktopImportReport {
     pub failures: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct DesktopImportProgress {
+    /// One-based active container; zero while the batch is being prepared.
+    pub current: usize,
+    pub completed: usize,
+    pub total: usize,
+    pub message: String,
+}
+
 impl DockerEngine {
     async fn desktop_source(source: DesktopImportSource) -> Result<Self, EngineError> {
         #[cfg(windows)]
@@ -167,7 +176,7 @@ impl DockerEngine {
         &self,
         source: DesktopImportSource,
         ids: Vec<String>,
-        progress: watch::Sender<String>,
+        progress: watch::Sender<DesktopImportProgress>,
     ) -> Result<DesktopImportReport, EngineError> {
         if !self.managed_wsl {
             return Err(EngineError::operation(
@@ -206,15 +215,18 @@ impl DockerEngine {
             if !seen.insert(id.clone()) {
                 continue;
             }
-            let _ = progress.send(
-                t!(
+            let _ = progress.send(DesktopImportProgress {
+                current: index + 1,
+                completed: index,
+                total: ids.len(),
+                message: t!(
                     "engine.desktop.importing_progress",
                     index = index + 1,
                     total = ids.len(),
                     id = short_id(id)
                 )
                 .into_owned(),
-            );
+            });
             let mut created_volumes = Vec::new();
             let image = format!("rusker-import/{batch}-{index}:latest");
             let result = self
@@ -251,6 +263,7 @@ impl DockerEngine {
                     report.failures.push(detail);
                 }
             }
+            progress.send_modify(|progress| progress.completed = index + 1);
         }
         Ok(report)
     }
@@ -265,7 +278,7 @@ impl DockerEngine {
         scratch: &Path,
         volumes: &mut HashMap<String, String>,
         created_volumes: &mut Vec<(String, String)>,
-        progress: &watch::Sender<String>,
+        progress: &watch::Sender<DesktopImportProgress>,
     ) -> Result<String, EngineError> {
         let inspect = with_timeout(
             &t!("engine.desktop.read_source_container"),
@@ -344,14 +357,14 @@ impl DockerEngine {
                 self.create_volume(Some(target.clone())).await?;
                 created_volumes.push((original.to_string(), target.clone()));
                 let archive = scratch.join("volume.tar");
-                let _ = progress.send(
-                    t!(
+                progress.send_modify(|progress| {
+                    progress.message = t!(
                         "engine.desktop.copy_volume_progress",
                         name = name,
                         volume = original
                     )
-                    .into_owned(),
-                );
+                    .into_owned();
+                });
                 source.export_volume(original, &archive).await?;
                 self.import_volume(&target, &archive).await?;
                 tokio::fs::remove_file(&archive).await.map_err(|error| {
@@ -367,7 +380,9 @@ impl DockerEngine {
             ));
         }
         body.host_config.as_mut().unwrap().mounts = (!mounts.is_empty()).then_some(mounts);
-        let _ = progress.send(t!("engine.desktop.copy_rootfs_progress", name = name).into_owned());
+        progress.send_modify(|progress| {
+            progress.message = t!("engine.desktop.copy_rootfs_progress", name = name).into_owned();
+        });
         let archive = scratch.join("rootfs.tar");
         let mut file = tokio::fs::File::create(&archive).await.map_err(|error| {
             EngineError::operation(t!("engine.desktop.create_temp_archive"), error)
@@ -461,8 +476,10 @@ impl DockerEngine {
                 source.ensure_volume_quiet(volume).await?;
             }
         }
-        let _ =
-            progress.send(t!("engine.desktop.create_target_progress", name = name).into_owned());
+        progress.send_modify(|progress| {
+            progress.message =
+                t!("engine.desktop.create_target_progress", name = name).into_owned();
+        });
         let created = with_timeout(
             &t!("engine.desktop.create_imported_container"),
             ACTION_TIMEOUT,
@@ -768,7 +785,7 @@ mod tests {
         ])
         .await;
         let scratch = tempfile::tempdir().unwrap();
-        let (progress, _) = watch::channel(String::new());
+        let (progress, _) = watch::channel(DesktopImportProgress::default());
         let result = timeout(
             Duration::from_secs(5),
             target.import_desktop_container(
@@ -861,7 +878,7 @@ mod tests {
         ])
         .await;
         let scratch = tempfile::tempdir().unwrap();
-        let (progress, _) = watch::channel(String::new());
+        let (progress, _) = watch::channel(DesktopImportProgress::default());
         let mut volumes = HashMap::new();
         let mut created = Vec::new();
         timeout(
@@ -903,7 +920,7 @@ mod tests {
         let (target, target_task) =
             mock_engine(vec![("/containers/existing/json", 200, "{}".into())]).await;
         let scratch = tempfile::tempdir().unwrap();
-        let (progress, _) = watch::channel(String::new());
+        let (progress, _) = watch::channel(DesktopImportProgress::default());
         let error = timeout(
             Duration::from_secs(5),
             target.import_desktop_container(
@@ -943,7 +960,7 @@ mod tests {
     async fn refuses_an_unmanaged_destination_before_connecting_to_desktop() {
         let (mut target, task) = mock_engine(Vec::new()).await;
         target.managed_wsl = false;
-        let (progress, _) = watch::channel(String::new());
+        let (progress, _) = watch::channel(DesktopImportProgress::default());
         let error = target
             .import_desktop_containers(
                 DesktopImportSource::DockerDesktop,

@@ -5,7 +5,9 @@ mod pull;
 mod stats_history;
 
 pub use container_detail::{ContainerShell, ContainerStats, ContainerStatsBatch};
-pub use docker::{DesktopContainer, DesktopImportReport, DesktopImportSource};
+pub use docker::{
+    DesktopContainer, DesktopImportProgress, DesktopImportReport, DesktopImportSource,
+};
 pub use pull::{ImagePullLayer, ImagePullProgress};
 pub use stats_history::{StatsCache, StatsHistory, StatsSample, STATS_SAMPLE_INTERVAL};
 
@@ -112,7 +114,7 @@ impl EngineService {
     pub fn import_desktop_containers(
         &self,
         ids: Vec<String>,
-        progress: tokio::sync::watch::Sender<String>,
+        progress: tokio::sync::watch::Sender<DesktopImportProgress>,
     ) -> JoinHandle<Result<DesktopImportReport, EngineError>> {
         self.import_from_desktop(DesktopImportSource::DockerDesktop, ids, progress)
     }
@@ -121,7 +123,7 @@ impl EngineService {
         &self,
         source: DesktopImportSource,
         ids: Vec<String>,
-        progress: tokio::sync::watch::Sender<String>,
+        progress: tokio::sync::watch::Sender<DesktopImportProgress>,
     ) -> JoinHandle<Result<DesktopImportReport, EngineError>> {
         self.spawn_engine(move |engine| async move {
             engine

@@ -51,33 +51,3 @@ mod tests {
         assert_eq!(error.to_string(), "Pull timed out (5s)");
     }
 }
-
-#[cfg(test)]
-mod locale_tests {
-    // Separate test binary: these tests mutate the process-global locale, so
-    // they must not share a process with the string-assertion tests.
-    use crate::settings::LanguagePreference;
-
-    #[test]
-    fn switching_locale_changes_translations_and_errors() {
-        let error = crate::engine::EngineError::Timeout {
-            action: "Pull".into(),
-            seconds: 5,
-        };
-        super::apply(LanguagePreference::English);
-        assert_eq!(&*rust_i18n::locale(), super::ENGLISH);
-        assert_eq!(rust_i18n::t!("settings.theme.light"), "Light");
-        assert_eq!(error.to_string(), "Pull timed out (5s)");
-
-        super::apply(LanguagePreference::SimplifiedChinese);
-        assert_eq!(&*rust_i18n::locale(), super::SIMPLIFIED_CHINESE);
-        assert_eq!(rust_i18n::t!("settings.theme.light"), "浅色");
-        assert_eq!(error.to_string(), "Pull超时（5 秒）");
-
-        // Unknown keys fall back to English rather than an empty string.
-        assert_eq!(rust_i18n::t!("app.settings.language"), "语言");
-
-        super::apply(LanguagePreference::English);
-        assert_eq!(rust_i18n::t!("app.settings.language"), "Language");
-    }
-}

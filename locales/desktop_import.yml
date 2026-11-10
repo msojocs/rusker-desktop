@@ -68,6 +68,12 @@ desktop_import.progress.preparing:
 desktop_import.progress.importing_from:
   en: "Importing containers from %{source}…"
   zh-CN: "正在从 %{source} 导入容器…"
+desktop_import.progress.title:
+  en: "Importing from %{source}"
+  zh-CN: "正在从 %{source} 导入"
+desktop_import.progress.overall:
+  en: "Overall progress"
+  zh-CN: "整体进度"
 desktop_import.progress.reading:
   en: "Reading %{source} containers…"
   zh-CN: "正在读取 %{source} 容器…"

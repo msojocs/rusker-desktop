@@ -41,7 +41,9 @@ use crate::{
 
 #[path = "desktop_import.rs"]
 mod desktop_import;
-pub use desktop_import::{DesktopContainer, DesktopImportReport, DesktopImportSource};
+pub use desktop_import::{
+    DesktopContainer, DesktopImportProgress, DesktopImportReport, DesktopImportSource,
+};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Includes the managed runtime's wake-up, not just a pipe handshake.
