@@ -29,6 +29,7 @@ use gpui_kit::{
     Styled as _, Subscription, Task, Transformation, Window, WindowAppearance, WindowControlArea,
 };
 use rusker_desktop::{
+    container::{valid_image_tag, ImageTagReference},
     docker_context::CliContext,
     engine::{EngineError, EngineService},
     format::{
@@ -225,6 +226,13 @@ struct ContainerRemoval {
     error: Option<String>,
 }
 
+#[derive(Default)]
+struct ContainerReplacement {
+    pending: Option<ContainerSummary>,
+    submitting: bool,
+    error: Option<String>,
+}
+
 pub struct RuskerApp {
     engine: Option<EngineService>,
     /// Set while a managed runtime start/stop is in flight.
@@ -251,6 +259,7 @@ pub struct RuskerApp {
     /// IDs ticked for batch removal in the container list.
     containers_checked: HashSet<String>,
     container_removal: ContainerRemoval,
+    container_replacement: ContainerReplacement,
     /// Container detail tab: logs, details, mounts, exec, files, stats.
     container_tab: usize,
     container_tools: ContainerTools,
@@ -268,6 +277,8 @@ pub struct RuskerApp {
     create_command_input: Entity<InputState>,
     create_ports_input: Entity<InputState>,
     create_nvidia_gpu: bool,
+    replace_image_input: Entity<InputState>,
+    replace_tag_input: Entity<InputState>,
     create_error: Option<String>,
     images: ImageState,
     run: RunForm,
@@ -351,6 +362,8 @@ impl RuskerApp {
         let create_name_input = cx.new(|cx| InputState::new(window, cx));
         let create_command_input = cx.new(|cx| InputState::new(window, cx));
         let create_ports_input = cx.new(|cx| InputState::new(window, cx));
+        let replace_image_input = cx.new(|cx| InputState::new(window, cx));
+        let replace_tag_input = cx.new(|cx| InputState::new(window, cx));
         let volume_name_input = cx.new(|cx| InputState::new(window, cx));
         let http_proxy_input = cx.new(|cx| {
             InputState::new(window, cx).default_value(settings.docker_proxy.http_proxy.clone())
@@ -546,6 +559,7 @@ impl RuskerApp {
             containers_running_only: false,
             containers_checked: HashSet::new(),
             container_removal: ContainerRemoval::default(),
+            container_replacement: ContainerReplacement::default(),
             container_tab: 0,
             container_tools: ContainerTools::default(),
             container_stats: ContainerStatsState::default(),
@@ -561,6 +575,8 @@ impl RuskerApp {
             create_command_input,
             create_ports_input,
             create_nvidia_gpu: false,
+            replace_image_input,
+            replace_tag_input,
             create_error: None,
             images: ImageState::default(),
             run: RunForm::default(),
@@ -1748,6 +1764,190 @@ impl RuskerApp {
                         this.sync_container_tools(cx);
                     }
                     Err(error) => this.notify_error(error.to_string(), cx),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn confirm_replace_container(
+        &mut self,
+        container: &ContainerSummary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if container.is_compose() || self.busy.is_some() {
+            return;
+        }
+        let image = ImageTagReference::parse(&container.image);
+        self.replace_image_input.update(cx, |input, cx| {
+            input.set_value(image.repository.clone(), window, cx)
+        });
+        self.replace_tag_input.update(cx, |input, cx| {
+            input.set_value(image.default_tag().unwrap_or(""), window, cx)
+        });
+        self.container_replacement = ContainerReplacement {
+            pending: Some(container.clone()),
+            ..ContainerReplacement::default()
+        };
+        let title = t!("app.dialog.replace_container.title", name = container.name).into_owned();
+        let description = t!("app.dialog.replace_container.description").into_owned();
+        let weak = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
+            let Some(this) = weak.upgrade() else {
+                return dialog;
+            };
+            let replacement = &this.read(cx).container_replacement;
+            let submitting = replacement.submitting;
+            let error = replacement.error.clone();
+            let image_input = this.read(cx).replace_image_input.clone();
+            let tag_input = this.read(cx).replace_tag_input.clone();
+            let submit = weak.clone();
+            let confirm = weak.clone();
+            let cancel = weak.clone();
+            dialog
+                .title(title.clone())
+                .description(description.clone())
+                .child(form_field(
+                    t!("app.image"),
+                    &image_input,
+                    t!("app.replace_image_hint"),
+                    cx,
+                ))
+                .child(form_field(
+                    t!("app.image_tag"),
+                    &tag_input,
+                    t!("app.replace_tag_hint"),
+                    cx,
+                ))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(t!("app.replace_image_warning")),
+                )
+                .keyboard(!submitting)
+                .on_ok(move |_, _, cx| {
+                    _ = confirm.update(cx, |this, cx| this.submit_replace_container(cx));
+                    false
+                })
+                .on_cancel(move |_, _, cx| {
+                    cancel
+                        .upgrade()
+                        .is_none_or(|this| !this.read(cx).container_replacement.submitting)
+                })
+                .when_some(error, |dialog, error| {
+                    dialog.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                })
+                .footer(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            button("cancel-replace-container")
+                                .outline()
+                                .label(t!("app.cancel"))
+                                .disabled(submitting)
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            button("submit-replace-container")
+                                .danger()
+                                .label(if submitting {
+                                    t!("app.replacing")
+                                } else {
+                                    t!("app.replace")
+                                })
+                                .loading(submitting)
+                                .disabled(submitting)
+                                .on_click(move |_, _, cx| {
+                                    _ = submit.update(cx, |this, cx| {
+                                        this.submit_replace_container(cx);
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
+    fn submit_replace_container(&mut self, cx: &mut Context<Self>) {
+        if self.container_replacement.submitting || self.busy.is_some() {
+            return;
+        }
+        let Some(container) = self.container_replacement.pending.clone() else {
+            return;
+        };
+        if container.is_compose() {
+            return;
+        }
+        let repository = self.replace_image_input.read(cx).value().trim().to_string();
+        if repository.is_empty()
+            || repository.chars().any(char::is_whitespace)
+            || repository.contains('@')
+            || ImageTagReference::parse(&repository).has_tag()
+        {
+            self.container_replacement.error =
+                Some(t!("app.error.invalid_image_name", image = repository).into_owned());
+            cx.notify();
+            return;
+        }
+        let tag = self.replace_tag_input.read(cx).value().trim().to_string();
+        if !tag.is_empty() && !valid_image_tag(&tag) {
+            self.container_replacement.error =
+                Some(t!("app.error.invalid_image_tag", tag = tag).into_owned());
+            cx.notify();
+            return;
+        }
+        let original = ImageTagReference::parse(&container.image);
+        let image = if tag.is_empty() && repository == original.repository {
+            None
+        } else if tag.is_empty() {
+            Some(repository)
+        } else {
+            Some(format!("{repository}:{tag}"))
+        };
+        let Some(engine) = self.engine.clone() else {
+            self.container_replacement.error =
+                Some(t!("app.error.engine_unavailable").into_owned());
+            cx.notify();
+            return;
+        };
+
+        let handle = engine.replace_container(container.id.clone(), image);
+        let revision = self.refresh_revision.advance();
+        self.container_replacement.submitting = true;
+        self.container_replacement.error = None;
+        self.busy = Some(t!("app.replacing").into_owned());
+        self.loading = false;
+        cx.notify();
+        self._action_task = Some(cx.spawn(async move |this, cx| {
+            let result = await_engine(handle).await;
+            _ = this.update(cx, |this, cx| {
+                if !this.refresh_revision.is_current(revision) {
+                    return;
+                }
+                this.busy = None;
+                this.container_replacement.submitting = false;
+                match result {
+                    Ok((_new_id, snapshot)) => {
+                        this.connected = true;
+                        this.apply_snapshot(snapshot);
+                        this.after_volume_snapshot(cx);
+                        this.sync_container_tools(cx);
+                        let window = this.window_handle;
+                        _ = cx.update_window(window, |_, window, cx| window.close_dialog(cx));
+                        this.notify_success(
+                            t!("app.notice.container_replaced", name = container.name),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        this.container_replacement.error = Some(error.to_string());
+                        // A failure after the new container started can leave a
+                        // partially completed replacement; show its actual state.
+                        this.refresh(cx);
+                    }
                 }
                 cx.notify();
             });
@@ -4406,38 +4606,54 @@ fn container_menu(
     let detail_container = container.clone();
     let detail_weak = weak.clone();
     let restart_id = container.id.clone();
-    let restart_weak = weak;
+    let restart_weak = weak.clone();
+    let replace_container = container.clone();
+    let replace_weak = weak;
     let id = container.id.clone();
     let image = container.image.clone();
-    menu.item(
-        container_menu_item(t!("app.view_details"), AssetIcon::Container).on_click(
-            move |_, _, cx| {
-                _ = detail_weak.update(cx, |this, cx| {
-                    this.select_container(detail_container.id.clone(), cx);
+    let mut menu = menu
+        .item(
+            container_menu_item(t!("app.view_details"), AssetIcon::Container).on_click(
+                move |_, _, cx| {
+                    _ = detail_weak.update(cx, |this, cx| {
+                        this.select_container(detail_container.id.clone(), cx);
+                    });
+                },
+            ),
+        )
+        .item(
+            container_menu_item(t!("app.restart"), IconName::RotateCw).on_click(move |_, _, cx| {
+                _ = restart_weak.update(cx, |this, cx| {
+                    this.start_container_action(restart_id.clone(), ContainerAction::Restart, cx);
                 });
-            },
-        ),
-    )
-    .item(
-        container_menu_item(t!("app.restart"), IconName::RotateCw).on_click(move |_, _, cx| {
-            _ = restart_weak.update(cx, |this, cx| {
-                this.start_container_action(restart_id.clone(), ContainerAction::Restart, cx);
-            });
-        }),
-    )
-    .separator()
-    .item(
-        container_menu_item(t!("app.copy_container_id"), IconName::Copy).on_click(
-            move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
-            },
-        ),
-    )
-    .item(
-        container_menu_item(t!("app.copy_image_ref"), IconName::Copy).on_click(move |_, _, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(image.clone()));
-        }),
-    )
+            }),
+        );
+    if !container.is_compose() {
+        menu = menu.item(
+            container_menu_item(t!("app.replace"), IconName::RefreshCw).on_click(
+                move |_, window, cx| {
+                    _ = replace_weak.update(cx, |this, cx| {
+                        this.confirm_replace_container(&replace_container, window, cx);
+                    });
+                },
+            ),
+        );
+    }
+    menu.separator()
+        .item(
+            container_menu_item(t!("app.copy_container_id"), IconName::Copy).on_click(
+                move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+                },
+            ),
+        )
+        .item(
+            container_menu_item(t!("app.copy_image_ref"), IconName::Copy).on_click(
+                move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(image.clone()));
+                },
+            ),
+        )
 }
 
 impl Render for RuskerApp {

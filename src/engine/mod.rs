@@ -2,6 +2,7 @@ mod connection;
 mod container_detail;
 mod docker;
 mod pull;
+mod replace;
 mod stats_history;
 
 pub use container_detail::{ContainerShell, ContainerStats, ContainerStatsBatch};
@@ -144,6 +145,18 @@ impl EngineService {
         self.spawn_engine(move |engine| async move {
             let id = engine.create_and_run(request).await?;
             Ok((id, engine.snapshot().await?))
+        })
+    }
+
+    /// Recreates a standalone container with its inspected configuration.
+    pub fn replace_container(
+        &self,
+        id: String,
+        image: Option<String>,
+    ) -> JoinHandle<Result<(String, EngineSnapshot), EngineError>> {
+        self.spawn_engine(move |engine| async move {
+            let new_id = engine.replace_container(&id, image).await?;
+            Ok((new_id, engine.snapshot().await?))
         })
     }
 

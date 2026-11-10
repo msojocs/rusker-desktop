@@ -26,6 +26,24 @@ engine.error.new_container_cleanup_failed:
 engine.error.with_cleanup:
   en: "%{error}; %{cleanup}"
   zh-CN: "%{error}；%{cleanup}"
+engine.error.container_replace_config_missing:
+  en: "The container inspect response is missing its name or configuration"
+  zh-CN: "容器详情缺少名称或配置"
+engine.error.compose_replace_unsupported:
+  en: "Compose-managed containers must be updated with Docker Compose"
+  zh-CN: "Compose 管理的容器请通过 Docker Compose 更新"
+engine.error.invalid_replacement_image:
+  en: "Invalid replacement image reference: %{image}"
+  zh-CN: "替换镜像引用无效：%{image}"
+engine.error.replace_restored:
+  en: "%{error}; the original container was restored"
+  zh-CN: "%{error}；原容器已恢复"
+engine.error.replace_rollback_failed:
+  en: "%{error}; restoring the original container also failed: %{rollback}"
+  zh-CN: "%{error}；恢复原容器也失败：%{rollback}"
+engine.error.replacement_cleanup_failed:
+  en: "The new container %{id} started, but the old container could not be removed: %{error}"
+  zh-CN: "新容器 %{id} 已启动，但旧容器删除失败：%{error}"
 engine.error.unknown_engine_error:
   en: "The engine returned an unknown error"
   zh-CN: "引擎返回未知错误"
@@ -164,6 +182,27 @@ engine.action.cleanup_new_container:
 engine.action.create_and_run_container:
   en: "Create and run the container"
   zh-CN: "创建并运行容器"
+engine.action.prepare_container_replacement:
+  en: "Prepare the container replacement"
+  zh-CN: "准备替换容器"
+engine.action.replace_container:
+  en: "Replace the container"
+  zh-CN: "替换容器"
+engine.action.rename_container_for_replacement:
+  en: "Temporarily rename the old container"
+  zh-CN: "临时重命名旧容器"
+engine.action.disconnect_replaced_network:
+  en: "Disconnect the old container from network %{network}"
+  zh-CN: "断开旧容器与网络 %{network} 的连接"
+engine.action.connect_replacement_network:
+  en: "Connect the container to network %{network}"
+  zh-CN: "将容器连接到网络 %{network}"
+engine.action.restore_replaced_container:
+  en: "Restore the original container"
+  zh-CN: "恢复原容器"
+engine.action.remove_replaced_container:
+  en: "Remove the old container after replacement"
+  zh-CN: "删除替换前的旧容器"
 engine.action.read_container_detail:
   en: "Read the container details"
   zh-CN: "读取容器详情"

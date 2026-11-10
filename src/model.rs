@@ -46,6 +46,8 @@ impl EngineSnapshot {
     }
 }
 
+pub const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContainerSummary {
     pub id: String,
@@ -59,11 +61,17 @@ pub struct ContainerSummary {
     pub ports: Vec<PortMapping>,
     /// Names of the named/anonymous volumes this container mounts.
     pub volumes: Vec<String>,
+    /// Docker Compose project name, when this is a Compose service container.
+    pub compose_project: Option<String>,
 }
 
 impl ContainerSummary {
     pub fn is_running(&self) -> bool {
         self.state.eq_ignore_ascii_case("running")
+    }
+
+    pub fn is_compose(&self) -> bool {
+        self.compose_project.is_some()
     }
 }
 

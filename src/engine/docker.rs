@@ -30,7 +30,7 @@ use crate::{
     model::{
         ContainerAction, ContainerSummary as ContainerDto, CreateContainerRequest, EngineInfo,
         EngineSnapshot, ImageDetail, ImageLayer, ImageSummary as ImageDto, PortMapping,
-        VolumeSummary,
+        VolumeSummary, COMPOSE_PROJECT_LABEL,
     },
     volume::{
         container_path, parse_listing, parse_timestamp, partial_export_path, validate_volume_name,
@@ -98,7 +98,7 @@ fn pooled_named_pipe(path: &str) -> Result<Docker, EngineError> {
 
 #[derive(Clone)]
 pub struct DockerEngine {
-    client: Docker,
+    pub(super) client: Docker,
     managed_wsl: bool,
 }
 
@@ -332,6 +332,14 @@ impl DockerEngine {
             ));
         }
         Ok(id)
+    }
+
+    pub async fn replace_container(
+        &self,
+        id: &str,
+        image: Option<String>,
+    ) -> Result<String, EngineError> {
+        super::replace::replace_container(self, id, image.as_deref()).await
     }
 
     pub async fn container_action(
@@ -1183,6 +1191,10 @@ pub(super) fn container_dto(container: ContainerSummary) -> ContainerDto {
         created: container.created.unwrap_or_default(),
         ports,
         volumes,
+        compose_project: container
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(COMPOSE_PROJECT_LABEL).cloned()),
     }
 }
 
@@ -1240,10 +1252,14 @@ mod pipe_pool_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{image_detail_dto, needs_default_tag, nvidia_device_requests, DockerEngine};
-    use bollard::models::{ImageHistoryResponseItem, ImageInspect};
+    use super::{
+        container_dto, image_detail_dto, needs_default_tag, nvidia_device_requests, DockerEngine,
+    };
+    use bollard::models::{
+        ContainerSummary as BollardContainerSummary, ImageHistoryResponseItem, ImageInspect,
+    };
 
-    use crate::model::{ImageDetail, ImageLayer};
+    use crate::model::{ImageDetail, ImageLayer, COMPOSE_PROJECT_LABEL};
 
     #[tokio::test]
     async fn pull_uses_its_own_timeout_without_changing_other_requests() {
@@ -1292,6 +1308,22 @@ mod tests {
         assert_eq!(statuses, ["Pull complete"]);
         assert_eq!(engine.client.timeout(), std::time::Duration::ZERO);
         server.await.unwrap();
+    }
+
+    #[test]
+    fn container_summary_identifies_compose_members_by_project_label() {
+        let compose = container_dto(BollardContainerSummary {
+            labels: Some(std::collections::HashMap::from([(
+                COMPOSE_PROJECT_LABEL.into(),
+                "shop".into(),
+            )])),
+            ..Default::default()
+        });
+        let standalone = container_dto(BollardContainerSummary::default());
+
+        assert_eq!(compose.compose_project.as_deref(), Some("shop"));
+        assert!(compose.is_compose());
+        assert!(!standalone.is_compose());
     }
 
     #[test]

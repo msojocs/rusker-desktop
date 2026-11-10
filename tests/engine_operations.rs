@@ -4,16 +4,19 @@ use std::{
 };
 
 use bollard::{
-    query_parameters::{RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder},
+    query_parameters::{
+        RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, TagImageOptionsBuilder,
+    },
     Docker,
 };
 use rusker_desktop::{container::ContainerDraft, engine::EngineService, model::ContainerAction};
 
 const TEST_IMAGE: &str = "rusker-test-engine:ci";
+const REPLACEMENT_IMAGE: &str = "rusker-test-replacement:ci";
 
 /// Opt-in mutating smoke test. Prepare a dedicated tag first:
 /// `docker tag alpine:3.23 rusker-test-engine:ci`.
-/// The test removes that tag and its own rusker-test-* container in cleanup.
+/// The test removes both dedicated tags and its own rusker-test-* container in cleanup.
 #[tokio::test]
 async fn operates_only_on_dedicated_test_resources() {
     if std::env::var("RUSKER_DOCKER_OPERATIONS").as_deref() != Ok("1") {
@@ -30,6 +33,14 @@ async fn operates_only_on_dedicated_test_resources() {
         .inspect_image(TEST_IMAGE)
         .await
         .expect("先用 docker tag alpine:3.23 rusker-test-engine:ci 创建专用测试标签");
+    let tag_replacement = TagImageOptionsBuilder::default()
+        .repo("rusker-test-replacement")
+        .tag("ci")
+        .build();
+    docker
+        .tag_image(TEST_IMAGE, Some(tag_replacement))
+        .await
+        .expect("创建专用替换 Tag");
 
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -74,6 +85,30 @@ async fn operates_only_on_dedicated_test_resources() {
                 && port.protocol == "tcp"
         }));
         let id = created.id.clone();
+
+        let (replacement_id, snapshot) = service
+            .replace_container(id.clone(), Some(REPLACEMENT_IMAGE.into()))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        assert_ne!(replacement_id, id);
+        assert!(!snapshot.containers.iter().any(|container| {
+            container.id == id || container.name.starts_with(&format!("{name}-old-"))
+        }));
+        let replacement = snapshot
+            .containers
+            .iter()
+            .find(|container| container.id == replacement_id)
+            .expect("替换后快照应包含同名新容器");
+        assert_eq!(replacement.name, name);
+        assert_eq!(replacement.image, REPLACEMENT_IMAGE);
+        assert!(replacement.is_running());
+        assert!(replacement.ports.iter().any(|port| {
+            port.host_ip.as_deref() == Some("127.0.0.1")
+                && port.public_port == Some(host_port)
+                && port.private_port == 80
+        }));
+        let id = replacement_id;
 
         let logs = service
             .container_logs(id.clone())
@@ -145,7 +180,10 @@ async fn operates_only_on_dedicated_test_resources() {
         .noprune(true)
         .build();
     _ = docker
-        .remove_image(TEST_IMAGE, Some(remove_image), None)
+        .remove_image(TEST_IMAGE, Some(remove_image.clone()), None)
+        .await;
+    _ = docker
+        .remove_image(REPLACEMENT_IMAGE, Some(remove_image), None)
         .await;
     tokio::task::spawn_blocking(move || drop(service))
         .await

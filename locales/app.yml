@@ -371,6 +371,39 @@ app.stop:
 app.restart:
   en: "Restart"
   zh-CN: "重启"
+app.replace:
+  en: "Replace"
+  zh-CN: "替换"
+app.replacing:
+  en: "Replacing..."
+  zh-CN: "替换中..."
+app.dialog.replace_container.title:
+  en: "Replace container %{name}?"
+  zh-CN: "替换容器 %{name}？"
+app.dialog.replace_container.description:
+  en: "A new container with the same name and current configuration will be created using the selected image tag, then the old container will be removed. Data not stored in volumes will be lost; associated volumes are not deleted."
+  zh-CN: "将使用相同名称、当前配置和所选镜像 Tag 创建并启动新容器，然后删除旧容器。未存储在卷中的数据将丢失；关联卷不会被删除。"
+app.replace_image_hint:
+  en: "Image repository or name, without a tag or digest"
+  zh-CN: "镜像仓库或名称，不包含 Tag 或 digest"
+app.image_tag:
+  en: "Image tag"
+  zh-CN: "镜像 Tag"
+app.replace_tag_hint:
+  en: "Defaults to the original tag. Leave empty to keep the original reference, or use latest with a changed image. A missing local image is pulled before replacement."
+  zh-CN: "默认使用原 Tag；留空时保留原镜像引用，更换镜像后则使用 latest。本地不存在目标镜像时会在替换前拉取。"
+app.replace_image_warning:
+  en: "Warning: a different image may be incompatible with the existing command, environment variables, ports, mounts and other configuration. Confirm yourself that the same configuration can run normally."
+  zh-CN: "警告：更换镜像后，原命令、环境变量、端口、挂载及其他配置可能不兼容。请自行确认相同配置可以正常运行。"
+app.error.invalid_image_name:
+  en: "Enter an image repository or name without a tag or digest: %{image}"
+  zh-CN: "请输入不包含 Tag 或 digest 的镜像仓库或名称：%{image}"
+app.error.invalid_image_tag:
+  en: "Invalid image tag: %{tag}"
+  zh-CN: "镜像 Tag 无效：%{tag}"
+app.notice.container_replaced:
+  en: "Replaced container %{name}"
+  zh-CN: "已替换容器 %{name}"
 app.tab.logs:
   en: "Logs"
   zh-CN: "日志"

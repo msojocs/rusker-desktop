@@ -34,6 +34,93 @@ impl ContainerDraft {
     }
 }
 
+/// The repository and tag portions of a container's original image reference.
+/// Digests remain replaceable by a tag, while a raw image ID is not taggable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageTagReference {
+    pub repository: String,
+    tag: Option<String>,
+    has_digest: bool,
+    taggable: bool,
+}
+
+impl ImageTagReference {
+    pub fn parse(reference: &str) -> Self {
+        let reference = reference.trim();
+        let (without_digest, has_digest) = reference
+            .split_once('@')
+            .map_or((reference, false), |(repository, _)| (repository, true));
+        let last_slash = without_digest.rfind('/');
+        let tag_separator = without_digest.rfind(':');
+        let has_tag = tag_separator.is_some_and(|separator| {
+            last_slash.is_none_or(|slash| separator > slash) && separator + 1 < without_digest.len()
+        });
+
+        if let Some(separator) = tag_separator.filter(|_| has_tag) {
+            let repository = &without_digest[..separator];
+            let tag = &without_digest[separator + 1..];
+            let raw_image_id = repository == "sha256"
+                && tag.len() == 64
+                && tag.chars().all(|character| character.is_ascii_hexdigit());
+            if raw_image_id {
+                return Self {
+                    repository: reference.into(),
+                    tag: None,
+                    has_digest,
+                    taggable: false,
+                };
+            }
+            return Self {
+                repository: repository.into(),
+                tag: Some(tag.into()),
+                has_digest,
+                taggable: true,
+            };
+        }
+
+        Self {
+            repository: without_digest.into(),
+            tag: None,
+            has_digest,
+            taggable: true,
+        }
+    }
+
+    /// Original tag, defaulting to `latest` for an untagged named reference.
+    /// A digest or raw image ID has no original tag to prefill.
+    pub fn default_tag(&self) -> Option<&str> {
+        (self.taggable && !self.has_digest).then(|| self.tag.as_deref().unwrap_or("latest"))
+    }
+
+    pub fn has_tag(&self) -> bool {
+        self.tag.is_some()
+    }
+
+    /// Named references without a tag are equivalent to their `latest` tag.
+    /// Digests and raw IDs only match when the caller keeps the original ref.
+    pub fn equivalent(&self, other: &Self) -> bool {
+        self.repository == other.repository
+            && self.taggable
+            && other.taggable
+            && !self.has_digest
+            && !other.has_digest
+            && self.tag.as_deref().unwrap_or("latest") == other.tag.as_deref().unwrap_or("latest")
+    }
+}
+
+/// Docker tags follow `[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`.
+pub fn valid_image_tag(tag: &str) -> bool {
+    let mut chars = tag.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    tag.len() <= 128
+        && (first.is_ascii_alphanumeric() || first == '_')
+        && chars.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
+        })
+}
+
 /// Adds `defaults` (`NAME=value`) for every variable `env` does not set.
 pub fn merge_env(env: &mut Vec<String>, defaults: Vec<String>) {
     let keys: HashSet<String> = env
@@ -373,5 +460,44 @@ mod tests {
         }
         .parse()
         .is_err());
+    }
+
+    #[test]
+    fn parses_and_compares_image_references() {
+        let tagged = ImageTagReference::parse("registry:5000/team/web:v1");
+        assert_eq!(tagged.repository, "registry:5000/team/web");
+        assert_eq!(tagged.default_tag(), Some("v1"));
+        assert!(tagged.has_tag());
+        assert!(tagged.equivalent(&ImageTagReference::parse("registry:5000/team/web:v1")));
+        assert!(!tagged.equivalent(&ImageTagReference::parse("registry:5000/team/web:v2")));
+        assert!(!tagged.equivalent(&ImageTagReference::parse("other/web:v1")));
+
+        let untagged = ImageTagReference::parse("nginx");
+        assert_eq!(untagged.default_tag(), Some("latest"));
+        assert!(!untagged.has_tag());
+        assert!(untagged.equivalent(&ImageTagReference::parse("nginx:latest")));
+    }
+
+    #[test]
+    fn handles_digest_and_raw_image_id_references() {
+        let digest = ImageTagReference::parse("nginx@sha256:abcdef");
+        assert_eq!(digest.repository, "nginx");
+        assert_eq!(digest.default_tag(), None);
+        assert!(!digest.equivalent(&ImageTagReference::parse("nginx:latest")));
+
+        let id = ImageTagReference::parse(&format!("sha256:{}", "a".repeat(64)));
+        assert_eq!(id.default_tag(), None);
+        assert!(!id.has_tag());
+    }
+
+    #[test]
+    fn validates_docker_tag_syntax() {
+        for tag in ["latest", "v1.2.3", "1_0", "release-candidate"] {
+            assert!(valid_image_tag(tag), "{tag}");
+        }
+        for tag in ["", ".latest", "-v1", "v 1", "v1:amd64"] {
+            assert!(!valid_image_tag(tag), "{tag}");
+        }
+        assert!(!valid_image_tag(&"a".repeat(129)));
     }
 }
