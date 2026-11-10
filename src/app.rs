@@ -4757,6 +4757,13 @@ impl Render for RuskerApp {
                 .text_color(cx.theme().foreground)
                 .flex()
                 .flex_col()
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    // Focusable controls prevent the default mouse-down behavior.
+                    // Any other press is on passive UI and should clear focus.
+                    if !window.default_prevented() {
+                        window.blur(cx);
+                    }
+                })
                 .child(self.render_app_bar(window, cx))
                 .child(body)
                 .child(self.render_status_bar(cx)),
