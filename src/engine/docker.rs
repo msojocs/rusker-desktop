@@ -30,7 +30,8 @@ use crate::{
     model::{
         ContainerAction, ContainerSummary as ContainerDto, CreateContainerRequest, EngineInfo,
         EngineSnapshot, ImageDetail, ImageLayer, ImageSummary as ImageDto, PortMapping,
-        VolumeSummary, COMPOSE_PROJECT_LABEL,
+        VolumeSummary, COMPOSE_CONFIG_FILES_LABEL, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
+        COMPOSE_WORKING_DIR_LABEL,
     },
     volume::{
         container_path, parse_listing, parse_timestamp, partial_export_path, validate_volume_name,
@@ -385,6 +386,18 @@ impl DockerEngine {
                 .await
             }
         }
+    }
+
+    /// Applies an action to each container independently. Successful changes
+    /// are kept when another container fails; one message is returned per failure.
+    pub async fn container_actions(&self, ids: &[String], action: ContainerAction) -> Vec<String> {
+        let mut failures = Vec::new();
+        for id in ids {
+            if let Err(error) = self.container_action(id, action).await {
+                failures.push(format!("{}: {error}", short_id(id)));
+            }
+        }
+        failures
     }
 
     /// Removes several containers one by one (never forced). Returns one
@@ -1176,6 +1189,8 @@ pub(super) fn container_dto(container: ContainerSummary) -> ContainerDto {
         .filter_map(|mount| mount.name)
         .collect();
 
+    let labels = container.labels.unwrap_or_default();
+
     ContainerDto {
         id,
         name,
@@ -1191,10 +1206,10 @@ pub(super) fn container_dto(container: ContainerSummary) -> ContainerDto {
         created: container.created.unwrap_or_default(),
         ports,
         volumes,
-        compose_project: container
-            .labels
-            .as_ref()
-            .and_then(|labels| labels.get(COMPOSE_PROJECT_LABEL).cloned()),
+        compose_project: labels.get(COMPOSE_PROJECT_LABEL).cloned(),
+        compose_service: labels.get(COMPOSE_SERVICE_LABEL).cloned(),
+        compose_working_dir: labels.get(COMPOSE_WORKING_DIR_LABEL).cloned(),
+        compose_config_files: labels.get(COMPOSE_CONFIG_FILES_LABEL).cloned(),
     }
 }
 
@@ -1259,7 +1274,10 @@ mod tests {
         ContainerSummary as BollardContainerSummary, ImageHistoryResponseItem, ImageInspect,
     };
 
-    use crate::model::{ImageDetail, ImageLayer, COMPOSE_PROJECT_LABEL};
+    use crate::model::{
+        ImageDetail, ImageLayer, COMPOSE_CONFIG_FILES_LABEL, COMPOSE_PROJECT_LABEL,
+        COMPOSE_SERVICE_LABEL, COMPOSE_WORKING_DIR_LABEL,
+    };
 
     #[tokio::test]
     async fn pull_uses_its_own_timeout_without_changing_other_requests() {
@@ -1313,15 +1331,26 @@ mod tests {
     #[test]
     fn container_summary_identifies_compose_members_by_project_label() {
         let compose = container_dto(BollardContainerSummary {
-            labels: Some(std::collections::HashMap::from([(
-                COMPOSE_PROJECT_LABEL.into(),
-                "shop".into(),
-            )])),
+            labels: Some(std::collections::HashMap::from([
+                (COMPOSE_PROJECT_LABEL.into(), "shop".into()),
+                (COMPOSE_SERVICE_LABEL.into(), "web".into()),
+                (COMPOSE_WORKING_DIR_LABEL.into(), "/srv/shop".into()),
+                (
+                    COMPOSE_CONFIG_FILES_LABEL.into(),
+                    "/srv/shop/compose.yml".into(),
+                ),
+            ])),
             ..Default::default()
         });
         let standalone = container_dto(BollardContainerSummary::default());
 
         assert_eq!(compose.compose_project.as_deref(), Some("shop"));
+        assert_eq!(compose.compose_service.as_deref(), Some("web"));
+        assert_eq!(compose.compose_working_dir.as_deref(), Some("/srv/shop"));
+        assert_eq!(
+            compose.compose_config_files.as_deref(),
+            Some("/srv/shop/compose.yml")
+        );
         assert!(compose.is_compose());
         assert!(!standalone.is_compose());
     }

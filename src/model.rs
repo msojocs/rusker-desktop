@@ -47,6 +47,9 @@ impl EngineSnapshot {
 }
 
 pub const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+pub const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+pub const COMPOSE_WORKING_DIR_LABEL: &str = "com.docker.compose.project.working_dir";
+pub const COMPOSE_CONFIG_FILES_LABEL: &str = "com.docker.compose.project.config_files";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContainerSummary {
@@ -63,6 +66,12 @@ pub struct ContainerSummary {
     pub volumes: Vec<String>,
     /// Docker Compose project name, when this is a Compose service container.
     pub compose_project: Option<String>,
+    /// Compose service name from labels; custom container names may differ.
+    pub compose_service: Option<String>,
+    /// Compose working directory reported by the CLI that created the project.
+    pub compose_working_dir: Option<String>,
+    /// Comma-separated Compose configuration file paths reported by the CLI.
+    pub compose_config_files: Option<String>,
 }
 
 impl ContainerSummary {

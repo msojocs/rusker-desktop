@@ -171,6 +171,19 @@ impl EngineService {
         })
     }
 
+    /// Applies one lifecycle action to each container, then refreshes once.
+    /// Individual failures do not undo successful changes on other containers.
+    pub fn container_actions(
+        &self,
+        ids: Vec<String>,
+        action: ContainerAction,
+    ) -> JoinHandle<Result<(EngineSnapshot, Vec<String>), EngineError>> {
+        self.spawn_engine(move |engine| async move {
+            let failures = engine.container_actions(&ids, action).await;
+            Ok((engine.snapshot().await?, failures))
+        })
+    }
+
     /// Full Docker inspect response as formatted JSON, also available for stopped containers.
     pub fn container_inspect(&self, id: String) -> JoinHandle<Result<String, EngineError>> {
         self.spawn_engine(move |engine| async move { engine.container_inspect(&id).await })

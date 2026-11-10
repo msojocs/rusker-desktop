@@ -308,6 +308,24 @@ app.containers.memory:
 app.containers.running_only:
   en: "Only show running containers"
   zh-CN: "仅显示运行中的容器"
+app.containers.compose_services:
+  en: "%{count} services"
+  zh-CN: "%{count} 个服务"
+app.containers.expand_compose:
+  en: "Expand Compose project"
+  zh-CN: "展开 Compose 项目"
+app.containers.collapse_compose:
+  en: "Collapse Compose project"
+  zh-CN: "折叠 Compose 项目"
+app.compose.services:
+  en: "Services"
+  zh-CN: "服务"
+app.compose.config_files:
+  en: "Config files"
+  zh-CN: "配置文件"
+app.compose.logs.empty:
+  en: "This Compose project has no recent stdout/stderr logs."
+  zh-CN: "该 Compose 项目最近没有 stdout/stderr 日志。"
 app.clear_selection:
   en: "Clear selection"
   zh-CN: "取消选择"

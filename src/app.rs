@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -55,6 +55,7 @@ use tokio::task::JoinHandle;
 use crate::ui::theme::change_theme;
 use crate::ui::{button, detail_row, empty_state, muted, section_panel, stat_card};
 
+mod compose_detail;
 mod container_detail;
 mod desktop_import;
 mod docker_context;
@@ -233,6 +234,64 @@ struct ContainerReplacement {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ContainerListItem {
+    Container(Box<ContainerSummary>),
+    ComposeProject {
+        project: String,
+        containers: Vec<ContainerSummary>,
+    },
+}
+
+/// Keep the Engine's order, placing all services of a Compose project at the
+/// project's first occurrence while leaving standalone containers independent.
+fn group_container_list(containers: Vec<ContainerSummary>) -> Vec<ContainerListItem> {
+    let mut items = Vec::new();
+    let mut project_indices: HashMap<String, usize> = HashMap::new();
+    for container in containers {
+        let Some(project) = container.compose_project.clone() else {
+            items.push(ContainerListItem::Container(Box::new(container)));
+            continue;
+        };
+        if let Some(index) = project_indices.get(&project).copied() {
+            let Some(ContainerListItem::ComposeProject { containers, .. }) = items.get_mut(index)
+            else {
+                unreachable!("Compose project index must reference a project row");
+            };
+            containers.push(container);
+        } else {
+            project_indices.insert(project.clone(), items.len());
+            items.push(ContainerListItem::ComposeProject {
+                project,
+                containers: vec![container],
+            });
+        }
+    }
+    items
+}
+
+/// Compose names containers as `project-service-1` (or with underscores).
+/// Inside the project group, the repeated project prefix adds no information.
+fn container_list_name(container: &ContainerSummary, nested: bool) -> &str {
+    if !nested {
+        return &container.name;
+    }
+    let Some(project) = container.compose_project.as_deref() else {
+        return &container.name;
+    };
+    if project.is_empty() {
+        return &container.name;
+    }
+    let Some(suffix) = container.name.strip_prefix(project) else {
+        return &container.name;
+    };
+    suffix
+        .strip_prefix('-')
+        .or_else(|| suffix.strip_prefix('_'))
+        .filter(|suffix| !suffix.is_empty())
+        .unwrap_or(&container.name)
+}
+
 pub struct RuskerApp {
     engine: Option<EngineService>,
     /// Set while a managed runtime start/stop is in flight.
@@ -254,10 +313,14 @@ pub struct RuskerApp {
     loading: bool,
     busy: Option<String>,
     selected_container: Option<String>,
+    /// Compose project currently open in the split service/log detail view.
+    selected_compose_project: Option<String>,
     /// Container list shows only running containers.
     containers_running_only: bool,
     /// IDs ticked for batch removal in the container list.
     containers_checked: HashSet<String>,
+    /// Compose projects collapsed in the container list. Projects default to expanded.
+    compose_projects_collapsed: HashSet<String>,
     container_removal: ContainerRemoval,
     container_replacement: ContainerReplacement,
     /// Container detail tab: logs, details, mounts, exec, files, stats.
@@ -556,8 +619,10 @@ impl RuskerApp {
             loading: false,
             busy: None,
             selected_container: None,
+            selected_compose_project: None,
             containers_running_only: false,
             containers_checked: HashSet::new(),
+            compose_projects_collapsed: HashSet::new(),
             container_removal: ContainerRemoval::default(),
             container_replacement: ContainerReplacement::default(),
             container_tab: 0,
@@ -802,6 +867,7 @@ impl RuskerApp {
             // The sidebar entry always opens the container list, not the
             // detail page of the last selected container.
             self.selected_container = None;
+            self.selected_compose_project = None;
             self.logs_revision.advance();
             self.logs_loading = false;
             self.logs.clear();
@@ -1164,6 +1230,19 @@ impl RuskerApp {
                 self.logs_error = None;
             }
         }
+        if let Some(project) = self.selected_compose_project.as_ref() {
+            if !snapshot
+                .containers
+                .iter()
+                .any(|container| container.compose_project.as_deref() == Some(project.as_str()))
+            {
+                self.selected_compose_project = None;
+                self.logs_revision.advance();
+                self.logs_loading = false;
+                self.logs.clear();
+                self.logs_error = None;
+            }
+        }
         self.snapshot = snapshot;
         if self.selected_container.as_ref().is_some_and(|selected| {
             self.snapshot
@@ -1191,6 +1270,7 @@ impl RuskerApp {
             self.container_tab = 0;
         }
         self.selected_container = Some(id.clone());
+        self.selected_compose_project = None;
         self.load_logs(id, cx);
     }
 
@@ -2469,6 +2549,16 @@ impl RuskerApp {
     }
 
     fn render_containers(&self, cx: &mut Context<Self>) -> Div {
+        if let Some(project) = self.selected_compose_project.as_ref() {
+            let containers: Vec<ContainerSummary> = self
+                .snapshot
+                .containers
+                .iter()
+                .filter(|container| container.compose_project.as_deref() == Some(project.as_str()))
+                .cloned()
+                .collect();
+            return self.render_compose_project_detail(project, &containers, cx);
+        }
         let selected = self
             .selected_container
             .as_ref()
@@ -2771,10 +2861,52 @@ impl RuskerApp {
                 .child(footer);
         }
 
-        let rows = containers
-            .iter()
-            .enumerate()
-            .map(|(index, container)| self.render_container_row(index, container, now, busy, cx));
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut container_row_index = 0;
+        for item in group_container_list(containers) {
+            match item {
+                ContainerListItem::Container(container) => {
+                    rows.push(
+                        self.render_container_row(
+                            container_row_index,
+                            &container,
+                            now,
+                            busy,
+                            false,
+                            cx,
+                        )
+                        .into_any_element(),
+                    );
+                    container_row_index += 1;
+                }
+                ContainerListItem::ComposeProject {
+                    project,
+                    containers,
+                } => {
+                    let collapsed = self.compose_projects_collapsed.contains(&project);
+                    rows.push(
+                        self.render_compose_project_row(&project, &containers, now, cx)
+                            .into_any_element(),
+                    );
+                    if !collapsed {
+                        for container in containers {
+                            rows.push(
+                                self.render_container_row(
+                                    container_row_index,
+                                    &container,
+                                    now,
+                                    busy,
+                                    true,
+                                    cx,
+                                )
+                                .into_any_element(),
+                            );
+                            container_row_index += 1;
+                        }
+                    }
+                }
+            }
+        }
 
         div()
             .flex_1()
@@ -2799,12 +2931,253 @@ impl RuskerApp {
             .child(footer)
     }
 
+    fn render_compose_project_row(
+        &self,
+        project: &str,
+        containers: &[ContainerSummary],
+        now: i64,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let collapsed = self.compose_projects_collapsed.contains(project);
+        let toggle_project = project.to_string();
+        let open_project = project.to_string();
+        let toggle_tooltip = if collapsed {
+            t!("app.containers.expand_compose").into_owned()
+        } else {
+            t!("app.containers.collapse_compose").into_owned()
+        };
+        let visible_ids: Vec<String> = containers
+            .iter()
+            .map(|container| container.id.clone())
+            .collect();
+        let all_checked = !containers.is_empty()
+            && containers
+                .iter()
+                .all(|container| self.containers_checked.contains(&container.id));
+        let running = containers
+            .iter()
+            .filter(|container| container.is_running())
+            .count();
+        let paused = containers
+            .iter()
+            .any(|container| container.state.eq_ignore_ascii_case("paused"));
+        let state_color = if running > 0 {
+            cx.theme().success
+        } else if paused {
+            cx.theme().warning
+        } else {
+            cx.theme().muted_foreground
+        };
+        let state_dot = if running > 0 || paused {
+            div().size(px(8.)).rounded_full().bg(state_color)
+        } else {
+            div()
+                .size(px(8.))
+                .rounded_full()
+                .border_1()
+                .border_color(state_color)
+        };
+        let state_tooltip = t!(
+            "app.containers.summary",
+            running = running,
+            total = containers.len()
+        )
+        .into_owned();
+        let latest_stats: Vec<_> = containers
+            .iter()
+            .filter(|container| container.is_running())
+            .filter_map(|container| self.container_stats.latest(&container.id))
+            .collect();
+        let cpu_total = latest_stats.iter().try_fold(0.0, |total, stats| {
+            stats.cpu_percent.map(|value| total + value)
+        });
+        let cpu_usage = if running == 0 {
+            "—".into()
+        } else {
+            cpu_total.map_or_else(
+                || "N/A".into(),
+                |total| format_cpu_usage(total, self.snapshot.engine.cpus),
+            )
+        };
+        let memory_usage = if running == 0 {
+            "—".into()
+        } else if latest_stats.is_empty() {
+            "N/A".into()
+        } else {
+            let used = latest_stats.iter().fold(0u64, |total, stats| {
+                total.saturating_add(stats.memory_bytes)
+            });
+            format_memory_usage(used, self.snapshot.engine.memory_bytes)
+        };
+        let created = containers
+            .iter()
+            .map(|container| container.created)
+            .max()
+            .unwrap_or_default();
+
+        div()
+            .id((ElementId::from("compose-project-row"), project.to_string()))
+            .px_4()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .flex()
+            .items_center()
+            .text_sm()
+            .cursor_pointer()
+            .hover(|this| this.bg(cx.theme().accent))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.compose_projects_collapsed.remove(&toggle_project) {
+                    this.compose_projects_collapsed
+                        .insert(toggle_project.clone());
+                }
+                cx.notify();
+            }))
+            .child(
+                div().w(px(CONTAINER_CHECK_COLUMN)).flex_shrink_0().child(
+                    Checkbox::new((
+                        ElementId::from("check-compose-project"),
+                        project.to_string(),
+                    ))
+                    .checked(all_checked)
+                    .on_click(cx.listener(
+                        move |this, checked: &bool, _, cx| {
+                            for id in &visible_ids {
+                                if *checked {
+                                    this.containers_checked.insert(id.clone());
+                                } else {
+                                    this.containers_checked.remove(id);
+                                }
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        },
+                    )),
+                ),
+            )
+            .child(
+                div()
+                    .id((
+                        ElementId::from("compose-project-toggle"),
+                        project.to_string(),
+                    ))
+                    .w(px(CONTAINER_STATUS_COLUMN))
+                    .flex_shrink_0()
+                    .text_color(cx.theme().primary)
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .small(),
+                    )
+                    .tooltip(move |window, cx| {
+                        Tooltip::new(toggle_tooltip.clone()).build(window, cx)
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(112.))
+                    .py_3()
+                    .pr_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id((
+                                ElementId::from("compose-project-state"),
+                                project.to_string(),
+                            ))
+                            .flex_shrink_0()
+                            .child(state_dot)
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(state_tooltip.clone()).build(window, cx)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id((ElementId::from("open-compose-project"), project.to_string()))
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .cursor_pointer()
+                            .font_semibold()
+                            .text_color(cx.theme().primary)
+                            .hover(|this| this.underline())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.select_compose_project(open_project.clone(), cx);
+                            }))
+                            .child(project.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .font_normal()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                t!("app.containers.compose_services", count = containers.len())
+                                    .into_owned(),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_ID_COLUMN))
+                    .flex_shrink_0()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("—"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(112.))
+                    .pr_3()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("—"),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_PORTS_COLUMN))
+                    .flex_shrink_0()
+                    .pr_2()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("—"),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_CPU_COLUMN))
+                    .flex_shrink_0()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(cpu_usage),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_MEMORY_COLUMN))
+                    .flex_shrink_0()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(memory_usage),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_CREATED_COLUMN))
+                    .flex_shrink_0()
+                    .child(format_relative(created, now)),
+            )
+            .child(div().w(px(CONTAINER_ACTIONS_COLUMN)).flex_shrink_0())
+    }
+
     fn render_container_row(
         &self,
         index: usize,
         container: &ContainerSummary,
         now: i64,
         busy: bool,
+        nested: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let detail_id = container.id.clone();
@@ -2900,8 +3273,9 @@ impl RuskerApp {
                     .min_w(px(112.))
                     .py_3()
                     .pr_3()
+                    .when(nested, |this| this.pl_4())
                     .truncate()
-                    .child(container.name.clone()),
+                    .child(container_list_name(container, nested).to_owned()),
             )
             .child(
                 div()
@@ -5114,6 +5488,71 @@ fn engine_reconnect_label(
         Some(t!("app.status.connecting").into())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod container_list_tests {
+    use super::{container_list_name, group_container_list, ContainerListItem};
+    use rusker_desktop::model::ContainerSummary;
+
+    fn container(id: &str, compose_project: Option<&str>) -> ContainerSummary {
+        ContainerSummary {
+            id: id.into(),
+            name: id.into(),
+            compose_project: compose_project.map(str::to_owned),
+            ..ContainerSummary::default()
+        }
+    }
+
+    #[test]
+    fn nested_names_remove_only_the_matching_compose_prefix() {
+        let dashed = container("shop-web-1", Some("shop"));
+        let underscored = container("shop_database_1", Some("shop"));
+        let unrelated = container("other-web-1", Some("shop"));
+        let exact_project = container("shop", Some("shop"));
+
+        assert_eq!(container_list_name(&dashed, true), "web-1");
+        assert_eq!(container_list_name(&underscored, true), "database_1");
+        assert_eq!(container_list_name(&unrelated, true), "other-web-1");
+        assert_eq!(container_list_name(&exact_project, true), "shop");
+        assert_eq!(container_list_name(&dashed, false), "shop-web-1");
+    }
+
+    #[test]
+    fn compose_services_group_at_the_projects_first_occurrence() {
+        let items = group_container_list(vec![
+            container("web", Some("shop")),
+            container("standalone", None),
+            container("database", Some("shop")),
+            container("proxy", Some("edge")),
+        ]);
+
+        assert_eq!(items.len(), 3);
+        match &items[0] {
+            ContainerListItem::ComposeProject {
+                project,
+                containers,
+            } => {
+                assert_eq!(project, "shop");
+                assert_eq!(
+                    containers
+                        .iter()
+                        .map(|container| container.id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["web", "database"]
+                );
+            }
+            other => panic!("expected shop project, got {other:?}"),
+        }
+        assert!(matches!(
+            &items[1],
+            ContainerListItem::Container(container) if container.id == "standalone"
+        ));
+        assert!(matches!(
+            &items[2],
+            ContainerListItem::ComposeProject { project, .. } if project == "edge"
+        ));
     }
 }
 
