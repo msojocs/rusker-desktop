@@ -203,3 +203,12 @@ Windows 安装包支持两种安装模式：
 - 为所有用户安装：安装到 `%ProgramFiles%\Rusker Desktop`，写入 HKLM，快捷方式放到公共开始菜单与桌面，需要管理员权限
 
 安装包以普通权限启动，不弹 UAC。在“选择安装方式”页面选择“为所有用户安装”并点击“下一步”时才请求管理员权限：安装包会通过 UAC 以管理员身份重新启动并直接进入目录页，原进程退出；取消 UAC 则停留在该页。普通用户也可借助管理员凭据为所有用户安装。卸载为所有用户安装的版本时同样会请求管理员权限。静默安装可用 `/S /CurrentUser` 或 `/S /AllUsers`（后者会弹出 UAC）。升级时默认沿用已有安装的模式和目录。卸载不会删除用户设置和受管 WSL2 发行版（它们始终按用户存放）。
+
+安装包自带 Windows Docker CLI（`resources\bin\docker.exe`，许可证在 `resources\licenses\docker-cli\`），并把 `resources\bin` 追加到对应安装模式的 Path 末尾（仅为我安装写用户 Path，为所有用户安装写系统 Path），因此已安装的 Docker Desktop 等 CLI 仍然优先；卸载时移除该项。CLI 来自 Chocolatey 的 [`docker-cli`](https://community.chocolatey.org/packages/docker-cli) 包（重新打包的 Docker 官方静态构建），版本与 SHA256 固定在 `packaging/windows/fetch-docker-cli.ps1`；升级时同时修改其中的版本号和两个哈希。本地打包：
+
+```powershell
+pwsh packaging\windows\fetch-docker-cli.ps1   # 输出到 dist\docker-cli
+makensis /DVERSION=0.1.0 /DVERSION_NUMERIC=0.1.0.0 /DSOURCE_EXE=$PWD\target\release\rusker-desktop.exe `
+  /DROOTFS=$PWD\dist\rootfs\rusker-rootfs-v1-amd64.tar.xz /DDOCKER_CLI_DIR=$PWD\dist\docker-cli `
+  /DOUTFILE=$PWD\dist\rusker-desktop-0.1.0-windows-x64-setup.exe packaging\windows\installer.nsi
+```

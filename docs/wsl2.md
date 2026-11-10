@@ -47,7 +47,7 @@ Windows                                   WSL2 utility VM
 - **Resource Saver 是暂停，不是冷停**：启用资源节省后，没有运行中的容器和 Windows 管道客户端连接、且未启用任何 WSL 集成，空闲达到阈值时，Rusker 向 `dockerd` 及其直接管理的 `containerd` 发送 `SIGSTOP`；长期 WSL 会话、`rusker` 发行版和数据 VHD 挂载均保留，不终止发行版、不卸载磁盘。Windows named pipe 的下一请求在全局操作锁下通过 `SIGCONT` 恢复 Engine，等待 Docker API 就绪后再转发原请求；关闭资源节省开关也会恢复已暂停的 Engine。手动停止和退出仍走上述正常关闭流程。
 - 启用任意 WSL 集成时不自动进入资源节省模式，因为集成发行版直连共享 socket，不能触发 Windows 侧唤醒。暂停不保证释放 WSL 内存，建议按需启用 WSL `autoMemoryReclaim`；Rusker 不会自动修改用户全局 `.wslconfig`。这对齐 Docker 官方 Windows WSL 后端的 Resource Saver 语义，但不宣称 Docker 官方也使用 `SIGSTOP`/`SIGCONT`。详见[资源节省设置](settings.md#资源节省)。
 
-Windows 下的 `docker.exe` 可以这样使用受管 Engine：
+Windows 下的 `docker.exe` 可以这样使用受管 Engine（安装包自带 Docker CLI 并加入 Path，见[打包与发布](development.md#打包与发布)）：
 
 ```powershell
 docker context create rusker --docker "host=npipe:////./pipe/rusker_engine"

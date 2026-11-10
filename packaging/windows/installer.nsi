@@ -6,6 +6,7 @@
 ;   makensis /DVERSION=0.1.0 /DVERSION_NUMERIC=0.1.0.0 ^
 ;            /DSOURCE_EXE=%CD%\target\release\rusker-desktop.exe ^
 ;            /DROOTFS=%CD%\dist\rootfs\rusker-rootfs-v1-amd64.tar.xz ^
+;            /DDOCKER_CLI_DIR=%CD%\dist\docker-cli ^
 ;            /DOUTFILE=%CD%\dist\rusker-desktop-0.1.0-windows-x64-setup.exe ^
 ;            packaging\windows\installer.nsi
 ;
@@ -13,6 +14,11 @@
 ; (images/wsl-rootfs/build.sh, version in images/wsl-rootfs/VERSION). It is
 ; installed to resources\wsl\, the only place the app imports it from, like
 ; Docker Desktop's resources\docker-desktop.iso; it is never downloaded.
+;
+; DOCKER_CLI_DIR holds the Windows Docker CLI written by
+; fetch-docker-cli.ps1. docker.exe goes to resources\bin\, which is appended
+; to the Path of the install mode (user or system) so that a Docker CLI
+; already on Path, e.g. Docker Desktop's, keeps precedence.
 ;
 ; Install modes:
 ;   - Current user (default): %LOCALAPPDATA%\Programs\Rusker Desktop, HKCU.
@@ -46,6 +52,9 @@ RequestExecutionLevel user
 !endif
 !ifndef ROOTFS
   !error "ROOTFS must point at the WSL2 system image, e.g. /DROOTFS=%CD%\dist\rootfs\rusker-rootfs-v1-amd64.tar.xz"
+!endif
+!ifndef DOCKER_CLI_DIR
+  !error "DOCKER_CLI_DIR must point at the output of fetch-docker-cli.ps1, e.g. /DDOCKER_CLI_DIR=%CD%\dist\docker-cli"
 !endif
 
 !define APP_NAME "Rusker Desktop"
@@ -134,6 +143,8 @@ LangString ModeAllUsers ${LANG_SIMPCHINESE} "为所有用户安装(&A)"
 LangString ModeAllUsers ${LANG_ENGLISH} "For &anyone who uses this computer"
 LangString ModeAllUsersHint ${LANG_SIMPCHINESE} "安装到 Program Files，点击“下一步”时需要管理员授权。"
 LangString ModeAllUsersHint ${LANG_ENGLISH} "Installs into Program Files; clicking Next asks for administrator approval."
+LangString MsgPathFailed ${LANG_SIMPCHINESE} "无法更新环境变量 Path，请手动将 $INSTDIR\resources\bin 加入 Path。"
+LangString MsgPathFailed ${LANG_ENGLISH} "Could not update the Path environment variable; add $INSTDIR\resources\bin to Path manually."
 
 ; Asks the user to quit a running instance; files cannot be replaced while the
 ; exe is locked. The app is not killed forcibly so it can shut down its engine.
@@ -177,6 +188,23 @@ LangString ModeAllUsersHint ${LANG_ENGLISH} "Installs into Program Files; clicki
 !macroend
 !insertmacro MODE_FUNCTIONS ""
 !insertmacro MODE_FUNCTIONS "un."
+
+; Adds (ACTION Add) or removes (ACTION Remove) $INSTDIR\resources\bin in the
+; Path of the current install mode through update-path.ps1, which is embedded
+; in whichever of the installer and uninstaller expands this. Leaves the exit
+; code in $0.
+!macro UpdatePath ACTION
+  InitPluginsDir
+  File "/oname=$PLUGINSDIR\update-path.ps1" "update-path.ps1"
+  ${If} $InstallMode == "AllUsers"
+    StrCpy $1 "Machine"
+  ${Else}
+    StrCpy $1 "User"
+  ${EndIf}
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\update-path.ps1" -Action ${ACTION} -Dir "$INSTDIR\resources\bin" -Scope $1'
+  Pop $0
+  SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
+!macroend
 
 ; Applies $R0 ("AllUsers"/"CurrentUser") and, unless /D= was given or the user
 ; already edited the directory for this mode, the default INSTDIR: the
@@ -428,8 +456,18 @@ Section "Install"
   Delete "$INSTDIR\resources\wsl\rusker-rootfs-*.tar.xz"
   SetOutPath "$INSTDIR\resources\wsl"
   File "${ROOTFS}"
+  SetOutPath "$INSTDIR\resources\bin"
+  File "${DOCKER_CLI_DIR}\docker.exe"
+  SetOutPath "$INSTDIR\resources\licenses\docker-cli"
+  File "${DOCKER_CLI_DIR}\LICENSE.txt"
+  File "${DOCKER_CLI_DIR}\NOTICE.txt"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+
+  !insertmacro UpdatePath Add
+  ${If} $0 != 0
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(MsgPathFailed)" /SD IDOK
+  ${EndIf}
 
   ; SetShellVarContext (set by ApplyMode) points these at the current user's
   ; or the shared Start menu/Desktop; SHCTX is HKCU or HKLM accordingly.
@@ -464,8 +502,15 @@ Section "Uninstall"
   Delete "$INSTDIR\${APP_EXE}"
   Delete "$INSTDIR\LICENSE.txt"
   Delete "$INSTDIR\${APP_ICON}"
+  !insertmacro UpdatePath Remove
   Delete "$INSTDIR\resources\wsl\rusker-rootfs-*.tar.xz"
   RMDir "$INSTDIR\resources\wsl"
+  Delete "$INSTDIR\resources\bin\docker.exe"
+  RMDir "$INSTDIR\resources\bin"
+  Delete "$INSTDIR\resources\licenses\docker-cli\LICENSE.txt"
+  Delete "$INSTDIR\resources\licenses\docker-cli\NOTICE.txt"
+  RMDir "$INSTDIR\resources\licenses\docker-cli"
+  RMDir "$INSTDIR\resources\licenses"
   RMDir "$INSTDIR\resources"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"

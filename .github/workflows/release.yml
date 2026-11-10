@@ -114,6 +114,9 @@ jobs:
             }
             Add-Content $env:GITHUB_PATH $default
           }
+      - name: Fetch Docker CLI
+        shell: pwsh
+        run: packaging\windows\fetch-docker-cli.ps1 -OutDir (Join-Path $env:GITHUB_WORKSPACE 'dist\docker-cli')
       - name: Build installer
         shell: pwsh
         run: |
@@ -123,10 +126,14 @@ jobs:
           $version = (Get-Content images\wsl-rootfs\VERSION -Raw).Trim()
           $rootfs = Join-Path $env:GITHUB_WORKSPACE "rootfs\rusker-rootfs-v$version-amd64.tar.xz"
           if (-not (Test-Path $rootfs)) { throw "WSL2 system image $rootfs not found" }
+          $dockerCli = Join-Path $dist 'docker-cli'
           $out = Join-Path $dist "rusker-desktop-$env:VERSION-windows-x64-setup.exe"
           makensis /V3 "/DVERSION=$env:VERSION" "/DVERSION_NUMERIC=$env:VERSION_NUMERIC" `
-            "/DSOURCE_EXE=$exe" "/DROOTFS=$rootfs" "/DOUTFILE=$out" packaging\windows\installer.nsi
+            "/DSOURCE_EXE=$exe" "/DROOTFS=$rootfs" "/DDOCKER_CLI_DIR=$dockerCli" "/DOUTFILE=$out" `
+            packaging\windows\installer.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Only the installer is a release artifact.
+          Remove-Item -Recurse -Force $dockerCli
       - uses: actions/upload-artifact@v4
         with:
           name: windows
