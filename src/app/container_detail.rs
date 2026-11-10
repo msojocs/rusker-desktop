@@ -22,6 +22,12 @@ pub(super) struct ContainerStatsState {
     revision: Revision,
 }
 
+impl ContainerStatsState {
+    pub(super) fn latest(&self, id: &str) -> Option<&rusker_desktop::engine::ContainerStats> {
+        self.cache.latest(id)
+    }
+}
+
 fn stats_points(
     history: &StatsHistory,
     values: impl Fn(&rusker_desktop::engine::ContainerStats) -> [Option<f64>; 2],
@@ -1142,7 +1148,7 @@ impl RuskerApp {
     }
 }
 
-fn format_cpu(value: Option<f64>) -> String {
+pub(super) fn format_cpu(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.2}%"))
         .unwrap_or_else(|| "—".into())

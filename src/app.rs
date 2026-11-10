@@ -2513,10 +2513,29 @@ impl RuskerApp {
             .cloned()
             .collect();
 
-        let usage = if running == 0 {
-            t!("app.containers.usage_none").to_string()
+        let latest_stats: Vec<_> = all_containers
+            .iter()
+            .filter(|container| container.is_running())
+            .filter_map(|container| self.container_stats.latest(&container.id))
+            .collect();
+        let cpu_total = latest_stats.iter().try_fold(0.0, |total, stats| {
+            stats.cpu_percent.map(|value| total + value)
+        });
+        let cpu_usage = if running == 0 {
+            format_cpu_usage(0.0, self.snapshot.engine.cpus)
         } else {
-            t!("app.containers.usage_running", running = running).to_string()
+            cpu_total.map_or_else(
+                || t!("app.not_available").into_owned(),
+                |total| format_cpu_usage(total, self.snapshot.engine.cpus),
+            )
+        };
+        let memory_usage = if running > 0 && latest_stats.is_empty() {
+            t!("app.not_available").into_owned()
+        } else {
+            let used = latest_stats.iter().fold(0u64, |total, stats| {
+                total.saturating_add(stats.memory_bytes)
+            });
+            format_memory_usage(used, self.snapshot.engine.memory_bytes)
         };
 
         let title = div()
@@ -2567,15 +2586,15 @@ impl RuskerApp {
             .child(container_usage(
                 "cpu",
                 t!("app.containers.cpu_usage"),
-                t!("app.containers.stats_unavailable"),
-                &usage,
+                t!("app.containers.cpu_usage_tooltip"),
+                &cpu_usage,
                 cx,
             ))
             .child(container_usage(
                 "memory",
                 t!("app.containers.memory_usage"),
-                t!("app.containers.stats_unavailable"),
-                &usage,
+                t!("app.containers.memory_usage_tooltip"),
+                &memory_usage,
                 cx,
             ));
 
@@ -2681,7 +2700,13 @@ impl RuskerApp {
                 div()
                     .w(px(CONTAINER_CPU_COLUMN))
                     .flex_shrink_0()
-                    .child("CPU (%)"),
+                    .child(t!("app.containers.cpu")),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_MEMORY_COLUMN))
+                    .flex_shrink_0()
+                    .child(t!("app.containers.memory")),
             )
             .child(
                 div()
@@ -2790,6 +2815,20 @@ impl RuskerApp {
         let is_checked = self.containers_checked.contains(&container.id);
         let running = container.is_running();
         let paused = container.state.eq_ignore_ascii_case("paused");
+        let (cpu_usage, memory_usage) = if running {
+            match self.container_stats.latest(&container.id) {
+                Some(stats) => (
+                    stats.cpu_percent.map_or_else(
+                        || "N/A".into(),
+                        |value| format_cpu_usage(value, self.snapshot.engine.cpus),
+                    ),
+                    format_memory_usage(stats.memory_bytes, stats.memory_limit),
+                ),
+                None => ("N/A".into(), "N/A".into()),
+            }
+        } else {
+            ("—".into(), "—".into())
+        };
         let state_color = if running {
             cx.theme().success
         } else if paused {
@@ -2919,7 +2958,14 @@ impl RuskerApp {
                     .w(px(CONTAINER_CPU_COLUMN))
                     .flex_shrink_0()
                     .text_color(cx.theme().muted_foreground)
-                    .child("N/A"),
+                    .child(cpu_usage),
+            )
+            .child(
+                div()
+                    .w(px(CONTAINER_MEMORY_COLUMN))
+                    .flex_shrink_0()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(memory_usage),
             )
             .child(
                 div()
@@ -4509,6 +4555,20 @@ fn list_action_button(id: impl Into<ElementId>, color: Hsla, cx: &App) -> Button
     )
 }
 
+/// Formats CPU as used / available, where 100% is one logical CPU.
+fn format_cpu_usage(used: f64, available_cpus: u32) -> String {
+    format!(
+        "{} / {}",
+        container_detail::format_cpu(Some(used)),
+        container_detail::format_cpu(Some(f64::from(available_cpus) * 100.0))
+    )
+}
+
+/// Formats memory as used / available.
+fn format_memory_usage(used: u64, available: u64) -> String {
+    format!("{} / {}", format_bytes(used), format_bytes(available))
+}
+
 /// Usage summary block shown above the container table.
 fn container_usage(
     key: &'static str,
@@ -4717,7 +4777,8 @@ const CONTAINER_CHECK_COLUMN: f32 = 34.;
 const CONTAINER_STATUS_COLUMN: f32 = 26.;
 const CONTAINER_ID_COLUMN: f32 = 108.;
 const CONTAINER_PORTS_COLUMN: f32 = 88.;
-const CONTAINER_CPU_COLUMN: f32 = 56.;
+const CONTAINER_CPU_COLUMN: f32 = 152.;
+const CONTAINER_MEMORY_COLUMN: f32 = 152.;
 const CONTAINER_CREATED_COLUMN: f32 = 88.;
 const CONTAINER_ACTIONS_COLUMN: f32 = 108.;
 

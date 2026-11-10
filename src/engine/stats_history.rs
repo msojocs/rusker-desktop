@@ -86,6 +86,10 @@ impl StatsCache {
         self.containers.get(id).map(|entry| &entry.history)
     }
 
+    pub fn latest(&self, id: &str) -> Option<&ContainerStats> {
+        self.history(id)?.samples.back().map(|sample| &sample.stats)
+    }
+
     pub fn error(&self, id: &str) -> Option<&str> {
         self.containers.get(id)?.error.as_deref()
     }

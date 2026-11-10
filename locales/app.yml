@@ -281,12 +281,6 @@ app.os:
 app.arch:
   en: "Architecture"
   zh-CN: "架构"
-app.containers.usage_none:
-  en: "No containers are running."
-  zh-CN: "暂无运行中的容器。"
-app.containers.usage_running:
-  en: "%{running} containers running. Live stats are not supported yet."
-  zh-CN: "%{running} 个容器运行中，实时统计尚未支持。"
 app.containers.summary:
   en: "%{running} running · %{total} total"
   zh-CN: "%{running} 个运行中 · 共 %{total} 个"
@@ -296,12 +290,21 @@ app.create:
 app.containers.cpu_usage:
   en: "Container CPU usage"
   zh-CN: "容器 CPU 使用率"
+app.containers.cpu_usage_tooltip:
+  en: "CPU used by running containers / CPU available to the Engine, sampled every 10 seconds. 100% equals one logical CPU."
+  zh-CN: "运行中容器已用 CPU / Engine 可用 CPU，每 10 秒采样一次。100% 相当于一个逻辑 CPU。"
+app.containers.cpu:
+  en: "CPU (used/available)"
+  zh-CN: "CPU（已用/可用）"
 app.containers.memory_usage:
   en: "Container memory usage"
   zh-CN: "容器内存使用率"
-app.containers.stats_unavailable:
-  en: "Requires live stats support from the Engine, which this version does not provide."
-  zh-CN: "需要 Engine 实时统计支持，当前版本暂未提供。"
+app.containers.memory_usage_tooltip:
+  en: "Memory used by running containers / total memory available to the Engine, sampled every 10 seconds. Usage excludes inactive file cache."
+  zh-CN: "运行中容器已用内存 / Engine 可用总内存，每 10 秒采样一次。已用内存不包含非活动文件缓存。"
+app.containers.memory:
+  en: "Memory (used/limit)"
+  zh-CN: "内存（已用/可用）"
 app.containers.running_only:
   en: "Only show running containers"
   zh-CN: "仅显示运行中的容器"
