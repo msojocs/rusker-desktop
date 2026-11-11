@@ -580,7 +580,7 @@ impl RuskerApp {
                 match result {
                     Ok((id, snapshot)) => {
                         this.connected = true;
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.after_volume_snapshot(cx);
                         let search = this.search_input.clone();
                         _ = cx.update_window(window, |_, window, cx| {

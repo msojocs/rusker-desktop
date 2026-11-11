@@ -64,6 +64,7 @@ mod containers;
 mod desktop_import;
 mod docker_context;
 mod images;
+mod navigation;
 mod notifications;
 mod run;
 mod volumes;
@@ -72,6 +73,7 @@ use container_detail::{ContainerStatsState, ContainerTools};
 use containers::{ContainerEmpty, ContainerTables};
 use desktop_import::DesktopImportState;
 use images::{ImageState, ImageTable};
+use navigation::{ContainerNavigation, ContainerPage};
 use run::RunForm;
 use volumes::{VolumeState, VolumeTable};
 
@@ -305,9 +307,7 @@ pub struct RuskerApp {
     connected: bool,
     loading: bool,
     busy: Option<String>,
-    selected_container: Option<String>,
-    /// Compose project currently open in the split service/log detail view.
-    selected_compose_project: Option<String>,
+    container_navigation: ContainerNavigation,
     compose_config_view: Option<Entity<compose_config::ComposeConfigView>>,
     /// Container list shows only running containers.
     containers_running_only: bool,
@@ -631,8 +631,7 @@ impl RuskerApp {
             connected: false,
             loading: false,
             busy: None,
-            selected_container: None,
-            selected_compose_project: None,
+            container_navigation: ContainerNavigation::default(),
             compose_config_view: None,
             containers_running_only: false,
             containers_checked: HashSet::new(),
@@ -877,6 +876,7 @@ impl RuskerApp {
         }
         if page != Page::Containers {
             self.reset_container_tools();
+            self.container_navigation.reset();
             self.compose_config_view = None;
         }
         self.page = page;
@@ -884,8 +884,7 @@ impl RuskerApp {
             self.reset_container_tools();
             // The sidebar entry always opens the container list, not the
             // detail page of the last selected container.
-            self.selected_container = None;
-            self.selected_compose_project = None;
+            self.container_navigation.reset();
             self.logs_revision.advance();
             self.logs_loading = false;
             self.logs.clear();
@@ -1216,7 +1215,7 @@ impl RuskerApp {
                 match result {
                     Ok(snapshot) => {
                         this.connected = true;
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.after_volume_snapshot(cx);
                         this.sync_container_tools(cx);
                         this.maybe_prompt_docker_context(cx);
@@ -1232,43 +1231,23 @@ impl RuskerApp {
         }));
     }
 
-    fn apply_snapshot(&mut self, snapshot: EngineSnapshot) {
+    fn apply_snapshot(&mut self, snapshot: EngineSnapshot, cx: &mut Context<Self>) {
         self.reconcile_container_stats(&snapshot.containers);
-        if let Some(selected) = self.selected_container.as_ref() {
-            if !snapshot
-                .containers
-                .iter()
-                .any(|container| &container.id == selected)
-            {
-                self.selected_container = None;
-                self.reset_container_tools();
-                self.logs_revision.advance();
-                self.logs_loading = false;
-                self.logs.clear();
-                self.logs_error = None;
-            }
-        }
-        if let Some(project) = self.selected_compose_project.as_ref() {
-            if !snapshot
-                .containers
-                .iter()
-                .any(|container| container.compose_project.as_deref() == Some(project.as_str()))
-            {
-                self.selected_compose_project = None;
-                self.compose_config_view = None;
-                self.logs_revision.advance();
-                self.logs_loading = false;
-                self.logs.clear();
-                self.logs_error = None;
-            }
-        }
+        let page_changed = self.container_navigation.reconcile(&snapshot.containers);
         self.snapshot = snapshot;
-        if self.selected_container.as_ref().is_some_and(|selected| {
-            self.snapshot
-                .containers
-                .iter()
-                .any(|container| &container.id == selected && !container.is_running())
-        }) {
+        if page_changed {
+            self.restore_container_page(cx);
+        }
+        if self
+            .container_navigation
+            .container()
+            .is_some_and(|selected| {
+                self.snapshot
+                    .containers
+                    .iter()
+                    .any(|container| &container.id == selected && !container.is_running())
+            })
+        {
             self.stop_container_live_tools();
         }
         let ids: HashSet<&str> = self
@@ -1284,24 +1263,44 @@ impl RuskerApp {
     }
 
     fn select_container(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.selected_container.as_deref() != Some(id.as_str()) {
+        if self.container_navigation.container() != Some(&id) {
             self.reset_container_tools();
             self.container_tab = 0;
         }
-        self.selected_container = Some(id.clone());
-        self.selected_compose_project = None;
+        self.container_navigation
+            .push(ContainerPage::Container(id.clone()));
         self.compose_config_view = None;
         self.load_logs(id, cx);
     }
 
-    /// Returns from the container detail page to the container list.
+    /// Returns to the page from which the container detail was opened.
     fn close_container_detail(&mut self, cx: &mut Context<Self>) {
+        self.container_navigation.back();
+        self.restore_container_page(cx);
+    }
+
+    fn show_container_list(&mut self, cx: &mut Context<Self>) {
+        self.container_navigation.reset();
+        self.restore_container_page(cx);
+    }
+
+    fn restore_container_page(&mut self, cx: &mut Context<Self>) {
         self.reset_container_tools();
-        self.selected_container = None;
+        self.compose_config_view = None;
         self.logs_revision.advance();
+        self._logs_task = None;
         self.logs_loading = false;
         self.logs.clear();
         self.logs_error = None;
+        match self.container_navigation.current().clone() {
+            ContainerPage::Container(id) => {
+                self.container_tab = 0;
+                self.load_logs(id, cx);
+            }
+            ContainerPage::ComposeProject(project) => self.load_compose_logs(&project, cx),
+            ContainerPage::ComposeConfig(project) => self.open_compose_config(&project, cx),
+            ContainerPage::List => {}
+        }
         cx.notify();
     }
 
@@ -1858,7 +1857,7 @@ impl RuskerApp {
                 match result {
                     Ok(snapshot) => {
                         this.connected = true;
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.notify_success(t!("app.operation_done", operation = label), cx);
                         this.after_volume_snapshot(cx);
                         this.sync_container_tools(cx);
@@ -2032,7 +2031,7 @@ impl RuskerApp {
                 match result {
                     Ok((_new_id, snapshot)) => {
                         this.connected = true;
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.after_volume_snapshot(cx);
                         this.sync_container_tools(cx);
                         let window = this.window_handle;
@@ -2217,7 +2216,7 @@ impl RuskerApp {
                                 .iter()
                                 .any(|container| &container.id == id)
                         });
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.after_volume_snapshot(cx);
                         this.sync_container_tools(cx);
                         if failures.is_empty() {
@@ -2569,7 +2568,7 @@ impl RuskerApp {
     }
 
     fn render_containers(&self, cx: &mut Context<Self>) -> Div {
-        if let Some(project) = self.selected_compose_project.as_ref() {
+        if let Some(project) = self.container_navigation.compose_project() {
             let containers: Vec<ContainerSummary> = self
                 .snapshot
                 .containers
@@ -2580,8 +2579,8 @@ impl RuskerApp {
             return self.render_compose_project_detail(project, &containers, cx);
         }
         let selected = self
-            .selected_container
-            .as_ref()
+            .container_navigation
+            .container()
             .and_then(|id| {
                 self.snapshot
                     .containers
@@ -2803,6 +2802,12 @@ impl RuskerApp {
         let tab = self.container_tab.min(5);
         let weak = cx.weak_entity();
         let back_weak = weak.clone();
+        let parent_project = self.container_navigation.parent_project().cloned();
+        let back_tooltip = if parent_project.is_some() {
+            t!("app.compose.back_to_project")
+        } else {
+            t!("app.back_to_containers")
+        };
         let start_id = container.id.clone();
         let stop_id = container.id.clone();
         let restart_id = container.id.clone();
@@ -2971,9 +2976,18 @@ impl RuskerApp {
                                 .text_color(cx.theme().primary)
                                 .on_click(move |_, _, cx| {
                                     _ = back_weak
-                                        .update(cx, |this, cx| this.close_container_detail(cx));
+                                        .update(cx, |this, cx| this.show_container_list(cx));
                                 }),
                         )
+                        .when_some(parent_project, |breadcrumb, project| {
+                            breadcrumb.child(
+                                BreadcrumbItem::new(project)
+                                    .text_color(cx.theme().primary)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_container_detail(cx);
+                                    })),
+                            )
+                        })
                         .child(BreadcrumbItem::new(container.name.clone())),
                 ),
             )
@@ -2989,7 +3003,7 @@ impl RuskerApp {
                             .ghost()
                             .small()
                             .icon(IconName::ChevronLeft)
-                            .tooltip(t!("app.back_to_containers"))
+                            .tooltip(back_tooltip)
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.close_container_detail(cx)),
                             ),

@@ -110,23 +110,18 @@ pub(super) fn compose_project_menu(
 impl RuskerApp {
     pub(super) fn select_compose_project(&mut self, project: String, cx: &mut Context<Self>) {
         self.reset_container_tools();
-        self.selected_container = None;
         self.compose_config_view = None;
-        self.selected_compose_project = Some(project.clone());
+        self.container_navigation
+            .push(ContainerPage::ComposeProject(project.clone()));
         self.load_compose_logs(&project, cx);
     }
 
     pub(super) fn close_compose_project(&mut self, cx: &mut Context<Self>) {
-        self.selected_compose_project = None;
-        self.compose_config_view = None;
-        self.logs_revision.advance();
-        self.logs_loading = false;
-        self.logs.clear();
-        self.logs_error = None;
-        cx.notify();
+        self.container_navigation.back();
+        self.restore_container_page(cx);
     }
 
-    fn load_compose_logs(&mut self, project: &str, cx: &mut Context<Self>) {
+    pub(super) fn load_compose_logs(&mut self, project: &str, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.clone() else {
             return;
         };
@@ -208,7 +203,7 @@ impl RuskerApp {
                 match result {
                     Ok((snapshot, failures)) => {
                         this.connected = true;
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.after_volume_snapshot(cx);
                         this.sync_container_tools(cx);
                         if failures.is_empty() {
@@ -280,7 +275,7 @@ impl RuskerApp {
                             BreadcrumbItem::new(t!("app.page.containers").into_owned())
                                 .text_color(cx.theme().primary)
                                 .on_click(move |_, _, cx| {
-                                    _ = weak.update(cx, |this, cx| this.close_compose_project(cx));
+                                    _ = weak.update(cx, |this, cx| this.show_container_list(cx));
                                 }),
                         )
                         .child(BreadcrumbItem::new(project.to_string())),

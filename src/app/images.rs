@@ -265,7 +265,7 @@ impl RuskerApp {
                 match result {
                     Ok((snapshot, failures)) => {
                         this.connected = true;
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         if failures.is_empty() {
                             this.notify_success(t!("images.remove_many.done", count = total), cx);
                         } else {

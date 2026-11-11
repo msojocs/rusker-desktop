@@ -407,12 +407,15 @@ impl RuskerApp {
             .filter(|container| container.compose_project.as_deref() == Some(project))
             .cloned()
             .collect();
+        self.container_navigation
+            .push(ContainerPage::ComposeConfig(project.to_string()));
         self.compose_config_view =
             Some(cx.new(|cx| ComposeConfigView::new(project.to_string(), &containers, cx)));
         cx.notify();
     }
 
     fn close_compose_config(&mut self, cx: &mut Context<Self>) {
+        self.container_navigation.back();
         self.compose_config_view = None;
         cx.notify();
     }
@@ -443,7 +446,7 @@ impl RuskerApp {
                             BreadcrumbItem::new(t!("app.page.containers").into_owned())
                                 .text_color(cx.theme().primary)
                                 .on_click(move |_, _, cx| {
-                                    _ = weak.update(cx, |this, cx| this.close_compose_project(cx));
+                                    _ = weak.update(cx, |this, cx| this.show_container_list(cx));
                                 }),
                         )
                         .child(

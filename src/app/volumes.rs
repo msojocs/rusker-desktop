@@ -240,7 +240,7 @@ impl RuskerApp {
             handle,
             move |this, (snapshot, failures), cx| {
                 this.connected = true;
-                this.apply_snapshot(snapshot);
+                this.apply_snapshot(snapshot, cx);
                 if failures.is_empty() {
                     this.notify_success(t!("volumes.notice.removed_many", count = total), cx);
                 } else {
