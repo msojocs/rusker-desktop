@@ -562,7 +562,11 @@ impl TableDelegate for ContainerTable {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let cell = if col_ix < 3 {
+            // DataTable reserves 12px for sorting even with p_0() and sorting
+            // disabled. Prevent its flex wrapper from shrinking these headers.
             container_control_header_cell(cx)
+                .w(self.column(col_ix, cx).width)
+                .flex_shrink_0()
         } else {
             centered_container_cell()
         };
@@ -631,10 +635,6 @@ impl TableDelegate for ContainerTable {
             .text_sm()
             .cursor_pointer()
             .when(checked, |this| this.bg(cx.theme().accent))
-            .when(
-                matches!(row, ContainerListItem::ComposeProject { .. }),
-                |this| this.bg(cx.theme().secondary),
-            )
             .on_click(move |_, _, cx| activate_container_row(&weak, &row, cx))
     }
 
@@ -720,7 +720,9 @@ impl TableDelegate for ContainerActionsTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        centered_container_cell().child(self.column(col_ix, cx).name.clone())
+        centered_container_cell()
+            .pl(px(10.))
+            .child(self.column(col_ix, cx).name.clone())
     }
 
     fn render_tr(
@@ -743,10 +745,6 @@ impl TableDelegate for ContainerActionsTable {
             .text_sm()
             .cursor_pointer()
             .when(checked, |this| this.bg(cx.theme().accent))
-            .when(
-                matches!(row, ContainerListItem::ComposeProject { .. }),
-                |this| this.bg(cx.theme().secondary),
-            )
             .on_click(move |_, _, cx| activate_container_row(&weak, &row, cx))
     }
 
@@ -871,9 +869,16 @@ fn container_control_cell() -> Div {
 }
 
 fn container_control_header_cell(cx: &App) -> Div {
-    container_control_cell()
-        .border_r_1()
-        .border_color(cx.theme().border)
+    // Keep the separator out of layout so header controls share body centers.
+    container_control_cell().relative().child(
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(px(1.))
+            .bg(cx.theme().border),
+    )
 }
 
 fn state_dot(running: bool, paused: bool, cx: &App) -> Div {

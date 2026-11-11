@@ -4535,8 +4535,8 @@ const APP_BAR_HEIGHT: f32 = 48.;
 const WINDOW_BUTTON_WIDTH: f32 = 46.;
 /// Container table column defaults; DataTable owns subsequent width changes.
 const CONTAINER_CHECK_COLUMN: f32 = 34.;
-const CONTAINER_EXPAND_COLUMN: f32 = 20.;
-const CONTAINER_STATUS_COLUMN: f32 = 31.;
+const CONTAINER_EXPAND_COLUMN: f32 = 25.;
+const CONTAINER_STATUS_COLUMN: f32 = 51.;
 const CONTAINER_NAME_COLUMN: f32 = 160.;
 const CONTAINER_ID_COLUMN: f32 = 108.;
 const CONTAINER_IMAGE_COLUMN: f32 = 160.;
