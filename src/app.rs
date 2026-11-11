@@ -270,26 +270,19 @@ fn group_container_list(containers: Vec<ContainerSummary>) -> Vec<ContainerListI
     items
 }
 
-/// Compose names containers as `project-service-1` (or with underscores).
-/// Inside the project group, the repeated project prefix adds no information.
+/// Nested Compose containers prefer their replacement label, falling back to
+/// the full container name without removing the repeated project prefix.
 fn container_list_name(container: &ContainerSummary, nested: bool) -> &str {
-    if !nested {
-        return &container.name;
+    if nested {
+        if let Some(replace) = container
+            .compose_replace
+            .as_deref()
+            .filter(|replace| !replace.is_empty())
+        {
+            return replace;
+        }
     }
-    let Some(project) = container.compose_project.as_deref() else {
-        return &container.name;
-    };
-    if project.is_empty() {
-        return &container.name;
-    }
-    let Some(suffix) = container.name.strip_prefix(project) else {
-        return &container.name;
-    };
-    suffix
-        .strip_prefix('-')
-        .or_else(|| suffix.strip_prefix('_'))
-        .filter(|suffix| !suffix.is_empty())
-        .unwrap_or(&container.name)
+    &container.name
 }
 
 pub struct RuskerApp {
@@ -5506,17 +5499,19 @@ mod container_list_tests {
     }
 
     #[test]
-    fn nested_names_remove_only_the_matching_compose_prefix() {
-        let dashed = container("shop-web-1", Some("shop"));
-        let underscored = container("shop_database_1", Some("shop"));
-        let unrelated = container("other-web-1", Some("shop"));
-        let exact_project = container("shop", Some("shop"));
+    fn nested_names_prefer_the_replace_label_and_otherwise_use_the_full_name() {
+        let mut replaced = container("shop-web-1", Some("shop"));
+        replaced.compose_replace = Some("frontend".into());
+        let mut empty_replace = container("shop_database_1", Some("shop"));
+        empty_replace.compose_replace = Some(String::new());
 
-        assert_eq!(container_list_name(&dashed, true), "web-1");
-        assert_eq!(container_list_name(&underscored, true), "database_1");
-        assert_eq!(container_list_name(&unrelated, true), "other-web-1");
-        assert_eq!(container_list_name(&exact_project, true), "shop");
-        assert_eq!(container_list_name(&dashed, false), "shop-web-1");
+        assert_eq!(container_list_name(&replaced, true), "frontend");
+        assert_eq!(container_list_name(&replaced, false), "shop-web-1");
+        assert_eq!(container_list_name(&empty_replace, true), "shop_database_1");
+        assert_eq!(
+            container_list_name(&container("other-web-1", Some("shop")), true),
+            "other-web-1"
+        );
     }
 
     #[test]

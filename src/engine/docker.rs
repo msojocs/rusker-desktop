@@ -30,8 +30,8 @@ use crate::{
     model::{
         ContainerAction, ContainerSummary as ContainerDto, CreateContainerRequest, EngineInfo,
         EngineSnapshot, ImageDetail, ImageLayer, ImageSummary as ImageDto, PortMapping,
-        VolumeSummary, COMPOSE_CONFIG_FILES_LABEL, COMPOSE_PROJECT_LABEL, COMPOSE_SERVICE_LABEL,
-        COMPOSE_WORKING_DIR_LABEL,
+        VolumeSummary, COMPOSE_CONFIG_FILES_LABEL, COMPOSE_PROJECT_LABEL, COMPOSE_REPLACE_LABEL,
+        COMPOSE_SERVICE_LABEL, COMPOSE_WORKING_DIR_LABEL,
     },
     volume::{
         container_path, parse_listing, parse_timestamp, partial_export_path, validate_volume_name,
@@ -1208,6 +1208,7 @@ pub(super) fn container_dto(container: ContainerSummary) -> ContainerDto {
         volumes,
         compose_project: labels.get(COMPOSE_PROJECT_LABEL).cloned(),
         compose_service: labels.get(COMPOSE_SERVICE_LABEL).cloned(),
+        compose_replace: labels.get(COMPOSE_REPLACE_LABEL).cloned(),
         compose_working_dir: labels.get(COMPOSE_WORKING_DIR_LABEL).cloned(),
         compose_config_files: labels.get(COMPOSE_CONFIG_FILES_LABEL).cloned(),
     }
@@ -1276,7 +1277,7 @@ mod tests {
 
     use crate::model::{
         ImageDetail, ImageLayer, COMPOSE_CONFIG_FILES_LABEL, COMPOSE_PROJECT_LABEL,
-        COMPOSE_SERVICE_LABEL, COMPOSE_WORKING_DIR_LABEL,
+        COMPOSE_REPLACE_LABEL, COMPOSE_SERVICE_LABEL, COMPOSE_WORKING_DIR_LABEL,
     };
 
     #[tokio::test]
@@ -1334,6 +1335,7 @@ mod tests {
             labels: Some(std::collections::HashMap::from([
                 (COMPOSE_PROJECT_LABEL.into(), "shop".into()),
                 (COMPOSE_SERVICE_LABEL.into(), "web".into()),
+                (COMPOSE_REPLACE_LABEL.into(), "frontend".into()),
                 (COMPOSE_WORKING_DIR_LABEL.into(), "/srv/shop".into()),
                 (
                     COMPOSE_CONFIG_FILES_LABEL.into(),
@@ -1346,6 +1348,7 @@ mod tests {
 
         assert_eq!(compose.compose_project.as_deref(), Some("shop"));
         assert_eq!(compose.compose_service.as_deref(), Some("web"));
+        assert_eq!(compose.compose_replace.as_deref(), Some("frontend"));
         assert_eq!(compose.compose_working_dir.as_deref(), Some("/srv/shop"));
         assert_eq!(
             compose.compose_config_files.as_deref(),
