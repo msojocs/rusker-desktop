@@ -82,6 +82,20 @@ impl ContainerSummary {
         self.state.eq_ignore_ascii_case("running")
     }
 
+    pub fn is_paused(&self) -> bool {
+        self.state.eq_ignore_ascii_case("paused")
+    }
+
+    pub fn toggle_action(&self) -> ContainerAction {
+        if self.is_running() {
+            ContainerAction::Stop
+        } else if self.is_paused() {
+            ContainerAction::Unpause
+        } else {
+            ContainerAction::Start
+        }
+    }
+
     pub fn is_compose(&self) -> bool {
         self.compose_project.is_some()
     }
@@ -179,6 +193,8 @@ pub struct VolumeEntry {
 pub enum ContainerAction {
     Start,
     Stop,
+    Pause,
+    Unpause,
     Restart,
     Remove,
 }
@@ -188,6 +204,8 @@ impl ContainerAction {
         match self {
             Self::Start => t!("model.action.start"),
             Self::Stop => t!("model.action.stop"),
+            Self::Pause => t!("model.action.pause"),
+            Self::Unpause => t!("model.action.unpause"),
             Self::Restart => t!("model.action.restart"),
             Self::Remove => t!("model.action.remove"),
         }

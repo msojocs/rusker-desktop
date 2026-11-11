@@ -26,6 +26,12 @@ model.action.start:
 model.action.stop:
   en: "Stop container"
   zh-CN: "停止容器"
+model.action.pause:
+  en: "Pause"
+  zh-CN: "暂停"
+model.action.unpause:
+  en: "Resume"
+  zh-CN: "恢复"
 model.action.restart:
   en: "Restart container"
   zh-CN: "重启容器"

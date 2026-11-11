@@ -2790,6 +2790,11 @@ impl RuskerApp {
     fn render_container_detail(&self, container: &ContainerSummary, cx: &mut Context<Self>) -> Div {
         let busy = self.busy.is_some();
         let running = container.is_running();
+        let start_action = if container.is_paused() {
+            ContainerAction::Unpause
+        } else {
+            ContainerAction::Start
+        };
         let status = if container.status.trim().is_empty() {
             container.state.clone()
         } else {
@@ -2823,10 +2828,10 @@ impl RuskerApp {
                 button("start-container")
                     .primary()
                     .icon(IconName::Play)
-                    .tooltip(t!("app.start"))
+                    .tooltip(start_action.label())
                     .disabled(busy || running)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.start_container_action(start_id.clone(), ContainerAction::Start, cx);
+                        this.start_container_action(start_id.clone(), start_action, cx);
                     })),
             )
             .child(
@@ -4396,9 +4401,17 @@ fn copyable_value(
 /// so both the icon and label (and the space around them) use a pointer.
 /// Keep the handler on PopupMenuItem to preserve dismissal and keyboard activation.
 fn container_menu_item(label: impl Into<SharedString>, icon: impl Into<Icon>) -> PopupMenuItem {
+    container_menu_item_enabled(label, icon, true)
+}
+
+fn container_menu_item_enabled(
+    label: impl Into<SharedString>,
+    icon: impl Into<Icon>,
+    enabled: bool,
+) -> PopupMenuItem {
     let label = label.into();
     let icon: Icon = icon.into();
-    PopupMenuItem::element(move |_, _| {
+    PopupMenuItem::element(move |_, cx| {
         div()
             .flex_1()
             .min_h(px(26.))
@@ -4407,10 +4420,15 @@ fn container_menu_item(label: impl Into<SharedString>, icon: impl Into<Icon>) ->
             .flex()
             .items_center()
             .gap_1()
-            .cursor_pointer()
+            .when(enabled, |this| this.cursor_pointer())
+            .when(!enabled, |this| {
+                this.cursor_default()
+                    .text_color(cx.theme().muted_foreground)
+            })
             .child(icon.clone().xsmall())
             .child(label.clone())
     })
+    .disabled(!enabled)
 }
 
 fn container_menu(

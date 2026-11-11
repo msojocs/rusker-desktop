@@ -4,6 +4,109 @@ use futures_util::future::join_all;
 
 use super::*;
 
+fn compose_action_ids(
+    containers: &[ContainerSummary],
+    project: &str,
+    action: ContainerAction,
+) -> Vec<String> {
+    containers
+        .iter()
+        .filter(|container| container.compose_project.as_deref() == Some(project))
+        .filter(|container| match action {
+            ContainerAction::Start => !container.is_running() && !container.is_paused(),
+            ContainerAction::Stop | ContainerAction::Pause | ContainerAction::Restart => {
+                container.is_running()
+            }
+            ContainerAction::Unpause => container.is_paused(),
+            ContainerAction::Remove => true,
+        })
+        .map(|container| container.id.clone())
+        .collect()
+}
+
+pub(super) fn compose_primary_action(containers: &[ContainerSummary]) -> ContainerAction {
+    if containers.iter().any(ContainerSummary::is_running) {
+        ContainerAction::Stop
+    } else if containers.iter().any(ContainerSummary::is_paused) {
+        ContainerAction::Unpause
+    } else {
+        ContainerAction::Start
+    }
+}
+
+pub(super) fn compose_project_menu(
+    menu: gpui_kit::component::menu::PopupMenu,
+    project: &str,
+    weak: gpui_kit::WeakEntity<RuskerApp>,
+    cx: &App,
+) -> gpui_kit::component::menu::PopupMenu {
+    let containers = weak
+        .upgrade()
+        .map(|app| app.read(cx).snapshot.containers.clone())
+        .unwrap_or_default();
+    let running = !compose_action_ids(&containers, project, ContainerAction::Pause).is_empty();
+    let paused = !compose_action_ids(&containers, project, ContainerAction::Unpause).is_empty();
+    let pause_action = if !running && paused {
+        ContainerAction::Unpause
+    } else {
+        ContainerAction::Pause
+    };
+    let detail_project = project.to_string();
+    let detail_weak = weak.clone();
+    let pause_project = project.to_string();
+    let pause_weak = weak.clone();
+    let restart_project = project.to_string();
+    let restart_weak = weak.clone();
+    let vscode_project = project.to_string();
+    menu.item(
+        container_menu_item(t!("app.view_details"), AssetIcon::Layers2).on_click(
+            move |_, _, cx| {
+                _ = detail_weak.update(cx, |this, cx| {
+                    this.select_compose_project(detail_project.clone(), cx)
+                });
+            },
+        ),
+    )
+    .item(
+        container_menu_item_enabled(
+            pause_action.label(),
+            if pause_action == ContainerAction::Unpause {
+                IconName::Play
+            } else {
+                IconName::Pause
+            },
+            running || paused,
+        )
+        .on_click(move |_, _, cx| {
+            _ = pause_weak.update(cx, |this, cx| {
+                this.start_compose_project_action(pause_project.clone(), pause_action, cx)
+            });
+        }),
+    )
+    .item(
+        container_menu_item_enabled(t!("app.restart"), IconName::RotateCw, running).on_click(
+            move |_, _, cx| {
+                _ = restart_weak.update(cx, |this, cx| {
+                    this.start_compose_project_action(
+                        restart_project.clone(),
+                        ContainerAction::Restart,
+                        cx,
+                    )
+                });
+            },
+        ),
+    )
+    .item(
+        container_menu_item(t!("app.compose.open_vscode"), IconName::ExternalLink).on_click(
+            move |_, _, cx| {
+                _ = weak.update(cx, |this, cx| {
+                    this.open_compose_in_vscode(&vscode_project, cx)
+                });
+            },
+        ),
+    )
+}
+
 impl RuskerApp {
     pub(super) fn select_compose_project(&mut self, project: String, cx: &mut Context<Self>) {
         self.reset_container_tools();
@@ -72,7 +175,7 @@ impl RuskerApp {
         }));
     }
 
-    fn start_compose_project_action(
+    pub(super) fn start_compose_project_action(
         &mut self,
         project: String,
         action: ContainerAction,
@@ -86,18 +189,7 @@ impl RuskerApp {
             cx.notify();
             return;
         };
-        let ids: Vec<String> = self
-            .snapshot
-            .containers
-            .iter()
-            .filter(|container| container.compose_project.as_deref() == Some(project.as_str()))
-            .filter(|container| match action {
-                ContainerAction::Start => !container.is_running(),
-                ContainerAction::Stop => container.is_running(),
-                ContainerAction::Restart | ContainerAction::Remove => true,
-            })
-            .map(|container| container.id.clone())
-            .collect();
+        let ids = compose_action_ids(&self.snapshot.containers, &project, action);
         if ids.is_empty() {
             return;
         }
@@ -149,6 +241,11 @@ impl RuskerApp {
             .iter()
             .filter(|container| container.is_running())
             .count();
+        let start_action = if containers.iter().any(ContainerSummary::is_paused) {
+            ContainerAction::Unpause
+        } else {
+            ContainerAction::Start
+        };
         let working_dir = containers.iter().find_map(|container| {
             container
                 .compose_working_dir
@@ -269,7 +366,7 @@ impl RuskerApp {
                                 button("start-compose-project")
                                     .primary()
                                     .icon(IconName::Play)
-                                    .tooltip(t!("app.start"))
+                                    .tooltip(start_action.label())
                                     .disabled(
                                         busy || containers.is_empty()
                                             || running == containers.len(),
@@ -277,7 +374,7 @@ impl RuskerApp {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.start_compose_project_action(
                                             start_project.clone(),
-                                            ContainerAction::Start,
+                                            start_action,
                                             cx,
                                         );
                                     })),
@@ -400,6 +497,7 @@ impl RuskerApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let running = container.is_running();
+        let action = container.toggle_action();
         let detail_id = container.id.clone();
         let toggle_id = container.id.clone();
         let state_color = if running {
@@ -466,23 +564,11 @@ impl RuskerApp {
                 } else {
                     IconName::Play
                 })
-                .tooltip(if running {
-                    t!("app.stop")
-                } else {
-                    t!("app.start")
-                })
+                .tooltip(action.label())
                 .disabled(busy)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.start_container_action(
-                        toggle_id.clone(),
-                        if running {
-                            ContainerAction::Stop
-                        } else {
-                            ContainerAction::Start
-                        },
-                        cx,
-                    );
+                    this.start_container_action(toggle_id.clone(), action, cx);
                 })),
             )
     }
@@ -565,7 +651,69 @@ fn prefix_service_logs(service: &str, logs: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::prefix_service_logs;
+    use super::{compose_action_ids, compose_primary_action, prefix_service_logs};
+    use rusker_desktop::model::{ContainerAction, ContainerSummary};
+
+    fn container(id: &str, project: &str, state: &str) -> ContainerSummary {
+        ContainerSummary {
+            id: id.into(),
+            compose_project: Some(project.into()),
+            state: state.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn project_lifecycle_actions_select_only_eligible_members_of_the_whole_project() {
+        let containers = vec![
+            container("web", "shop", "running"),
+            container("worker", "shop", "exited"),
+            container("database", "shop", "paused"),
+            container("other", "unrelated", "running"),
+        ];
+        for action in [
+            ContainerAction::Pause,
+            ContainerAction::Restart,
+            ContainerAction::Stop,
+        ] {
+            assert_eq!(compose_action_ids(&containers, "shop", action), ["web"]);
+        }
+        assert_eq!(
+            compose_action_ids(&containers, "shop", ContainerAction::Start),
+            ["worker"]
+        );
+        assert_eq!(
+            compose_action_ids(&containers, "shop", ContainerAction::Unpause),
+            ["database"]
+        );
+        assert_eq!(
+            compose_action_ids(&containers, "shop", ContainerAction::Remove),
+            ["web", "worker", "database"]
+        );
+        let stopped = [container("web", "shop", "exited")];
+        assert!(compose_action_ids(&stopped, "shop", ContainerAction::Pause).is_empty());
+        assert!(compose_action_ids(&stopped, "shop", ContainerAction::Restart).is_empty());
+        assert!(compose_action_ids(&[], "shop", ContainerAction::Pause).is_empty());
+    }
+
+    #[test]
+    fn group_control_starts_stopped_projects_stops_running_projects_and_resumes_paused_projects() {
+        assert_eq!(
+            compose_primary_action(&[container("web", "shop", "exited")]),
+            ContainerAction::Start
+        );
+        assert_eq!(
+            compose_primary_action(&[container("web", "shop", "paused")]),
+            ContainerAction::Unpause
+        );
+        assert_eq!(
+            compose_primary_action(&[
+                container("web", "shop", "running"),
+                container("database", "shop", "paused"),
+            ]),
+            ContainerAction::Stop
+        );
+    }
 
     #[test]
     fn service_logs_prefix_every_line_without_adding_an_empty_record() {

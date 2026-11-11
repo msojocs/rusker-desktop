@@ -323,6 +323,15 @@ app.compose.services:
 app.compose.view_config:
   en: "View configurations"
   zh-CN: "查看配置"
+app.compose.open_vscode:
+  en: "Open in VSCode"
+  zh-CN: "在VSCode打开"
+app.compose.workspace_unavailable:
+  en: "This project did not report a working directory or configuration file path."
+  zh-CN: "该项目未提供工作目录或配置文件路径。"
+app.more:
+  en: "More"
+  zh-CN: "更多"
 app.compose.config_title:
   en: "Compose file viewer"
   zh-CN: "Compose 文件查看器"

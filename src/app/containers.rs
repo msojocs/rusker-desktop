@@ -688,6 +688,100 @@ impl ContainerActionsTable {
             rows: Rc::new(Vec::new()),
         }
     }
+
+    fn compose_actions(
+        &self,
+        row_ix: usize,
+        project: &str,
+        cx: &mut Context<TableState<Self>>,
+    ) -> AnyElement {
+        let Some(app) = self.weak.upgrade() else {
+            return div().into_any_element();
+        };
+        let app = app.read(cx);
+        let containers: Vec<_> = app
+            .snapshot
+            .containers
+            .iter()
+            .filter(|container| container.compose_project.as_deref() == Some(project))
+            .cloned()
+            .collect();
+        let action = compose_detail::compose_primary_action(&containers);
+        let busy = app.busy.is_some();
+        let toggle_project = project.to_string();
+        let toggle_weak = self.weak.clone();
+        let menu_project = project.to_string();
+        let menu_weak = self.weak.clone();
+        let remove_project = project.to_string();
+        let remove_weak = self.weak.clone();
+        centered_container_cell()
+            .px_2()
+            .gap_1()
+            .child(
+                list_action_button(
+                    ("toggle-compose-project-row", row_ix),
+                    cx.theme().primary,
+                    cx,
+                )
+                .small()
+                .icon(if action == ContainerAction::Stop {
+                    IconName::Square
+                } else {
+                    IconName::Play
+                })
+                .tooltip(action.label())
+                .disabled(busy || containers.is_empty())
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    _ = toggle_weak.update(cx, |this, cx| {
+                        this.start_compose_project_action(toggle_project.clone(), action, cx)
+                    });
+                }),
+            )
+            .child(
+                list_action_button(("compose-project-more", row_ix), cx.theme().primary, cx)
+                    .small()
+                    .icon(IconName::EllipsisVertical)
+                    .tooltip(t!("app.more"))
+                    .disabled(busy)
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
+                        compose_detail::compose_project_menu(
+                            menu,
+                            &menu_project,
+                            menu_weak.clone(),
+                            cx,
+                        )
+                    }),
+            )
+            .child(
+                list_action_button(
+                    ("remove-compose-project-row", row_ix),
+                    cx.theme().danger,
+                    cx,
+                )
+                .small()
+                .icon(Icon::new(AssetIcon::Trash).text_color(cx.theme().danger))
+                .tooltip(t!("app.delete"))
+                .disabled(busy || containers.is_empty())
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    _ = remove_weak.update(cx, |this, cx| {
+                        let containers = this
+                            .snapshot
+                            .containers
+                            .iter()
+                            .filter(|container| {
+                                container.compose_project.as_deref()
+                                    == Some(remove_project.as_str())
+                            })
+                            .cloned()
+                            .collect();
+                        this.confirm_remove_containers(containers, window, cx);
+                    });
+                }),
+            )
+            .into_any_element()
+    }
 }
 
 impl TableDelegate for ContainerActionsTable {
@@ -748,11 +842,13 @@ impl TableDelegate for ContainerActionsTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let ContainerListItem::Container(container) = &self.rows[row_ix] else {
-            return div().into_any_element();
+        let container = match &self.rows[row_ix] {
+            ContainerListItem::Container(container) => container.clone(),
+            ContainerListItem::ComposeProject { project, .. } => {
+                return self.compose_actions(row_ix, project, cx);
+            }
         };
-        let container = container.clone();
-        let running = container.is_running();
+        let action = container.toggle_action();
         let busy = self
             .weak
             .upgrade()
@@ -769,29 +865,17 @@ impl TableDelegate for ContainerActionsTable {
             .child(
                 list_action_button(("toggle-container", row_ix), cx.theme().primary, cx)
                     .small()
-                    .icon(if running {
+                    .icon(if action == ContainerAction::Stop {
                         IconName::Square
                     } else {
                         IconName::Play
                     })
-                    .tooltip(if running {
-                        t!("app.stop")
-                    } else {
-                        t!("app.start")
-                    })
+                    .tooltip(action.label())
                     .disabled(busy)
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         _ = toggle_weak.update(cx, |this, cx| {
-                            this.start_container_action(
-                                toggle_id.clone(),
-                                if running {
-                                    ContainerAction::Stop
-                                } else {
-                                    ContainerAction::Start
-                                },
-                                cx,
-                            );
+                            this.start_container_action(toggle_id.clone(), action, cx);
                         });
                     }),
             )

@@ -365,6 +365,22 @@ impl DockerEngine {
                 )
                 .await
             }
+            ContainerAction::Pause => {
+                with_timeout(
+                    &action.label(),
+                    ACTION_TIMEOUT,
+                    self.client.pause_container(id),
+                )
+                .await
+            }
+            ContainerAction::Unpause => {
+                with_timeout(
+                    &action.label(),
+                    ACTION_TIMEOUT,
+                    self.client.unpause_container(id),
+                )
+                .await
+            }
             ContainerAction::Restart => {
                 with_timeout(
                     &action.label(),
@@ -1279,6 +1295,65 @@ mod tests {
         ImageDetail, ImageLayer, COMPOSE_CONFIG_FILES_LABEL, COMPOSE_PROJECT_LABEL,
         COMPOSE_REPLACE_LABEL, COMPOSE_SERVICE_LABEL, COMPOSE_WORKING_DIR_LABEL,
     };
+
+    #[tokio::test]
+    async fn pause_and_resume_use_lifecycle_endpoints_and_report_individual_failures() {
+        use crate::model::ContainerAction;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (id, operation, status, body) in [
+                ("web", "pause", "204 No Content", ""),
+                (
+                    "worker",
+                    "pause",
+                    "409 Conflict",
+                    r#"{"message":"container is not running"}"#,
+                ),
+                ("web", "unpause", "204 No Content", ""),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let length = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(length, 0);
+                    request.extend_from_slice(&buffer[..length]);
+                }
+                let request = String::from_utf8_lossy(&request);
+                assert!(request.starts_with("POST "));
+                assert!(request.contains(&format!("/containers/{id}/{operation} ")));
+                let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let engine = DockerEngine {
+            client: bollard::Docker::connect_with_http(
+                &format!("http://{address}"),
+                5,
+                bollard::API_DEFAULT_VERSION,
+            )
+            .unwrap(),
+            managed_wsl: false,
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let failures = engine
+                .container_actions(&["web".into(), "worker".into()], ContainerAction::Pause)
+                .await;
+            assert_eq!(failures.len(), 1);
+            assert!(failures[0].contains("worker"));
+            assert!(failures[0].contains("container is not running"));
+            engine
+                .container_action("web", ContainerAction::Unpause)
+                .await
+                .unwrap();
+            server.await.unwrap();
+        })
+        .await
+        .expect("mock lifecycle requests should finish promptly");
+    }
 
     #[tokio::test]
     async fn pull_uses_its_own_timeout_without_changing_other_requests() {

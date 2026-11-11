@@ -87,6 +87,28 @@ fn local_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn vscode_project_url(containers: &[ContainerSummary]) -> Result<String, String> {
+    let directory = containers
+        .iter()
+        .filter_map(|container| container.compose_working_dir.as_deref())
+        .find(|path| !path.trim().is_empty())
+        .map(local_path)
+        .or_else(|| {
+            config_files(containers)
+                .first()
+                .and_then(|file| local_path(&file.path).parent().map(Path::to_path_buf))
+        })
+        .ok_or_else(|| t!("app.compose.workspace_unavailable").into_owned())?;
+    let file_url = url::Url::from_directory_path(&directory)
+        .map_err(|_| t!("app.compose.config_not_local").into_owned())?;
+    // VSCode's URI handler accepts folder paths, including escaped spaces and Unicode.
+    let host = file_url
+        .host_str()
+        .map(|host| format!("//{host}"))
+        .unwrap_or_default();
+    Ok(format!("vscode://file{host}{}", file_url.path()))
+}
+
 fn read_config(path: &Path) -> Result<String, String> {
     // Never resolve a relative label against the application's working directory.
     if !path.is_absolute() {
@@ -363,6 +385,20 @@ impl Render for ComposeConfigView {
 }
 
 impl RuskerApp {
+    pub(super) fn open_compose_in_vscode(&mut self, project: &str, cx: &mut Context<Self>) {
+        let containers: Vec<_> = self
+            .snapshot
+            .containers
+            .iter()
+            .filter(|container| container.compose_project.as_deref() == Some(project))
+            .cloned()
+            .collect();
+        match vscode_project_url(&containers) {
+            Ok(url) => cx.open_url(&url),
+            Err(error) => self.notify_error(error, cx),
+        }
+    }
+
     pub(super) fn open_compose_config(&mut self, project: &str, cx: &mut Context<Self>) {
         let containers: Vec<_> = self
             .snapshot
@@ -481,6 +517,45 @@ impl RuskerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vscode_opens_the_project_folder_and_escapes_special_characters() {
+        let root = std::env::temp_dir().join("compose 中文 # %2F");
+        let container = ContainerSummary {
+            compose_working_dir: Some(root.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        let url = vscode_project_url(&[container]).unwrap();
+        assert!(url.starts_with("vscode://file/"));
+        assert!(url.contains("%20"));
+        assert!(url.contains("%23"));
+        assert!(url.contains("%252F"));
+        assert!(!url.contains('中'));
+        let fallback = ContainerSummary {
+            compose_config_files: Some(root.join("compose.yaml").to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(vscode_project_url(&[fallback]).unwrap(), url);
+        assert!(vscode_project_url(&[ContainerSummary::default()]).is_err());
+        assert!(vscode_project_url(&[ContainerSummary {
+            compose_working_dir: Some("relative/project".into()),
+            ..Default::default()
+        }])
+        .is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vscode_translates_wsl_drive_paths_to_windows_folders() {
+        let container = ContainerSummary {
+            compose_working_dir: Some("/mnt/d/temp/project1".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            vscode_project_url(&[container]).unwrap(),
+            "vscode://file/D:/temp/project1/"
+        );
+    }
 
     #[test]
     fn collects_all_project_files_in_compose_order_without_duplicate_service_labels() {
