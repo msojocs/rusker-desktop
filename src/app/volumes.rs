@@ -1,6 +1,10 @@
 //! Volumes page: list, create, clone, delete (single, batch, unused), and a
 //! detail view that browses the stored data, imports, exports or empties it.
 
+mod table;
+
+pub(super) use table::VolumeTable;
+
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -804,18 +808,14 @@ impl RuskerApp {
 
     fn render_volume_list(&self, cx: &mut Context<Self>) -> Div {
         let query = self.search_input.read(cx).value().to_string();
-        let volumes: Vec<&VolumeSummary> = self
+        let volumes: Vec<VolumeSummary> = self
             .snapshot
             .volumes
             .iter()
             .filter(|volume| volume_matches(volume, &query))
+            .cloned()
             .collect();
         let busy = self.busy.is_some();
-        let visible_names: Vec<String> = volumes.iter().map(|volume| volume.name.clone()).collect();
-        let all_checked = !visible_names.is_empty()
-            && visible_names
-                .iter()
-                .all(|name| self.volumes.checked.contains(name));
         let mut checked: Vec<String> = self.volumes.checked.iter().cloned().collect();
         checked.sort();
         let unused: Vec<String> = unused_volumes(&self.snapshot.volumes, &self.snapshot.containers)
@@ -823,201 +823,12 @@ impl RuskerApp {
             .map(|volume| volume.name.clone())
             .collect();
 
-        let header = div()
-            .px_4()
-            .py_3()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .items_center()
-            .text_sm()
-            .font_semibold()
-            .text_color(cx.theme().muted_foreground)
-            .child(
-                div().w(px(32.)).flex_shrink_0().child(
-                    Checkbox::new("check-all-volumes")
-                        .pointer(!visible_names.is_empty())
-                        .checked(all_checked)
-                        .tooltip(t!("volumes.list.select_all"))
-                        .disabled(visible_names.is_empty())
-                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                            for name in &visible_names {
-                                if *checked {
-                                    this.volumes.checked.insert(name.clone());
-                                } else {
-                                    this.volumes.checked.remove(name);
-                                }
-                            }
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(div().w(px(28.)).flex_shrink_0())
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(t!("volumes.column.name").to_string()),
-            )
-            .child(
-                div()
-                    .w(px(DATE_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("volumes.column.created").to_string()),
-            )
-            .child(
-                div()
-                    .w(px(SIZE_COLUMN))
-                    .flex_shrink_0()
-                    .text_right()
-                    .pr_4()
-                    .child(t!("volumes.column.size").to_string()),
-            )
-            .child(
-                div()
-                    .w(px(92.))
-                    .flex_shrink_0()
-                    .child(t!("volumes.column.actions").to_string()),
-            );
-
-        let mut panel = div()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(header);
-
-        if volumes.is_empty() {
-            panel = panel.child(empty_state(
-                if self.snapshot.volumes.is_empty() {
-                    t!("volumes.list.empty")
-                } else {
-                    t!("volumes.list.no_match")
-                },
-                t!("volumes.list.empty_hint"),
-                cx,
-            ));
-        } else {
-            let rows = volumes.iter().enumerate().map(|(index, volume)| {
-                let in_use = self.snapshot.volume_in_use(&volume.name);
-                let open_name = volume.name.clone();
-                let clone_source = volume.name.clone();
-                let remove_name = volume.name.clone();
-                let check_name = volume.name.clone();
-                let is_checked = self.volumes.checked.contains(&volume.name);
-                div()
-                    .px_4()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .items_center()
-                    .text_sm()
-                    .when(in_use, |row| row.font_semibold())
-                    .when(is_checked, |row| row.bg(cx.theme().accent))
-                    .hover(|row| row.bg(cx.theme().accent))
-                    .child(
-                        div().w(px(32.)).flex_shrink_0().child(
-                            Checkbox::new(("check-volume", index))
-                                .pointer(true)
-                                .checked(is_checked)
-                                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                    if *checked {
-                                        this.volumes.checked.insert(check_name.clone());
-                                    } else {
-                                        this.volumes.checked.remove(&check_name);
-                                    }
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .id(("volume-row", index))
-                            .flex_1()
-                            .min_w_0()
-                            .py_3()
-                            .flex()
-                            .items_center()
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_volume(open_name.clone(), cx);
-                            }))
-                            .child(
-                                div()
-                                    .w(px(28.))
-                                    .flex_shrink_0()
-                                    .child(usage_dot(in_use, cx)),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .pr_3()
-                                    .text_sm()
-                                    .truncate()
-                                    .child(volume.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .w(px(DATE_COLUMN))
-                                    .flex_shrink_0()
-                                    .child(format_timestamp(volume.created)),
-                            )
-                            .child(
-                                div()
-                                    .w(px(SIZE_COLUMN))
-                                    .flex_shrink_0()
-                                    .pr_4()
-                                    .text_right()
-                                    .text_sm()
-                                    .child(self.volume_size_label(&volume.name)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w(px(92.))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                list_action_button(("clone-volume", index), cx.theme().primary, cx)
-                                    .small()
-                                    .icon(IconName::Copy)
-                                    .tooltip(t!("volumes.action.clone"))
-                                    .disabled(busy)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.open_clone_volume_dialog(
-                                            clone_source.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                            )
-                            .child(
-                                list_action_button(("remove-volume", index), cx.theme().danger, cx)
-                                    .small()
-                                    .icon(AssetIcon::Trash)
-                                    .tooltip(t!("volumes.action.delete"))
-                                    .disabled(busy)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.confirm_remove_volume(remove_name.clone(), window, cx);
-                                    })),
-                            ),
-                    )
-            });
-            panel = panel.child(
-                div()
-                    .id("volume-rows")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children(rows),
-            );
-        }
+        let panel = VolumeTable::render(
+            &self.volumes_table,
+            volumes.clone(),
+            self.snapshot.volumes.is_empty(),
+            cx,
+        );
 
         div()
             .flex_1()

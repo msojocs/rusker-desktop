@@ -10,10 +10,12 @@ use gpui_kit::component::{
     checkbox::Checkbox,
     input::{Editor, EditorState, Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
+    scroll::{Scrollbar, ScrollbarHandle, ScrollbarMode},
     skeleton::Skeleton,
     slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
     tab::{Tab, TabBar},
+    table::TableState,
     tooltip::Tooltip,
     window_border, ActiveTheme as _, Icon, IconName, Sizable as _, Size, ThemeMode, WindowExt as _,
 };
@@ -57,6 +59,7 @@ use crate::ui::{button, detail_row, empty_state, muted, section_panel, stat_card
 
 mod compose_detail;
 mod container_detail;
+mod containers;
 mod desktop_import;
 mod docker_context;
 mod images;
@@ -65,10 +68,11 @@ mod run;
 mod volumes;
 
 use container_detail::{ContainerStatsState, ContainerTools};
+use containers::{ContainerEmpty, ContainerTables};
 use desktop_import::DesktopImportState;
-use images::ImageState;
+use images::{ImageState, ImageTable};
 use run::RunForm;
-use volumes::VolumeState;
+use volumes::{VolumeState, VolumeTable};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -314,6 +318,9 @@ pub struct RuskerApp {
     containers_checked: HashSet<String>,
     /// Compose projects collapsed in the container list. Projects default to expanded.
     compose_projects_collapsed: HashSet<String>,
+    container_tables: ContainerTables,
+    images_table: Entity<TableState<ImageTable>>,
+    volumes_table: Entity<TableState<VolumeTable>>,
     container_removal: ContainerRemoval,
     container_replacement: ContainerReplacement,
     /// Container detail tab: logs, details, mounts, exec, files, stats.
@@ -599,6 +606,22 @@ impl RuskerApp {
             settings_warning = Some(warning);
         }
 
+        let app_weak = cx.weak_entity();
+        let container_tables = ContainerTables::new(app_weak.clone(), window, cx);
+        let images_table = cx.new(|cx| {
+            TableState::new(ImageTable::new(app_weak.clone()), window, cx)
+                .row_selectable(false)
+                .col_selectable(false)
+                .col_movable(false)
+        });
+        let volumes_table = cx.new(|cx| {
+            TableState::new(VolumeTable::new(app_weak), window, cx)
+                .row_selectable(false)
+                .col_selectable(false)
+                .col_movable(false)
+                .sortable(false)
+        });
+
         let mut this = Self {
             engine,
             engine_transition: None,
@@ -616,6 +639,9 @@ impl RuskerApp {
             containers_running_only: false,
             containers_checked: HashSet::new(),
             compose_projects_collapsed: HashSet::new(),
+            container_tables,
+            images_table,
+            volumes_table,
             container_removal: ContainerRemoval::default(),
             container_replacement: ContainerReplacement::default(),
             container_tab: 0,
@@ -2587,7 +2613,6 @@ impl RuskerApp {
             .filter(|container| container.is_running())
             .count();
         let busy = self.busy.is_some();
-        let now = OffsetDateTime::now_utc().unix_timestamp();
         let mut checked: Vec<String> = self.containers_checked.iter().cloned().collect();
         checked.sort();
         let selected_containers: Vec<ContainerSummary> = all_containers
@@ -2726,180 +2751,19 @@ impl RuskerApp {
                 )
             });
 
-        let all_checked = shown > 0
-            && containers
-                .iter()
-                .all(|container| self.containers_checked.contains(&container.id));
-        let visible_ids: Vec<String> = containers
-            .iter()
-            .map(|container| container.id.clone())
-            .collect();
-
-        let header = div()
-            .px_4()
-            .py_3()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .items_center()
-            .text_xs()
-            .font_semibold()
-            .text_color(cx.theme().muted_foreground)
-            .child(
-                div().w(px(CONTAINER_CHECK_COLUMN)).flex_shrink_0().child(
-                    Checkbox::new("check-all-containers")
-                        .checked(all_checked)
-                        .tooltip(t!("app.select_all"))
-                        .disabled(visible_ids.is_empty())
-                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                            for id in &visible_ids {
-                                if *checked {
-                                    this.containers_checked.insert(id.clone());
-                                } else {
-                                    this.containers_checked.remove(id);
-                                }
-                            }
-                            cx.stop_propagation();
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(div().w(px(CONTAINER_STATUS_COLUMN)).flex_shrink_0())
-            .child(div().flex_1().min_w(px(112.)).pr_3().child(t!("app.name")))
-            .child(
-                div()
-                    .w(px(CONTAINER_ID_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("app.container_id")),
-            )
-            .child(div().flex_1().min_w(px(112.)).pr_3().child(t!("app.image")))
-            .child(
-                div()
-                    .w(px(CONTAINER_PORTS_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("app.ports")),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_CPU_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("app.containers.cpu")),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_MEMORY_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("app.containers.memory")),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_CREATED_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("app.created")),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_ACTIONS_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("app.actions")),
-            );
-
-        let panel = div()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(header);
-
+        let empty = if all_containers.is_empty() {
+            ContainerEmpty::All
+        } else if self.containers_running_only && running == 0 {
+            ContainerEmpty::Running
+        } else {
+            ContainerEmpty::Filtered
+        };
         let footer = div()
             .flex()
             .justify_end()
             .text_sm()
             .text_color(cx.theme().muted_foreground)
             .child(t!("app.containers.shown", count = shown));
-
-        if containers.is_empty() {
-            return div()
-                .flex_1()
-                .min_h_0()
-                .p_6()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(title)
-                .child(usage_row)
-                .child(toolbar)
-                .child(panel.child(if all_containers.is_empty() {
-                    empty_state(
-                        t!("app.empty.no_containers"),
-                        t!("app.empty.no_containers_hint"),
-                        cx,
-                    )
-                } else if self.containers_running_only && running == 0 {
-                    empty_state(
-                        t!("app.empty.no_running"),
-                        t!("app.empty.no_running_hint"),
-                        cx,
-                    )
-                } else {
-                    empty_state(
-                        t!("app.empty.no_matches"),
-                        t!("app.empty.no_matches_hint"),
-                        cx,
-                    )
-                }))
-                .child(footer);
-        }
-
-        let mut rows: Vec<AnyElement> = Vec::new();
-        let mut container_row_index = 0;
-        for item in group_container_list(containers) {
-            match item {
-                ContainerListItem::Container(container) => {
-                    rows.push(
-                        self.render_container_row(
-                            container_row_index,
-                            &container,
-                            now,
-                            busy,
-                            false,
-                            cx,
-                        )
-                        .into_any_element(),
-                    );
-                    container_row_index += 1;
-                }
-                ContainerListItem::ComposeProject {
-                    project,
-                    containers,
-                } => {
-                    let collapsed = self.compose_projects_collapsed.contains(&project);
-                    rows.push(
-                        self.render_compose_project_row(&project, &containers, now, cx)
-                            .into_any_element(),
-                    );
-                    if !collapsed {
-                        for container in containers {
-                            rows.push(
-                                self.render_container_row(
-                                    container_row_index,
-                                    &container,
-                                    now,
-                                    busy,
-                                    true,
-                                    cx,
-                                )
-                                .into_any_element(),
-                            );
-                            container_row_index += 1;
-                        }
-                    }
-                }
-            }
-        }
 
         div()
             .flex_1()
@@ -2911,490 +2775,13 @@ impl RuskerApp {
             .child(title)
             .child(usage_row)
             .child(toolbar)
-            .child(
-                panel.child(
-                    div()
-                        .id("container-rows")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .children(rows),
-                ),
-            )
+            .child(self.container_tables.render(
+                group_container_list(containers),
+                empty,
+                &self.compose_projects_collapsed,
+                cx,
+            ))
             .child(footer)
-    }
-
-    fn render_compose_project_row(
-        &self,
-        project: &str,
-        containers: &[ContainerSummary],
-        now: i64,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let collapsed = self.compose_projects_collapsed.contains(project);
-        let toggle_project = project.to_string();
-        let open_project = project.to_string();
-        let toggle_tooltip = if collapsed {
-            t!("app.containers.expand_compose").into_owned()
-        } else {
-            t!("app.containers.collapse_compose").into_owned()
-        };
-        let visible_ids: Vec<String> = containers
-            .iter()
-            .map(|container| container.id.clone())
-            .collect();
-        let all_checked = !containers.is_empty()
-            && containers
-                .iter()
-                .all(|container| self.containers_checked.contains(&container.id));
-        let running = containers
-            .iter()
-            .filter(|container| container.is_running())
-            .count();
-        let paused = containers
-            .iter()
-            .any(|container| container.state.eq_ignore_ascii_case("paused"));
-        let state_color = if running > 0 {
-            cx.theme().success
-        } else if paused {
-            cx.theme().warning
-        } else {
-            cx.theme().muted_foreground
-        };
-        let state_dot = if running > 0 || paused {
-            div().size(px(8.)).rounded_full().bg(state_color)
-        } else {
-            div()
-                .size(px(8.))
-                .rounded_full()
-                .border_1()
-                .border_color(state_color)
-        };
-        let state_tooltip = t!(
-            "app.containers.summary",
-            running = running,
-            total = containers.len()
-        )
-        .into_owned();
-        let latest_stats: Vec<_> = containers
-            .iter()
-            .filter(|container| container.is_running())
-            .filter_map(|container| self.container_stats.latest(&container.id))
-            .collect();
-        let cpu_total = latest_stats.iter().try_fold(0.0, |total, stats| {
-            stats.cpu_percent.map(|value| total + value)
-        });
-        let cpu_usage = if running == 0 {
-            "—".into()
-        } else {
-            cpu_total.map_or_else(
-                || "N/A".into(),
-                |total| format_cpu_usage(total, self.snapshot.engine.cpus),
-            )
-        };
-        let memory_usage = if running == 0 {
-            "—".into()
-        } else if latest_stats.is_empty() {
-            "N/A".into()
-        } else {
-            let used = latest_stats.iter().fold(0u64, |total, stats| {
-                total.saturating_add(stats.memory_bytes)
-            });
-            format_memory_usage(used, self.snapshot.engine.memory_bytes)
-        };
-        let created = containers
-            .iter()
-            .map(|container| container.created)
-            .max()
-            .unwrap_or_default();
-
-        div()
-            .id((ElementId::from("compose-project-row"), project.to_string()))
-            .px_4()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
-            .flex()
-            .items_center()
-            .text_sm()
-            .cursor_pointer()
-            .hover(|this| this.bg(cx.theme().accent))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if !this.compose_projects_collapsed.remove(&toggle_project) {
-                    this.compose_projects_collapsed
-                        .insert(toggle_project.clone());
-                }
-                cx.notify();
-            }))
-            .child(
-                div().w(px(CONTAINER_CHECK_COLUMN)).flex_shrink_0().child(
-                    Checkbox::new((
-                        ElementId::from("check-compose-project"),
-                        project.to_string(),
-                    ))
-                    .checked(all_checked)
-                    .on_click(cx.listener(
-                        move |this, checked: &bool, _, cx| {
-                            for id in &visible_ids {
-                                if *checked {
-                                    this.containers_checked.insert(id.clone());
-                                } else {
-                                    this.containers_checked.remove(id);
-                                }
-                            }
-                            cx.stop_propagation();
-                            cx.notify();
-                        },
-                    )),
-                ),
-            )
-            .child(
-                div()
-                    .id((
-                        ElementId::from("compose-project-toggle"),
-                        project.to_string(),
-                    ))
-                    .w(px(CONTAINER_STATUS_COLUMN))
-                    .flex_shrink_0()
-                    .text_color(cx.theme().primary)
-                    .child(
-                        Icon::new(if collapsed {
-                            IconName::ChevronRight
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .small(),
-                    )
-                    .tooltip(move |window, cx| {
-                        Tooltip::new(toggle_tooltip.clone()).build(window, cx)
-                    }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(112.))
-                    .py_3()
-                    .pr_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id((
-                                ElementId::from("compose-project-state"),
-                                project.to_string(),
-                            ))
-                            .flex_shrink_0()
-                            .child(state_dot)
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(state_tooltip.clone()).build(window, cx)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id((ElementId::from("open-compose-project"), project.to_string()))
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .cursor_pointer()
-                            .font_semibold()
-                            .text_color(cx.theme().primary)
-                            .hover(|this| this.underline())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.select_compose_project(open_project.clone(), cx);
-                            }))
-                            .child(project.to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .font_normal()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(
-                                t!("app.containers.compose_services", count = containers.len())
-                                    .into_owned(),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_ID_COLUMN))
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("—"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(112.))
-                    .pr_3()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("—"),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_PORTS_COLUMN))
-                    .flex_shrink_0()
-                    .pr_2()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("—"),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_CPU_COLUMN))
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(cpu_usage),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_MEMORY_COLUMN))
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(memory_usage),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_CREATED_COLUMN))
-                    .flex_shrink_0()
-                    .child(format_relative(created, now)),
-            )
-            .child(div().w(px(CONTAINER_ACTIONS_COLUMN)).flex_shrink_0())
-    }
-
-    fn render_container_row(
-        &self,
-        index: usize,
-        container: &ContainerSummary,
-        now: i64,
-        busy: bool,
-        nested: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let detail_id = container.id.clone();
-        let check_id = container.id.clone();
-        let toggle_id = container.id.clone();
-        let copy_id = container.id.clone();
-        let image_container = container.clone();
-        let is_checked = self.containers_checked.contains(&container.id);
-        let running = container.is_running();
-        let paused = container.state.eq_ignore_ascii_case("paused");
-        let (cpu_usage, memory_usage) = if running {
-            match self.container_stats.latest(&container.id) {
-                Some(stats) => (
-                    stats.cpu_percent.map_or_else(
-                        || "N/A".into(),
-                        |value| format_cpu_usage(value, self.snapshot.engine.cpus),
-                    ),
-                    format_memory_usage(stats.memory_bytes, stats.memory_limit),
-                ),
-                None => ("N/A".into(), "N/A".into()),
-            }
-        } else {
-            ("—".into(), "—".into())
-        };
-        let state_color = if running {
-            cx.theme().success
-        } else if paused {
-            cx.theme().warning
-        } else {
-            cx.theme().muted_foreground
-        };
-        let state_dot = if running || paused {
-            div().size(px(8.)).rounded_full().bg(state_color)
-        } else {
-            div()
-                .size(px(8.))
-                .rounded_full()
-                .border_1()
-                .border_color(state_color)
-        };
-        let status = if container.status.trim().is_empty() {
-            container.state.clone()
-        } else {
-            container.status.clone()
-        };
-        let state_tooltip = status.clone();
-        let menu_container = container.clone();
-        let remove_container = container.clone();
-        let weak = cx.weak_entity();
-
-        div()
-            .id(("container-row", index))
-            .px_4()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .items_center()
-            .text_sm()
-            .cursor_pointer()
-            .when(is_checked, |this| this.bg(cx.theme().accent))
-            .hover(|this| this.bg(cx.theme().accent))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.select_container(detail_id.clone(), cx);
-            }))
-            .child(
-                div().w(px(CONTAINER_CHECK_COLUMN)).flex_shrink_0().child(
-                    Checkbox::new(("check-container", index))
-                        .checked(is_checked)
-                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                            if *checked {
-                                this.containers_checked.insert(check_id.clone());
-                            } else {
-                                this.containers_checked.remove(&check_id);
-                            }
-                            cx.stop_propagation();
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(
-                div()
-                    .id(("container-state", index))
-                    .w(px(CONTAINER_STATUS_COLUMN))
-                    .flex_shrink_0()
-                    .child(state_dot)
-                    .tooltip(move |window, cx| {
-                        Tooltip::new(state_tooltip.clone()).build(window, cx)
-                    }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(112.))
-                    .py_3()
-                    .pr_3()
-                    .when(nested, |this| this.pl_4())
-                    .truncate()
-                    .child(container_list_name(container, nested).to_owned()),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_ID_COLUMN))
-                    .flex_shrink_0()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_xs()
-                    .child(
-                        div()
-                            .id(("copy-container-id", index))
-                            .cursor_pointer()
-                            .text_color(cx.theme().muted_foreground)
-                            .hover(|style| style.underline())
-                            .tooltip(|window, cx| {
-                                Tooltip::new(t!("app.copy_container_id").into_owned())
-                                    .build(window, cx)
-                            })
-                            .on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
-                            })
-                            .child(short_id(&container.id)),
-                    ),
-            )
-            .child(
-                div().flex_1().min_w(px(112.)).pr_3().truncate().child(
-                    div()
-                        .id(("open-container-image", index))
-                        .min_w_0()
-                        .truncate()
-                        .cursor_pointer()
-                        .text_color(cx.theme().primary)
-                        .hover(|style| style.underline())
-                        .tooltip(|window, cx| {
-                            Tooltip::new(t!("app.view_image").into_owned()).build(window, cx)
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.open_container_image(&image_container, cx);
-                        }))
-                        .child(container.image.clone()),
-                ),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_PORTS_COLUMN))
-                    .flex_shrink_0()
-                    .pr_2()
-                    .truncate()
-                    .child(format_port_bindings(&container.ports)),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_CPU_COLUMN))
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(cpu_usage),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_MEMORY_COLUMN))
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(memory_usage),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_CREATED_COLUMN))
-                    .flex_shrink_0()
-                    .child(format_relative(container.created, now)),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_ACTIONS_COLUMN))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        list_action_button(("toggle-container", index), cx.theme().primary, cx)
-                            .small()
-                            .icon(if running {
-                                IconName::Square
-                            } else {
-                                IconName::Play
-                            })
-                            .tooltip(if running {
-                                t!("app.stop")
-                            } else {
-                                t!("app.start")
-                            })
-                            .disabled(busy)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.start_container_action(
-                                    toggle_id.clone(),
-                                    if running {
-                                        ContainerAction::Stop
-                                    } else {
-                                        ContainerAction::Start
-                                    },
-                                    cx,
-                                );
-                            })),
-                    )
-                    .child(
-                        list_action_button(("container-more", index), cx.theme().primary, cx)
-                            .small()
-                            .icon(IconName::EllipsisVertical)
-                            .disabled(busy)
-                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                                container_menu(menu, &menu_container, weak.clone())
-                            }),
-                    )
-                    .child(
-                        list_action_button(("remove-container-row", index), cx.theme().danger, cx)
-                            .small()
-                            .icon(Icon::new(AssetIcon::Trash).text_color(cx.theme().danger))
-                            .tooltip(t!("app.delete"))
-                            .disabled(busy)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.confirm_remove_container(&remove_container, window, cx);
-                            })),
-                    ),
-            )
     }
 
     /// Container detail page: breadcrumb, identity header with the Docker
@@ -5146,15 +4533,37 @@ const SPINNER_PERIOD_SECS: f32 = 0.9;
 const STATUS_PULSE_PERIOD_SECS: f32 = 1.6;
 const APP_BAR_HEIGHT: f32 = 48.;
 const WINDOW_BUTTON_WIDTH: f32 = 46.;
-/// Container table columns; the name and image columns share the rest.
+/// Container table column defaults; DataTable owns subsequent width changes.
 const CONTAINER_CHECK_COLUMN: f32 = 34.;
-const CONTAINER_STATUS_COLUMN: f32 = 26.;
+const CONTAINER_EXPAND_COLUMN: f32 = 20.;
+const CONTAINER_STATUS_COLUMN: f32 = 31.;
+const CONTAINER_NAME_COLUMN: f32 = 160.;
 const CONTAINER_ID_COLUMN: f32 = 108.;
+const CONTAINER_IMAGE_COLUMN: f32 = 160.;
 const CONTAINER_PORTS_COLUMN: f32 = 88.;
 const CONTAINER_CPU_COLUMN: f32 = 152.;
 const CONTAINER_MEMORY_COLUMN: f32 = 152.;
 const CONTAINER_CREATED_COLUMN: f32 = 88.;
 const CONTAINER_ACTIONS_COLUMN: f32 = 108.;
+
+fn table_horizontal_scrollbar<H: ScrollbarHandle + Clone>(
+    handle: &H,
+    content_width: Option<Pixels>,
+) -> Div {
+    let mut scrollbar = Scrollbar::horizontal(handle)
+        .mode(ScrollbarMode::Always)
+        .viewport_from_layout();
+    if let Some(width) = content_width {
+        scrollbar = scrollbar.scroll_size(gpui_kit::size(width, px(0.)));
+    }
+    div()
+        .relative()
+        .w_full()
+        .h(Scrollbar::width())
+        .flex_shrink_0()
+        .overflow_hidden()
+        .child(scrollbar)
+}
 
 /// Brand blue used for the app bar and selection accents (Docker
 /// Desktop-like). A deeper navy keeps contrast in dark mode.
