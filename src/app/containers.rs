@@ -195,7 +195,7 @@ impl ContainerTable {
             0 => {
                 let id = container.id.clone();
                 let weak = self.weak.clone();
-                centered_container_cell()
+                container_control_cell()
                     .child(
                         Checkbox::new(("check-container", row_ix))
                             .checked(app.containers_checked.contains(&container.id))
@@ -213,14 +213,14 @@ impl ContainerTable {
                     )
                     .into_any_element()
             }
-            1 => div().into_any_element(),
+            1 => container_control_cell().into_any_element(),
             2 => {
                 let tooltip = if container.status.trim().is_empty() {
                     container.state.clone()
                 } else {
                     container.status.clone()
                 };
-                centered_container_cell()
+                container_control_cell()
                     .id(("container-state", row_ix))
                     .child(state_dot(running, paused, cx))
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
@@ -346,7 +346,7 @@ impl ContainerTable {
                         .iter()
                         .all(|container| app.containers_checked.contains(&container.id));
                 let weak = self.weak.clone();
-                centered_container_cell()
+                container_control_cell()
                     .child(
                         Checkbox::new((
                             ElementId::from("check-compose-project"),
@@ -375,7 +375,7 @@ impl ContainerTable {
                 } else {
                     t!("app.containers.collapse_compose").into_owned()
                 };
-                centered_container_cell()
+                container_control_cell()
                     .id((
                         ElementId::from("compose-project-toggle"),
                         project.to_string(),
@@ -399,7 +399,7 @@ impl ContainerTable {
                     total = containers.len()
                 )
                 .into_owned();
-                centered_container_cell()
+                container_control_cell()
                     .id((
                         ElementId::from("compose-project-state"),
                         project.to_string(),
@@ -561,8 +561,13 @@ impl TableDelegate for ContainerTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let cell = if col_ix < 3 {
+            container_control_header_cell(cx)
+        } else {
+            centered_container_cell()
+        };
         if col_ix != 0 {
-            return centered_container_cell()
+            return cell
                 .child(self.column(col_ix, cx).name.clone())
                 .into_any_element();
         }
@@ -584,27 +589,26 @@ impl TableDelegate for ContainerTable {
                     .all(|id| app.read(cx).containers_checked.contains(id))
             });
         let weak = self.weak.clone();
-        centered_container_cell()
-            .child(
-                Checkbox::new("check-all-containers")
-                    .checked(all_checked)
-                    .tooltip(t!("app.select_all"))
-                    .disabled(visible_ids.is_empty())
-                    .on_click(move |checked: &bool, _, cx| {
-                        _ = weak.update(cx, |this, cx| {
-                            for id in &visible_ids {
-                                if *checked {
-                                    this.containers_checked.insert(id.clone());
-                                } else {
-                                    this.containers_checked.remove(id);
-                                }
+        cell.child(
+            Checkbox::new("check-all-containers")
+                .checked(all_checked)
+                .tooltip(t!("app.select_all"))
+                .disabled(visible_ids.is_empty())
+                .on_click(move |checked: &bool, _, cx| {
+                    _ = weak.update(cx, |this, cx| {
+                        for id in &visible_ids {
+                            if *checked {
+                                this.containers_checked.insert(id.clone());
+                            } else {
+                                this.containers_checked.remove(id);
                             }
-                            cx.stop_propagation();
-                            cx.notify();
-                        });
-                    }),
-            )
-            .into_any_element()
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    });
+                }),
+        )
+        .into_any_element()
     }
 
     fn render_tr(
@@ -856,9 +860,20 @@ fn centered_container_cell() -> Div {
     // Percentage heights are not resolved on the table's first layout pass.
     // Use the same definite height as Size::Large so controls start centered.
     div()
+        .w_full()
         .h(Size::Large.table_row_height())
         .flex()
         .items_center()
+}
+
+fn container_control_cell() -> Div {
+    centered_container_cell().justify_center()
+}
+
+fn container_control_header_cell(cx: &App) -> Div {
+    container_control_cell()
+        .border_r_1()
+        .border_color(cx.theme().border)
 }
 
 fn state_dot(running: bool, paused: bool, cx: &App) -> Div {
