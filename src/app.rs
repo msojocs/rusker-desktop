@@ -274,19 +274,14 @@ fn group_container_list(containers: Vec<ContainerSummary>) -> Vec<ContainerListI
     items
 }
 
-/// Nested Compose containers prefer their replacement label, falling back to
-/// the full container name without removing the repeated project prefix.
-fn container_list_name(container: &ContainerSummary, nested: bool) -> &str {
+/// Remove the first `${project}-` occurrence from nested Compose container names.
+fn container_list_name(container: &ContainerSummary, nested: bool) -> String {
     if nested {
-        if let Some(replace) = container
-            .compose_replace
-            .as_deref()
-            .filter(|replace| !replace.is_empty())
-        {
-            return replace;
+        if let Some(project) = container.compose_project.as_deref() {
+            return container.name.replacen(&format!("{project}-"), "", 1);
         }
     }
-    &container.name
+    container.name.clone()
 }
 
 pub struct RuskerApp {
@@ -4908,18 +4903,22 @@ mod container_list_tests {
     }
 
     #[test]
-    fn nested_names_prefer_the_replace_label_and_otherwise_use_the_full_name() {
-        let mut replaced = container("shop-web-1", Some("shop"));
-        replaced.compose_replace = Some("frontend".into());
-        let mut empty_replace = container("shop_database_1", Some("shop"));
-        empty_replace.compose_replace = Some(String::new());
-
-        assert_eq!(container_list_name(&replaced, true), "frontend");
-        assert_eq!(container_list_name(&replaced, false), "shop-web-1");
-        assert_eq!(container_list_name(&empty_replace, true), "shop_database_1");
+    fn nested_names_remove_the_first_project_name_occurrence() {
+        for (name, expected) in [
+            ("shop-web-1", "web-1"),
+            ("shop-shop-web-1", "shop-web-1"),
+            ("custom-shop-web-1", "custom-web-1"),
+            ("shop_database_1", "shop_database_1"),
+            ("other-web-1", "other-web-1"),
+        ] {
+            let mut member = container(name, Some("shop"));
+            member.compose_replace = Some("frontend".into());
+            assert_eq!(container_list_name(&member, true), expected);
+            assert_eq!(container_list_name(&member, false), name);
+        }
         assert_eq!(
-            container_list_name(&container("other-web-1", Some("shop")), true),
-            "other-web-1"
+            container_list_name(&container("shop-web-1", None), true),
+            "shop-web-1"
         );
     }
 

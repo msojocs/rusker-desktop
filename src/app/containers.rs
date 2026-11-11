@@ -229,8 +229,10 @@ impl ContainerTable {
             3 => div()
                 .min_w_0()
                 .truncate()
+                .text_color(cx.theme().foreground)
+                .font_normal()
                 .when(nested, |this| this.pl_4())
-                .child(container_list_name(container, nested).to_owned())
+                .child(container_list_name(container, nested))
                 .into_any_element(),
             4 => {
                 let id = container.id.clone();
@@ -375,6 +377,8 @@ impl ContainerTable {
                 } else {
                     t!("app.containers.collapse_compose").into_owned()
                 };
+                let project = project.to_string();
+                let weak = self.weak.clone();
                 container_control_cell()
                     .id((
                         ElementId::from("compose-project-toggle"),
@@ -390,6 +394,15 @@ impl ContainerTable {
                         .small(),
                     )
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        _ = weak.update(cx, |this, cx| {
+                            if !this.compose_projects_collapsed.remove(&project) {
+                                this.compose_projects_collapsed.insert(project.clone());
+                            }
+                            cx.notify();
+                        });
+                    })
                     .into_any_element()
             }
             2 => {
@@ -408,42 +421,22 @@ impl ContainerTable {
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .into_any_element()
             }
-            3 => {
-                let open_project = project.to_string();
-                let weak = self.weak.clone();
-                div()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .id((ElementId::from("open-compose-project"), project.to_string()))
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .cursor_pointer()
-                            .font_semibold()
-                            .text_color(cx.theme().primary)
-                            .hover(|this| this.underline())
-                            .on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                _ = weak.update(cx, |this, cx| {
-                                    this.select_compose_project(open_project.clone(), cx);
-                                });
-                            })
-                            .child(project.to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(
-                                t!("app.containers.compose_services", count = containers.len())
-                                    .into_owned(),
-                            ),
-                    )
-                    .into_any_element()
-            }
+            3 => div()
+                .flex()
+                .items_center()
+                .text_color(cx.theme().foreground)
+                .font_normal()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(project.to_string()),
+                )
+                .child(div().flex_shrink_0().text_xs().child(
+                    t!("app.containers.compose_services", count = containers.len()).into_owned(),
+                ))
+                .into_any_element(),
             4..=6 => div()
                 .text_color(cx.theme().muted_foreground)
                 .child("—")
@@ -844,12 +837,7 @@ fn activate_container_row(weak: &WeakEntity<RuskerApp>, row: &ContainerListItem,
         }
         ContainerListItem::ComposeProject { project, .. } => {
             let project = project.clone();
-            _ = weak.update(cx, |this, cx| {
-                if !this.compose_projects_collapsed.remove(&project) {
-                    this.compose_projects_collapsed.insert(project);
-                }
-                cx.notify();
-            });
+            _ = weak.update(cx, |this, cx| this.select_compose_project(project, cx));
         }
     }
 }

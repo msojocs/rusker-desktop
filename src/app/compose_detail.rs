@@ -569,7 +569,7 @@ fn compose_service_name(container: &ContainerSummary) -> String {
         .compose_service
         .clone()
         .filter(|service| !service.is_empty())
-        .unwrap_or_else(|| container_list_name(container, true).to_string())
+        .unwrap_or_else(|| container_list_name(container, true))
 }
 
 fn prefix_service_logs(service: &str, logs: &str) -> String {
