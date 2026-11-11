@@ -57,6 +57,7 @@ use tokio::task::JoinHandle;
 use crate::ui::theme::change_theme;
 use crate::ui::{button, detail_row, empty_state, muted, section_panel, stat_card};
 
+mod compose_config;
 mod compose_detail;
 mod container_detail;
 mod containers;
@@ -307,6 +308,7 @@ pub struct RuskerApp {
     selected_container: Option<String>,
     /// Compose project currently open in the split service/log detail view.
     selected_compose_project: Option<String>,
+    compose_config_view: Option<Entity<compose_config::ComposeConfigView>>,
     /// Container list shows only running containers.
     containers_running_only: bool,
     /// IDs ticked for batch removal in the container list.
@@ -631,6 +633,7 @@ impl RuskerApp {
             busy: None,
             selected_container: None,
             selected_compose_project: None,
+            compose_config_view: None,
             containers_running_only: false,
             containers_checked: HashSet::new(),
             compose_projects_collapsed: HashSet::new(),
@@ -874,6 +877,7 @@ impl RuskerApp {
         }
         if page != Page::Containers {
             self.reset_container_tools();
+            self.compose_config_view = None;
         }
         self.page = page;
         if entering_containers {
@@ -1251,6 +1255,7 @@ impl RuskerApp {
                 .any(|container| container.compose_project.as_deref() == Some(project.as_str()))
             {
                 self.selected_compose_project = None;
+                self.compose_config_view = None;
                 self.logs_revision.advance();
                 self.logs_loading = false;
                 self.logs.clear();
@@ -1285,6 +1290,7 @@ impl RuskerApp {
         }
         self.selected_container = Some(id.clone());
         self.selected_compose_project = None;
+        self.compose_config_view = None;
         self.load_logs(id, cx);
     }
 

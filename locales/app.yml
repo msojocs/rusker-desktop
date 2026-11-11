@@ -320,9 +320,36 @@ app.containers.collapse_compose:
 app.compose.services:
   en: "Services"
   zh-CN: "服务"
-app.compose.config_files:
-  en: "Config files"
-  zh-CN: "配置文件"
+app.compose.view_config:
+  en: "View configurations"
+  zh-CN: "查看配置"
+app.compose.config_title:
+  en: "Compose file viewer"
+  zh-CN: "Compose 文件查看器"
+app.compose.back_to_project:
+  en: "Back to Compose project"
+  zh-CN: "返回 Compose 项目"
+app.compose.copy_config:
+  en: "Copy configuration"
+  zh-CN: "复制配置"
+app.compose.config_loading:
+  en: "Loading configuration..."
+  zh-CN: "正在读取配置…"
+app.compose.config_empty:
+  en: "This project did not report any Compose configuration file paths."
+  zh-CN: "该项目未提供 Compose 配置文件路径。"
+app.compose.config_not_local:
+  en: "This configuration path is not accessible on this computer. Open the source file on the host where Compose was run."
+  zh-CN: "此配置路径在本机不可访问，请在运行 Compose 的主机上查看源文件。"
+app.compose.config_read_failed:
+  en: "Could not read the configuration file. Check that the source file is accessible on this computer. %{error}"
+  zh-CN: "无法读取配置文件，请确认源文件在本机可访问。%{error}"
+app.compose.config_too_large:
+  en: "This configuration file exceeds the 2 MiB preview limit."
+  zh-CN: "此配置文件超过 2 MiB 预览上限。"
+app.compose.config_invalid_utf8:
+  en: "This configuration file is not valid UTF-8 text."
+  zh-CN: "此配置文件不是有效的 UTF-8 文本。"
 app.compose.logs.empty:
   en: "This Compose project has no recent stdout/stderr logs."
   zh-CN: "该 Compose 项目最近没有 stdout/stderr 日志。"

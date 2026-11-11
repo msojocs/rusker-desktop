@@ -8,12 +8,14 @@ impl RuskerApp {
     pub(super) fn select_compose_project(&mut self, project: String, cx: &mut Context<Self>) {
         self.reset_container_tools();
         self.selected_container = None;
+        self.compose_config_view = None;
         self.selected_compose_project = Some(project.clone());
         self.load_compose_logs(&project, cx);
     }
 
-    fn close_compose_project(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_compose_project(&mut self, cx: &mut Context<Self>) {
         self.selected_compose_project = None;
+        self.compose_config_view = None;
         self.logs_revision.advance();
         self.logs_loading = false;
         self.logs.clear();
@@ -139,6 +141,9 @@ impl RuskerApp {
         containers: &[ContainerSummary],
         cx: &mut Context<Self>,
     ) -> Div {
+        if let Some(view) = &self.compose_config_view {
+            return self.render_compose_config_detail(project, view, cx);
+        }
         let busy = self.busy.is_some();
         let running = containers
             .iter()
@@ -150,12 +155,7 @@ impl RuskerApp {
                 .clone()
                 .filter(|path| !path.is_empty())
         });
-        let config_files = containers.iter().find_map(|container| {
-            container
-                .compose_config_files
-                .clone()
-                .filter(|paths| !paths.is_empty())
-        });
+        let config_project = project.to_string();
         let start_project = project.to_string();
         let stop_project = project.to_string();
         let refresh_project = project.to_string();
@@ -248,18 +248,6 @@ impl RuskerApp {
                                         .truncate()
                                         .child(path),
                                 )
-                            })
-                            .when_some(config_files, |this, paths| {
-                                this.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .truncate()
-                                        .child(format!(
-                                            "{}: {paths}",
-                                            t!("app.compose.config_files")
-                                        )),
-                                )
                             }),
                     )
                     .child(
@@ -267,6 +255,16 @@ impl RuskerApp {
                             .flex()
                             .items_center()
                             .gap_2()
+                            .child(
+                                button("view-compose-config")
+                                    .outline()
+                                    .text_color(cx.theme().primary)
+                                    .border_color(cx.theme().primary.opacity(0.5))
+                                    .label(t!("app.compose.view_config"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_compose_config(&config_project, cx);
+                                    })),
+                            )
                             .child(
                                 button("start-compose-project")
                                     .primary()
@@ -324,6 +322,7 @@ impl RuskerApp {
                     .gap_4()
                     .child(
                         section_panel(cx)
+                            .bg(gpui_kit::transparent_black())
                             .w(px(400.))
                             .flex_shrink_0()
                             .min_h_0()
@@ -349,6 +348,7 @@ impl RuskerApp {
                     )
                     .child(
                         section_panel(cx)
+                            .bg(gpui_kit::transparent_black())
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
@@ -409,12 +409,6 @@ impl RuskerApp {
         } else {
             cx.theme().muted_foreground
         };
-        let status = if container.status.trim().is_empty() {
-            container.state.clone()
-        } else {
-            container.status.clone()
-        };
-
         div()
             .id((ElementId::from("compose-service-row"), container.id.clone()))
             .px_4()
@@ -455,21 +449,7 @@ impl RuskerApp {
                             .text_sm()
                             .text_color(cx.theme().primary)
                             .child(container.image.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .truncate()
-                            .child(status),
                     ),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(rusker_desktop::format::format_timestamp(container.created)),
             )
             .child(
                 list_action_button(
