@@ -1,11 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="1024" viewBox="0 0 1024 1024">
   <title>Rusker Desktop</title>
   <defs>
-    <!-- tile background: deep slate -->
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#1E293B"/>
-      <stop offset="1" stop-color="#0B1120"/>
-    </linearGradient>
     <!-- Rust: oxidised orange cog -->
     <linearGradient id="cog" gradientUnits="userSpaceOnUse" x1="150" y1="120" x2="874" y2="904">
       <stop offset="0" stop-color="#FB923C"/>
@@ -33,10 +28,6 @@
     <rect id="tooth" x="464" y="100" width="96" height="110" rx="18"/>
   </defs>
 
-  <!-- app tile -->
-  <rect x="32" y="32" width="960" height="960" rx="216" fill="url(#bg)"/>
-  <rect x="33.5" y="33.5" width="957" height="957" rx="214.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3"/>
-
   <!-- Rust cog: 12 teeth + ring, one gradient via mask -->
   <mask id="cogShape" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
   <g fill="#fff">
@@ -56,7 +47,6 @@
     <circle cx="512" cy="512" r="327" fill="none" stroke="#fff" stroke-width="74"/>
   </mask>
   <rect x="0" y="0" width="1024" height="1024" fill="url(#cog)" mask="url(#cogShape)"/>
-  <circle cx="512" cy="512" r="290" fill="#0F172A"/>
 
   <!-- GPU glow -->
   <circle cx="512" cy="512" r="286" fill="url(#glow)"/>

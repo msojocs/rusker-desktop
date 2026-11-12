@@ -4574,8 +4574,8 @@ const SIDEBAR_COLLAPSED_WIDTH: f32 = 56.;
 const SPINNER_PERIOD_SECS: f32 = 0.9;
 /// Seconds per status-dot breath.
 const STATUS_PULSE_PERIOD_SECS: f32 = 1.6;
-const APP_BAR_HEIGHT: f32 = 48.;
-const WINDOW_BUTTON_WIDTH: f32 = 46.;
+const APP_BAR_HEIGHT: f32 = 58.;
+const WINDOW_BUTTON_WIDTH: f32 = 56.;
 /// Container table column defaults; DataTable owns subsequent width changes.
 const CONTAINER_CHECK_COLUMN: f32 = 34.;
 const CONTAINER_EXPAND_COLUMN: f32 = 25.;
@@ -4653,22 +4653,26 @@ impl RuskerApp {
                     .pr_4()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(Icon::new(AssetIcon::Container).size(px(22.)))
+                    .gap_3()
+                    .child(
+                        gpui_kit::img(crate::APP_LOGO_PATH)
+                            .size(px(36.))
+                            .flex_shrink_0(),
+                    )
                     .child(
                         div()
                             .flex()
                             .items_baseline()
                             .gap_1()
-                            .child(div().text_lg().font_bold().child("rusker"))
-                            .child(div().text_lg().child("desktop")),
+                            .child(div().text_xl().font_bold().child("rusker"))
+                            .child(div().text_xl().child("desktop")),
                     ),
             )
             .child(drag_region(div().id("app-bar-drag")).flex_1().h_full())
             .child(
                 div()
                     .id("app-bar-settings")
-                    .size(px(32.))
+                    .size(px(40.))
                     .mr_2()
                     .rounded_md()
                     .flex()
@@ -4676,7 +4680,7 @@ impl RuskerApp {
                     .justify_center()
                     .cursor_pointer()
                     .hover(|style| style.bg(gpui_kit::white().opacity(0.16)))
-                    .child(Icon::new(IconName::Settings).small())
+                    .child(Icon::new(IconName::Settings).size(px(20.)))
                     .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::Settings, cx))),
             )
             .when(!cfg!(target_os = "macos"), |this| {
@@ -4728,7 +4732,7 @@ impl RuskerApp {
                 this.hover(|style| style.bg(gpui_kit::white().opacity(0.16)))
                     .active(|style| style.bg(gpui_kit::white().opacity(0.24)))
             })
-            .child(Icon::new(icon).small())
+            .child(Icon::new(icon).size(px(20.)))
             .when(cfg!(windows), |this| this.window_control_area(area))
             .when(cfg!(target_os = "linux"), |this| {
                 this.on_mouse_down(MouseButton::Left, |_, window, cx| {

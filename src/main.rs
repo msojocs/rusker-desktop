@@ -44,10 +44,17 @@ gpui_kit::assets::icon_assets!(
     ]
 );
 
+const APP_LOGO_PATH: &str = "icons/rusker.png";
+
 struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
+        if path == APP_LOGO_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/rusker-128.png"
+            ))));
+        }
         if let Some(data) = ExtraIcons.load(path)? {
             return Ok(Some(data));
         }
@@ -57,6 +64,9 @@ impl AssetSource for AppAssets {
     fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
         let mut names = assets::Assets.list(path)?;
         names.extend(ExtraIcons.list(path)?);
+        if APP_LOGO_PATH.starts_with(path) {
+            names.push(APP_LOGO_PATH.into());
+        }
         Ok(names)
     }
 }
