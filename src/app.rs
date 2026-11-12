@@ -59,6 +59,7 @@ use crate::ui::{button, detail_row, empty_state, muted, section_panel, stat_card
 
 mod compose_config;
 mod compose_detail;
+mod container_actions;
 mod container_detail;
 mod containers;
 mod desktop_import;
@@ -307,6 +308,7 @@ pub struct RuskerApp {
     connected: bool,
     loading: bool,
     busy: Option<String>,
+    container_actions: container_actions::ContainerActions,
     container_navigation: ContainerNavigation,
     compose_config_view: Option<Entity<compose_config::ComposeConfigView>>,
     /// Container list shows only running containers.
@@ -631,6 +633,7 @@ impl RuskerApp {
             connected: false,
             loading: false,
             busy: None,
+            container_actions: container_actions::ContainerActions::default(),
             container_navigation: ContainerNavigation::default(),
             compose_config_view: None,
             containers_running_only: false,
@@ -1339,7 +1342,7 @@ impl RuskerApp {
         action: ContainerAction,
         cx: &mut Context<Self>,
     ) {
-        if self.busy.is_some() {
+        if self.container_action_busy(&id) {
             return;
         }
         let Some(engine) = self.engine.clone() else {
@@ -1347,8 +1350,14 @@ impl RuskerApp {
             cx.notify();
             return;
         };
-        let handle = engine.container_action(id, action);
-        self.run_snapshot_operation(action.label().to_string(), handle, cx);
+        let handle = engine.container_actions(vec![id.clone()], action);
+        self.run_container_action(
+            container_actions::ActionTarget::Container(id.clone()),
+            HashSet::from([id]),
+            action,
+            handle,
+            cx,
+        );
     }
 
     fn remove_image(&mut self, id: String, cx: &mut Context<Self>) {
@@ -2788,6 +2797,7 @@ impl RuskerApp {
     /// Desktop action cluster and logs / details / mounts / exec / files / stats tabs.
     fn render_container_detail(&self, container: &ContainerSummary, cx: &mut Context<Self>) -> Div {
         let busy = self.busy.is_some();
+        let action_busy = self.container_action_busy(&container.id);
         let running = container.is_running();
         let start_action = if container.is_paused() {
             ContainerAction::Unpause
@@ -2824,7 +2834,7 @@ impl RuskerApp {
                     .secondary()
                     .icon(IconName::Square)
                     .tooltip(t!("app.stop"))
-                    .disabled(busy || !running)
+                    .disabled(action_busy || !running)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.start_container_action(stop_id.clone(), ContainerAction::Stop, cx);
                     })),
@@ -2834,7 +2844,7 @@ impl RuskerApp {
                     .primary()
                     .icon(IconName::Play)
                     .tooltip(start_action.label())
-                    .disabled(busy || running)
+                    .disabled(action_busy || running)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.start_container_action(start_id.clone(), start_action, cx);
                     })),
@@ -2844,7 +2854,7 @@ impl RuskerApp {
                     .outline()
                     .icon(IconName::RotateCw)
                     .tooltip(t!("app.restart"))
-                    .disabled(busy)
+                    .disabled(action_busy)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.start_container_action(
                             restart_id.clone(),

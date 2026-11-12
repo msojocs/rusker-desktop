@@ -708,6 +708,7 @@ impl ContainerActionsTable {
             .collect();
         let action = compose_detail::compose_primary_action(&containers);
         let busy = app.busy.is_some();
+        let action_busy = app.compose_project_action_busy(project);
         let toggle_project = project.to_string();
         let toggle_weak = self.weak.clone();
         let menu_project = project.to_string();
@@ -730,7 +731,7 @@ impl ContainerActionsTable {
                     IconName::Play
                 })
                 .tooltip(action.label())
-                .disabled(busy || containers.is_empty())
+                .disabled(action_busy || containers.is_empty())
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     _ = toggle_weak.update(cx, |this, cx| {
@@ -849,10 +850,11 @@ impl TableDelegate for ContainerActionsTable {
             }
         };
         let action = container.toggle_action();
-        let busy = self
-            .weak
-            .upgrade()
-            .is_some_and(|app| app.read(cx).busy.is_some());
+        let app = self.weak.upgrade();
+        let busy = app.as_ref().is_some_and(|app| app.read(cx).busy.is_some());
+        let action_busy = app
+            .as_ref()
+            .is_some_and(|app| app.read(cx).container_action_busy(&container.id));
         let toggle_id = container.id.clone();
         let toggle_weak = self.weak.clone();
         let menu_container = container.clone();
@@ -871,7 +873,7 @@ impl TableDelegate for ContainerActionsTable {
                         IconName::Play
                     })
                     .tooltip(action.label())
-                    .disabled(busy)
+                    .disabled(action_busy)
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         _ = toggle_weak.update(cx, |this, cx| {

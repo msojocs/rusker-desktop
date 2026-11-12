@@ -176,7 +176,7 @@ impl RuskerApp {
         action: ContainerAction,
         cx: &mut Context<Self>,
     ) {
-        if self.busy.is_some() {
+        if self.compose_project_action_busy(&project) {
             return;
         }
         let Some(engine) = self.engine.clone() else {
@@ -188,38 +188,21 @@ impl RuskerApp {
         if ids.is_empty() {
             return;
         }
+        let locked_ids = self
+            .snapshot
+            .containers
+            .iter()
+            .filter(|container| container.compose_project.as_deref() == Some(project.as_str()))
+            .map(|container| container.id.clone())
+            .collect();
         let handle = engine.container_actions(ids, action);
-        let revision = self.refresh_revision.advance();
-        self.busy = Some(t!("app.operation_progress", operation = action.label()).into());
-        self.loading = false;
-        cx.notify();
-        self._action_task = Some(cx.spawn(async move |this, cx| {
-            let result = await_engine(handle).await;
-            _ = this.update(cx, |this, cx| {
-                if !this.refresh_revision.is_current(revision) {
-                    return;
-                }
-                this.busy = None;
-                match result {
-                    Ok((snapshot, failures)) => {
-                        this.connected = true;
-                        this.apply_snapshot(snapshot, cx);
-                        this.after_volume_snapshot(cx);
-                        this.sync_container_tools(cx);
-                        if failures.is_empty() {
-                            this.notify_success(
-                                t!("app.operation_done", operation = action.label()),
-                                cx,
-                            );
-                        } else {
-                            this.notify_error(failures.join("\n"), cx);
-                        }
-                    }
-                    Err(error) => this.notify_error(error.to_string(), cx),
-                }
-                cx.notify();
-            });
-        }));
+        self.run_container_action(
+            container_actions::ActionTarget::ComposeProject(project),
+            locked_ids,
+            action,
+            handle,
+            cx,
+        );
     }
 
     pub(super) fn render_compose_project_detail(
@@ -232,6 +215,7 @@ impl RuskerApp {
             return self.render_compose_config_detail(project, view, cx);
         }
         let busy = self.busy.is_some();
+        let action_busy = self.compose_project_action_busy(project);
         let running = containers
             .iter()
             .filter(|container| container.is_running())
@@ -258,7 +242,7 @@ impl RuskerApp {
         let service_rows: Vec<AnyElement> = containers
             .iter()
             .map(|container| {
-                self.render_compose_service_row(container, busy, cx)
+                self.render_compose_service_row(container, cx)
                     .into_any_element()
             })
             .collect();
@@ -363,7 +347,8 @@ impl RuskerApp {
                                     .icon(IconName::Play)
                                     .tooltip(start_action.label())
                                     .disabled(
-                                        busy || containers.is_empty()
+                                        action_busy
+                                            || containers.is_empty()
                                             || running == containers.len(),
                                     )
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -379,7 +364,7 @@ impl RuskerApp {
                                     .secondary()
                                     .icon(IconName::Square)
                                     .tooltip(t!("app.stop"))
-                                    .disabled(busy || running == 0)
+                                    .disabled(action_busy || running == 0)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.start_compose_project_action(
                                             stop_project.clone(),
@@ -488,9 +473,9 @@ impl RuskerApp {
     fn render_compose_service_row(
         &self,
         container: &ContainerSummary,
-        busy: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let busy = self.container_action_busy(&container.id);
         let running = container.is_running();
         let action = container.toggle_action();
         let detail_id = container.id.clone();
