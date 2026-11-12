@@ -28,6 +28,8 @@
     <rect id="tooth" x="464" y="100" width="96" height="110" rx="18"/>
   </defs>
 
+  <!-- Enlarge the artwork 20% around the unchanged canvas center. -->
+  <g transform="translate(512 512) scale(1.2) translate(-512 -512)">
   <!-- Rust cog: 12 teeth + ring, one gradient via mask -->
   <mask id="cogShape" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
   <g fill="#fff">
@@ -70,5 +72,6 @@
   <g fill="none" stroke="#DBEAFE" stroke-opacity="0.85" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
     <polyline points="344,415 512,512 680,415"/>
     <line x1="512" y1="512" x2="512" y2="706"/>
+  </g>
   </g>
 </svg>
