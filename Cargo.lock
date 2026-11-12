@@ -5484,6 +5484,7 @@ dependencies = [
  "hyper-util",
  "png 0.18.1",
  "regex",
+ "resvg 0.46.0",
  "rust-i18n",
  "rustls",
  "rustls-native-certs",

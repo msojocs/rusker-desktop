@@ -786,6 +786,17 @@ impl RuskerApp {
                     for command in commands {
                         this.handle_tray_command(command, window, cx);
                     }
+                    let starting = matches!(
+                        this.engine_phase(),
+                        Some(
+                            EngineTransition::Starting
+                                | EngineTransition::Connecting
+                                | EngineTransition::Recovering
+                        )
+                    );
+                    if let Some(tray) = this.tray.as_mut() {
+                        tray.update_animation(starting);
+                    }
                     this.tray.is_some()
                 })
                 .unwrap_or(false);

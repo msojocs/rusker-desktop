@@ -32,6 +32,7 @@
   <g transform="translate(512 512) scale(1.2) translate(-512 -512)">
   <!-- Rust cog: 12 teeth + ring, one gradient via mask -->
   <mask id="cogShape" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+  <g id="cog-shape">
   <g fill="#fff">
     <use xlink:href="#tooth"/>
     <use xlink:href="#tooth" transform="rotate(30 512 512)"/>
@@ -47,6 +48,7 @@
     <use xlink:href="#tooth" transform="rotate(330 512 512)"/>
   </g>
     <circle cx="512" cy="512" r="327" fill="none" stroke="#fff" stroke-width="74"/>
+  </g>
   </mask>
   <rect x="0" y="0" width="1024" height="1024" fill="url(#cog)" mask="url(#cogShape)"/>
 
