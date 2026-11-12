@@ -767,17 +767,7 @@ impl ContainerActionsTable {
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     _ = remove_weak.update(cx, |this, cx| {
-                        let containers = this
-                            .snapshot
-                            .containers
-                            .iter()
-                            .filter(|container| {
-                                container.compose_project.as_deref()
-                                    == Some(remove_project.as_str())
-                            })
-                            .cloned()
-                            .collect();
-                        this.confirm_remove_containers(containers, window, cx);
+                        this.confirm_remove_compose_project(remove_project.clone(), window, cx);
                     });
                 }),
             )

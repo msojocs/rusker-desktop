@@ -231,6 +231,7 @@ impl EngineTransition {
 #[derive(Default)]
 struct ContainerRemoval {
     pending_ids: Vec<String>,
+    compose_project: Option<(String, Vec<ContainerSummary>)>,
     submitting: bool,
     error: Option<String>,
 }
@@ -2111,6 +2112,39 @@ impl RuskerApp {
         self.open_remove_containers_dialog(ids, title, description, window, cx);
     }
 
+    fn confirm_remove_compose_project(
+        &mut self,
+        project: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy.is_some() {
+            return;
+        }
+        let containers: Vec<_> = self
+            .snapshot
+            .containers
+            .iter()
+            .filter(|container| container.compose_project.as_deref() == Some(project.as_str()))
+            .cloned()
+            .collect();
+        if containers.is_empty() {
+            return;
+        }
+        let ids = containers
+            .iter()
+            .map(|container| container.id.clone())
+            .collect();
+        self.open_remove_containers_dialog(
+            ids,
+            t!("app.dialog.remove_compose.title", project = project).into(),
+            t!("app.dialog.remove_compose.description").into(),
+            window,
+            cx,
+        );
+        self.container_removal.compose_project = Some((project, containers));
+    }
+
     fn open_remove_containers_dialog(
         &mut self,
         ids: Vec<String>,
@@ -2188,7 +2222,8 @@ impl RuskerApp {
 
     fn submit_remove_containers(&mut self, cx: &mut Context<Self>) {
         if self.container_removal.submitting
-            || self.container_removal.pending_ids.is_empty()
+            || (self.container_removal.pending_ids.is_empty()
+                && self.container_removal.compose_project.is_none())
             || self.busy.is_some()
         {
             return;
@@ -2200,7 +2235,12 @@ impl RuskerApp {
         };
         let ids = self.container_removal.pending_ids.clone();
         let total = ids.len();
-        let handle = engine.remove_containers(ids);
+        let compose_project = self.container_removal.compose_project.clone();
+        let handle = if let Some((project, containers)) = &compose_project {
+            engine.compose_down(project.clone(), containers.clone())
+        } else {
+            engine.remove_containers(ids)
+        };
         let revision = self.refresh_revision.advance();
         self.container_removal.submitting = true;
         self.container_removal.error = None;
@@ -2232,9 +2272,15 @@ impl RuskerApp {
                             let window = this.window_handle;
                             _ = cx.update_window(window, |_, window, cx| window.close_dialog(cx));
                             this.notify_success(
-                                t!("app.notice.containers_removed", count = total),
+                                if let Some((project, _)) = &compose_project {
+                                    t!("app.notice.compose_removed", project = project)
+                                } else {
+                                    t!("app.notice.containers_removed", count = total)
+                                },
                                 cx,
                             );
+                        } else if compose_project.is_some() {
+                            this.container_removal.error = Some(failures.join("\n"));
                         } else {
                             this.container_removal.error = Some(
                                 t!(

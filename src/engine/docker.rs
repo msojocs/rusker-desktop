@@ -100,7 +100,7 @@ fn pooled_named_pipe(path: &str) -> Result<Docker, EngineError> {
 #[derive(Clone)]
 pub struct DockerEngine {
     pub(super) client: Docker,
-    managed_wsl: bool,
+    pub(super) managed_wsl: bool,
 }
 
 impl DockerEngine {

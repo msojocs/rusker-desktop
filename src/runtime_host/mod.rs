@@ -5,6 +5,7 @@ mod engine_proxy;
 mod http_proxy;
 mod lan_forward;
 mod path_translation;
+pub(crate) use path_translation::to_wsl_path;
 #[cfg(windows)]
 mod proxy;
 mod wsl;

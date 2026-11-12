@@ -1,3 +1,4 @@
+mod compose;
 mod connection;
 mod container_detail;
 mod docker;
@@ -181,6 +182,29 @@ impl EngineService {
         self.spawn_engine(move |engine| async move {
             let failures = engine.container_actions(&ids, action).await;
             Ok((engine.snapshot().await?, failures))
+        })
+    }
+
+    /// Stops and removes a Compose project and its networks, preserving volumes.
+    pub fn compose_down(
+        &self,
+        project: String,
+        containers: Vec<crate::model::ContainerSummary>,
+    ) -> JoinHandle<Result<(EngineSnapshot, Vec<String>), EngineError>> {
+        self.spawn_engine(move |engine| async move {
+            // Refresh even after partial failure so retries can finish network cleanup.
+            let mut failures: Vec<String> = engine
+                .compose_down(&project, &containers)
+                .await
+                .err()
+                .map(|error| error.to_string())
+                .into_iter()
+                .collect();
+            let snapshot = engine.snapshot().await?;
+            if let Some(error) = compose::remaining_project_error(&snapshot.containers, &project) {
+                failures.push(error);
+            }
+            Ok((snapshot, failures))
         })
     }
 

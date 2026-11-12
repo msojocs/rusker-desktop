@@ -235,7 +235,7 @@ impl RuskerApp {
         let start_project = project.to_string();
         let stop_project = project.to_string();
         let refresh_project = project.to_string();
-        let remove_containers = containers.to_vec();
+        let remove_project = project.to_string();
         let logs_for_copy = self.logs.clone();
         let weak = cx.weak_entity();
 
@@ -380,8 +380,8 @@ impl RuskerApp {
                                     .tooltip(t!("app.delete"))
                                     .disabled(busy || containers.is_empty())
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.confirm_remove_containers(
-                                            remove_containers.clone(),
+                                        this.confirm_remove_compose_project(
+                                            remove_project.clone(),
                                             window,
                                             cx,
                                         );

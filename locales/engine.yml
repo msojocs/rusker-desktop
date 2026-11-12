@@ -32,6 +32,12 @@ engine.error.container_replace_config_missing:
 engine.error.compose_replace_unsupported:
   en: "Compose-managed containers must be updated with Docker Compose"
   zh-CN: "Compose 管理的容器请通过 Docker Compose 更新"
+engine.error.compose_source_unavailable:
+  en: "The original Compose configuration paths are unavailable. Cannot run compose down safely."
+  zh-CN: "原 Compose 配置路径不可用，无法安全执行 compose down。"
+engine.error.compose_containers_remaining:
+  en: "Compose project %{project} still has containers after removal: %{containers}"
+  zh-CN: "Compose 项目 %{project} 删除后仍有容器残留：%{containers}"
 engine.error.invalid_replacement_image:
   en: "Invalid replacement image reference: %{image}"
   zh-CN: "替换镜像引用无效：%{image}"
@@ -344,6 +350,9 @@ engine.desktop.id_detail:
 engine.desktop.leftover_volume_cleanup_failed:
   en: "; failed to clean up the leftover volume %{target}: %{error}"
   zh-CN: "；残留卷 %{target} 清理失败：%{error}"
+engine.desktop.image_tag_unavailable:
+  en: "The source image reference %{image} has no repository tag to preserve. Import using an image name and tag."
+  zh-CN: "源镜像引用 %{image} 没有可保留的仓库标签，请使用镜像名称和标签导入。"
 engine.desktop.interrupted_hint:
   en: "; if the transfer was interrupted, check the target container and the imported image %{image}"
   zh-CN: "；如传输中断，请检查目标容器及导入镜像 %{image}"
@@ -455,3 +464,48 @@ engine.desktop.convert_container_config:
 engine.desktop.imported_name:
   en: "%{name} (%{id})"
   zh-CN: "%{name}（%{id}）"
+engine.desktop.compose_group_incomplete:
+  en: "Compose project %{project} must be selected as a whole"
+  zh-CN: "Compose 项目 %{project} 必须整组选择"
+engine.desktop.compose_project_exists:
+  en: "Compose project %{project} already exists on the target and will not be merged"
+  zh-CN: "目标已存在 Compose 项目 %{project}，不会合并导入"
+engine.desktop.check_target_volume:
+  en: "Check the target volume"
+  zh-CN: "检查目标卷"
+engine.desktop.create_target_volume:
+  en: "Create the target volume"
+  zh-CN: "创建目标卷"
+engine.desktop.resource_ownership:
+  en: "Could not confirm that resource %{name} was created by this import; it was not modified"
+  zh-CN: "无法确认资源 %{name} 由本次导入创建，未对其进行修改"
+engine.desktop.leftover_network_cleanup_failed:
+  en: "; failed to clean up the leftover network %{target}: %{error}"
+  zh-CN: "；残留网络 %{target} 清理失败：%{error}"
+engine.desktop.leftover_container_cleanup_failed:
+  en: "failed to clean up container %{id}: %{error}"
+  zh-CN: "清理容器 %{id} 失败：%{error}"
+engine.desktop.network_action:
+  en: "Import network %{name}"
+  zh-CN: "导入网络 %{name}"
+engine.desktop.network_unsupported:
+  en: "Network %{name} uses settings that cannot be safely copied"
+  zh-CN: "网络 %{name} 使用了无法安全复制的设置"
+engine.desktop.network_conflict:
+  en: "Network %{name} already exists on the target and will not be reused"
+  zh-CN: "目标已存在网络 %{name}，不会复用"
+engine.desktop.network_changed:
+  en: "Network %{name} changed while it was being imported"
+  zh-CN: "网络 %{name} 在导入期间发生变化"
+engine.desktop.bind_path_unsupported:
+  en: "Bind mount is unsupported: %{detail}"
+  zh-CN: "不支持此 bind 挂载：%{detail}"
+engine.desktop.bind_options_unsupported:
+  en: "Bind mount options are unsupported: %{detail}"
+  zh-CN: "不支持此 bind 挂载选项：%{detail}"
+engine.desktop.bind_path_unavailable:
+  en: "The bind path %{path} is not accessible in the Rusker environment"
+  zh-CN: "Rusker 环境无法访问 bind 路径 %{path}"
+engine.desktop.bind_check:
+  en: "Check the bind path in the Rusker environment"
+  zh-CN: "检查 Rusker 环境中的 bind 路径"

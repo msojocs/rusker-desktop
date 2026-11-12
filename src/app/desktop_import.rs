@@ -1,7 +1,10 @@
 //! Session-only desktop engine source discovery and import UI. Import tasks
 //! have their own lifetime; `busy` keeps ordinary engine mutations out.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use gpui_kit::{
     base::{Disableable as _, StyledExt as _},
@@ -21,6 +24,74 @@ use rusker_desktop::engine::{
 
 use super::{await_engine, callout, CalloutKind, PointerCursor as _, RuskerApp};
 use crate::ui::{button, confirmation_footer, muted};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DesktopImportGroup {
+    project: Option<String>,
+    members: Vec<usize>,
+}
+
+/// Compose services are selected as a unit; non-Compose containers remain
+/// independent entries. Kept UI-framework-free so the grouping contract can be tested.
+fn desktop_import_groups(containers: &[DesktopContainer]) -> Vec<DesktopImportGroup> {
+    let mut groups = Vec::new();
+    let mut projects = HashMap::new();
+    for (index, container) in containers.iter().enumerate() {
+        if let Some(project) = container
+            .compose_project
+            .as_ref()
+            .filter(|name| !name.is_empty())
+        {
+            let group_index = *projects.entry(project.clone()).or_insert_with(|| {
+                groups.push(DesktopImportGroup {
+                    project: Some(project.clone()),
+                    members: Vec::new(),
+                });
+                groups.len() - 1
+            });
+            groups[group_index].members.push(index);
+        } else {
+            groups.push(DesktopImportGroup {
+                project: None,
+                members: vec![index],
+            });
+        }
+    }
+    groups
+}
+
+fn desktop_group_importable(group: &DesktopImportGroup, blocked: &[bool]) -> bool {
+    group.members.iter().all(|&index| !blocked[index])
+}
+
+fn desktop_selection_state(
+    groups: &[DesktopImportGroup],
+    containers: &[DesktopContainer],
+    checked: &HashSet<String>,
+) -> gpui_kit::base::CheckboxState {
+    let mut total = 0;
+    let mut selected = 0;
+    for index in groups.iter().flat_map(|group| &group.members) {
+        total += 1;
+        selected += usize::from(checked.contains(&containers[*index].id));
+    }
+    match (selected, total) {
+        (0, _) => gpui_kit::base::CheckboxState::Unchecked,
+        (selected, total) if selected == total => gpui_kit::base::CheckboxState::Checked,
+        _ => gpui_kit::base::CheckboxState::Indeterminate,
+    }
+}
+
+fn desktop_group_selected(
+    group: &DesktopImportGroup,
+    containers: &[DesktopContainer],
+    checked: &HashSet<String>,
+) -> bool {
+    group
+        .members
+        .iter()
+        .all(|&index| checked.contains(&containers[index].id))
+}
 
 #[derive(Default)]
 pub(super) struct DesktopImportState {
@@ -103,18 +174,40 @@ impl RuskerApp {
         {
             return Some(t!("desktop_import.blocked.name_conflict").into_owned());
         }
+        if let Some(project) = container.compose_project.as_deref() {
+            if self.connected
+                && self
+                    .snapshot
+                    .containers
+                    .iter()
+                    .any(|target| target.compose_project.as_deref() == Some(project))
+            {
+                return Some(
+                    t!("desktop_import.blocked.project_conflict", project = project).into_owned(),
+                );
+            }
+        }
         None
     }
 
     fn selected_desktop_containers(&self) -> Vec<String> {
-        self.desktop_import
-            .containers
+        let containers = &self.desktop_import.containers;
+        let blocked: Vec<bool> = containers
             .iter()
-            .filter(|container| {
-                self.desktop_import.checked.contains(&container.id)
-                    && self.desktop_container_blocked(container).is_none()
+            .map(|container| self.desktop_container_blocked(container).is_some())
+            .collect();
+        desktop_import_groups(containers)
+            .into_iter()
+            .filter(|group| {
+                desktop_group_importable(group, &blocked)
+                    && desktop_group_selected(group, containers, &self.desktop_import.checked)
             })
-            .map(|container| container.id.clone())
+            .flat_map(|group| {
+                group
+                    .members
+                    .into_iter()
+                    .map(|index| containers[index].id.clone())
+            })
             .collect()
     }
 
@@ -412,14 +505,19 @@ impl RuskerApp {
         let unavailable = self.desktop_import_unavailable();
         let selected = self.selected_desktop_containers();
         let import_blocked = unavailable.is_some() || selected.is_empty();
-        let eligible: Vec<String> = state
+        let groups = desktop_import_groups(&state.containers);
+        let blocked: Vec<bool> = state
             .containers
             .iter()
-            .filter(|container| self.desktop_container_blocked(container).is_none())
-            .map(|container| container.id.clone())
+            .map(|container| self.desktop_container_blocked(container).is_some())
             .collect();
-        let all_checked =
-            !eligible.is_empty() && eligible.iter().all(|id| state.checked.contains(id));
+        let eligible: Vec<DesktopImportGroup> = groups
+            .iter()
+            .filter(|group| desktop_group_importable(group, &blocked))
+            .cloned()
+            .collect();
+        let selection_state = desktop_selection_state(&eligible, &state.containers, &state.checked);
+        let selection_disabled = eligible.is_empty() || state.running || state.scanning;
         div()
             .flex()
             .flex_col()
@@ -468,52 +566,80 @@ impl RuskerApp {
             })
             .when(!state.containers.is_empty(), |this| {
                 this.child(div().flex().flex_col().gap_3()
-                    .child(Checkbox::new("check-all-desktop-containers")
-                        .label(t!("desktop_import.select_all").into_owned())
-                        .checked(all_checked)
-                        .disabled(eligible.is_empty() || state.running || state.scanning)
-                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                            if this.desktop_import_running() || this.desktop_import_scanning() {
-                                return;
+                    .child(gpui_kit::base::Checkbox::new("check-all-desktop-containers")
+                        .state(selection_state)
+                        .disabled(selection_disabled)
+                        .accessibility_label(t!("desktop_import.select_all").into_owned())
+                        .flex().items_center().gap_2().text_sm()
+                        .when(selection_disabled, |this| this.opacity(0.5))
+                        .child(div().size(px(16.)).flex_shrink_0().border_1().rounded(px(4.))
+                            .flex().items_center().justify_center()
+                            .border_color(cx.theme().input)
+                            .bg(cx.theme().input_background())
+                            .when(selection_state != gpui_kit::base::CheckboxState::Unchecked, |this| {
+                                this.bg(cx.theme().primary).border_color(cx.theme().primary)
+                                    .child(gpui_kit::component::Icon::new(if selection_state == gpui_kit::base::CheckboxState::Indeterminate {
+                                        IconName::Minus
+                                    } else {
+                                        IconName::Check
+                                    }).size(px(12.)).text_color(cx.theme().primary_foreground))
+                            }))
+                        .child(t!("desktop_import.select_all").into_owned())
+                        .on_change({
+                            let weak = cx.weak_entity();
+                            move |next, _, _, cx| {
+                                _ = weak.update(cx, |this, cx| {
+                                    if this.desktop_import_running() || this.desktop_import_scanning() {
+                                        return;
+                                    }
+                                    for group in &eligible {
+                                        for &index in &group.members {
+                                            let id = &this.desktop_import.containers[index].id;
+                                            if next == gpui_kit::base::CheckboxState::Checked {
+                                                this.desktop_import.checked.insert(id.clone());
+                                            } else {
+                                                this.desktop_import.checked.remove(id);
+                                            }
+                                        }
+                                    }
+                                    cx.notify();
+                                });
                             }
-                            for id in &eligible {
-                                if *checked {
-                                    this.desktop_import.checked.insert(id.clone());
-                                } else {
-                                    this.desktop_import.checked.remove(id);
-                                }
-                            }
-                            cx.notify();
-                        })))
+                        }))
                     // Stop bubbling outside the viewport, after its native scroll handler ran.
                     .child(div().on_scroll(|_, _, cx| cx.stop_propagation())
                         .child(div().id("desktop-source-containers").max_h(px(360.)).overflow_y_scroll()
                         .flex().flex_col().gap_3()
-                        .children(state.containers.iter().enumerate().map(|(index, container)| {
-                            let id = container.id.clone();
-                            let blocked = self.desktop_container_blocked(container);
-                            let disabled = blocked.is_some() || state.running || state.scanning;
-                            div().p_3().border_1().border_color(cx.theme().border).rounded_md()
-                                .flex_shrink_0().flex().flex_col().gap_2()
-                                .child(Checkbox::new(("check-desktop-container", index))
-                                    .label(container.name.clone())
-                                    .checked(state.checked.contains(&container.id))
-                                    .disabled(disabled)
-                                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                        if this.desktop_import_running() || this.desktop_import_scanning() {
-                                            return;
-                                        }
-                                        if *checked {
-                                            this.desktop_import.checked.insert(id.clone());
-                                        } else {
-                                            this.desktop_import.checked.remove(&id);
-                                        }
-                                        cx.notify();
-                                    })))
-                                .child(muted(t!("desktop_import.container.meta", image = container.image, state = container.state), cx))
-                                .child(muted(t!("desktop_import.container.source_id", id = container.id), cx))
-                                .when_some(blocked, |this, reason| this.child(div().text_sm()
-                                    .text_color(cx.theme().warning).child(t!("desktop_import.container.blocked", reason = reason).to_string())))
+                        .children(groups.iter().map(|group| {
+                            let group_blocked = !desktop_group_importable(group, &blocked);
+                            div().flex().flex_col().gap_2().children(group.project.as_ref().map(|project| {
+                                div().font_semibold().text_sm().child(t!("desktop_import.group.title", project = project).to_string())
+                            }))
+                            .children(group.members.iter().map(|&index| {
+                                let container = &state.containers[index];
+                                let ids: Vec<String> = group.members.iter().map(|&member| state.containers[member].id.clone()).collect();
+                                let reason = self.desktop_container_blocked(container);
+                                let disabled = group_blocked || state.running || state.scanning;
+                                div().p_3().border_1().border_color(cx.theme().border).rounded_md()
+                                    .flex_shrink_0().flex().flex_col().gap_2()
+                                    .child(Checkbox::new(("check-desktop-container", index))
+                                        .label(container.name.clone())
+                                        .checked(state.checked.contains(&container.id))
+                                        .disabled(disabled)
+                                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                            if this.desktop_import_running() || this.desktop_import_scanning() { return; }
+                                            for id in &ids {
+                                                if *checked { this.desktop_import.checked.insert(id.clone()); }
+                                                else { this.desktop_import.checked.remove(id); }
+                                            }
+                                            cx.notify();
+                                        })))
+                                    .when_some(container.compose_service.clone(), |this, service| this.child(muted(t!("desktop_import.container.service", service = service), cx)))
+                                    .child(muted(t!("desktop_import.container.meta", image = container.image, state = container.state), cx))
+                                    .child(muted(t!("desktop_import.container.source_id", id = container.id), cx))
+                                    .when_some(reason, |this, reason| this.child(div().text_sm()
+                                        .text_color(cx.theme().warning).child(t!("desktop_import.container.blocked", reason = reason).to_string())))
+                            }))
                         })))))
             })
             .when(state.running, |this| this.child(div().flex().flex_col().gap_2()
@@ -551,5 +677,124 @@ fn desktop_source_hint(source: DesktopImportSource) -> std::borrow::Cow<'static,
     match source {
         DesktopImportSource::DockerDesktop => t!("desktop_import.hint.docker_desktop"),
         DesktopImportSource::RancherDesktop => t!("desktop_import.hint.rancher_desktop"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn container(id: &str, project: Option<&str>) -> DesktopContainer {
+        DesktopContainer {
+            id: id.into(),
+            compose_project: project.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn compose_members_are_grouped_and_regular_containers_stay_individual() {
+        let containers = vec![
+            container("a", Some("shop")),
+            container("solo", None),
+            container("b", Some("shop")),
+            container("c", Some("other")),
+        ];
+        let groups = desktop_import_groups(&containers);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(
+            groups[0],
+            DesktopImportGroup {
+                project: Some("shop".into()),
+                members: vec![0, 2]
+            }
+        );
+        assert_eq!(
+            groups[1],
+            DesktopImportGroup {
+                project: None,
+                members: vec![1]
+            }
+        );
+        assert_eq!(
+            groups[2],
+            DesktopImportGroup {
+                project: Some("other".into()),
+                members: vec![3]
+            }
+        );
+    }
+
+    #[test]
+    fn select_all_reflects_none_partial_and_all_eligible_containers() {
+        use gpui_kit::base::CheckboxState;
+
+        let containers = vec![
+            container("a", None),
+            container("b", None),
+            container("blocked", None),
+        ];
+        let groups = desktop_import_groups(&containers);
+        let eligible = &groups[..2];
+        let mut checked = HashSet::new();
+        assert_eq!(
+            desktop_selection_state(eligible, &containers, &checked),
+            CheckboxState::Unchecked
+        );
+        checked.insert("a".into());
+        assert_eq!(
+            desktop_selection_state(eligible, &containers, &checked),
+            CheckboxState::Indeterminate
+        );
+        checked.insert("b".into());
+        assert_eq!(
+            desktop_selection_state(eligible, &containers, &checked),
+            CheckboxState::Checked
+        );
+        checked.clear();
+        checked.insert("blocked".into());
+        assert_eq!(
+            desktop_selection_state(eligible, &containers, &checked),
+            CheckboxState::Unchecked
+        );
+        assert_eq!(
+            desktop_selection_state(&[], &containers, &checked),
+            CheckboxState::Unchecked
+        );
+    }
+
+    #[test]
+    fn select_all_is_indeterminate_for_a_selected_compose_group() {
+        use gpui_kit::base::CheckboxState;
+
+        let containers = vec![
+            container("web", Some("shop")),
+            container("db", Some("shop")),
+            container("solo", None),
+        ];
+        let groups = desktop_import_groups(&containers);
+        let checked = HashSet::from(["web".into(), "db".into()]);
+        assert_eq!(
+            desktop_selection_state(&groups, &containers, &checked),
+            CheckboxState::Indeterminate
+        );
+    }
+
+    #[test]
+    fn compose_selection_and_blocking_apply_to_the_whole_group() {
+        let containers = vec![
+            container("a", Some("shop")),
+            container("b", Some("shop")),
+            container("solo", None),
+        ];
+        let groups = desktop_import_groups(&containers);
+        let mut checked = HashSet::new();
+        checked.insert("a".to_owned());
+        assert!(!desktop_group_selected(&groups[0], &containers, &checked));
+        checked.insert("b".to_owned());
+        assert!(desktop_group_selected(&groups[0], &containers, &checked));
+        assert!(desktop_group_importable(&groups[0], &[false, false, true]));
+        assert!(!desktop_group_importable(&groups[0], &[false, true, false]));
+        assert!(desktop_group_importable(&groups[1], &[true, true, false]));
     }
 }

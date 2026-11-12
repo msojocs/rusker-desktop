@@ -215,6 +215,15 @@ app.dialog.remove_containers.title:
 app.dialog.remove_containers.description:
   en: "This action cannot be undone. Associated volumes are not deleted; running containers will be rejected by the Engine.\n%{containers}"
   zh-CN: "此操作不可撤销。关联卷不会被删除；运行中的容器会被 Engine 拒绝。\n%{containers}"
+app.dialog.remove_compose.title:
+  en: "Remove Compose project %{project}?"
+  zh-CN: "删除 Compose 项目 %{project}？"
+app.dialog.remove_compose.description:
+  en: "Runs docker compose down --remove-orphans: stops and removes all project containers and non-external networks. Volumes and images are kept. This action cannot be undone."
+  zh-CN: "执行 docker compose down --remove-orphans：停止并删除项目内的所有容器及非 external 网络。保留数据卷和镜像。此操作不可撤销。"
+app.notice.compose_removed:
+  en: "Compose project %{project} removed"
+  zh-CN: "已删除 Compose 项目 %{project}"
 app.cancel:
   en: "Cancel"
   zh-CN: "取消"
