@@ -15,7 +15,6 @@ use gpui_kit::component::{
     slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
     tab::{Tab, TabBar},
-    table::TableState,
     tooltip::Tooltip,
     window_border, ActiveTheme as _, Icon, IconName, Sizable as _, Size, ThemeMode, WindowExt as _,
 };
@@ -73,10 +72,10 @@ mod volumes;
 use container_detail::{ContainerStatsState, ContainerTools};
 use containers::{ContainerEmpty, ContainerTables};
 use desktop_import::DesktopImportState;
-use images::{ImageState, ImageTable};
+use images::{ImageState, ImageTables};
 use navigation::{ContainerNavigation, ContainerPage};
 use run::RunForm;
-use volumes::{VolumeState, VolumeTable};
+use volumes::{VolumeState, VolumeTables};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -319,8 +318,8 @@ pub struct RuskerApp {
     /// Compose projects collapsed in the container list. Projects default to expanded.
     compose_projects_collapsed: HashSet<String>,
     container_tables: ContainerTables,
-    images_table: Entity<TableState<ImageTable>>,
-    volumes_table: Entity<TableState<VolumeTable>>,
+    images_table: ImageTables,
+    volumes_table: VolumeTables,
     container_removal: ContainerRemoval,
     container_replacement: ContainerReplacement,
     /// Container detail tab: logs, details, mounts, exec, files, stats.
@@ -608,19 +607,8 @@ impl RuskerApp {
 
         let app_weak = cx.weak_entity();
         let container_tables = ContainerTables::new(app_weak.clone(), window, cx);
-        let images_table = cx.new(|cx| {
-            TableState::new(ImageTable::new(app_weak.clone()), window, cx)
-                .row_selectable(false)
-                .col_selectable(false)
-                .col_movable(false)
-        });
-        let volumes_table = cx.new(|cx| {
-            TableState::new(VolumeTable::new(app_weak), window, cx)
-                .row_selectable(false)
-                .col_selectable(false)
-                .col_movable(false)
-                .sortable(false)
-        });
+        let images_table = ImageTables::new(app_weak.clone(), window, cx);
+        let volumes_table = VolumeTables::new(app_weak, window, cx);
 
         let mut this = Self {
             engine,
@@ -4622,10 +4610,11 @@ const SPINNER_PERIOD_SECS: f32 = 0.9;
 const STATUS_PULSE_PERIOD_SECS: f32 = 1.6;
 const APP_BAR_HEIGHT: f32 = 58.;
 const WINDOW_BUTTON_WIDTH: f32 = 56.;
+/// Shared widths for the separate selection and status columns.
+const TABLE_CHECK_COLUMN: f32 = 34.;
+const TABLE_STATUS_COLUMN: f32 = 51.;
 /// Container table column defaults; DataTable owns subsequent width changes.
-const CONTAINER_CHECK_COLUMN: f32 = 34.;
 const CONTAINER_EXPAND_COLUMN: f32 = 25.;
-const CONTAINER_STATUS_COLUMN: f32 = 51.;
 const CONTAINER_NAME_COLUMN: f32 = 160.;
 const CONTAINER_ID_COLUMN: f32 = 108.;
 const CONTAINER_IMAGE_COLUMN: f32 = 160.;
@@ -4634,6 +4623,34 @@ const CONTAINER_CPU_COLUMN: f32 = 152.;
 const CONTAINER_MEMORY_COLUMN: f32 = 152.;
 const CONTAINER_CREATED_COLUMN: f32 = 88.;
 const CONTAINER_ACTIONS_COLUMN: f32 = 108.;
+
+fn table_control_cell() -> Div {
+    // Definite height keeps controls centered even on the first layout pass.
+    div()
+        .w_full()
+        .h(Size::Large.table_row_height())
+        .flex()
+        .items_center()
+        .justify_center()
+}
+
+fn table_control_header_cell(width: Pixels, cx: &App) -> Div {
+    // DataTable reserves space for sorting even on non-sortable columns.
+    // Keep narrow headers at their full width and separators out of layout.
+    table_control_cell()
+        .w(width)
+        .flex_shrink_0()
+        .relative()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(px(1.))
+                .bg(cx.theme().border),
+        )
+}
 
 fn table_horizontal_scrollbar<H: ScrollbarHandle + Clone>(
     handle: &H,

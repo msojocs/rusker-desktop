@@ -1,44 +1,78 @@
 use gpui_kit::component::{
+    scroll::Scrollbar,
     table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
     Size,
 };
-use gpui_kit::{App, Entity, Stateful, WeakEntity};
+use gpui_kit::{App, AppContext as _, Entity, Pixels, Stateful, WeakEntity};
+
+use std::rc::Rc;
 
 use super::*;
-use crate::app::table_horizontal_scrollbar;
+use crate::app::{
+    table_control_cell, table_control_header_cell, table_horizontal_scrollbar, TABLE_CHECK_COLUMN,
+    TABLE_STATUS_COLUMN,
+};
 
-pub(crate) struct ImageTable {
-    weak: WeakEntity<RuskerApp>,
-    rows: Vec<ImageRow>,
-    sort: ImageSort,
-    now: i64,
-    no_images: bool,
+pub(crate) struct ImageTables {
+    main: Entity<TableState<ImageTable>>,
+    actions: Entity<TableState<ImageActionsTable>>,
 }
 
-impl ImageTable {
-    pub(crate) fn new(weak: WeakEntity<RuskerApp>) -> Self {
-        Self {
-            weak,
-            rows: Vec::new(),
-            sort: ImageSort::default(),
-            now: 0,
-            no_images: true,
-        }
+impl ImageTables {
+    pub(crate) fn new(
+        weak: WeakEntity<RuskerApp>,
+        window: &mut Window,
+        cx: &mut Context<RuskerApp>,
+    ) -> Self {
+        let main = cx.new(|cx| {
+            TableState::new(ImageTable::new(weak.clone()), window, cx)
+                .row_selectable(false)
+                .col_selectable(false)
+                .col_movable(false)
+        });
+        let vertical_scroll_handle = main.read(cx).vertical_scroll_handle.clone();
+        let actions = cx.new(|cx| {
+            let mut state = TableState::new(
+                ImageActionsTable {
+                    weak,
+                    rows: Rc::new(Vec::new()),
+                },
+                window,
+                cx,
+            )
+            .row_selectable(false)
+            .col_selectable(false)
+            .col_movable(false)
+            .sortable(false);
+            state.vertical_scroll_handle = vertical_scroll_handle;
+            state
+        });
+        Self { main, actions }
     }
 
     pub(crate) fn render(
-        table: &Entity<TableState<Self>>,
+        &self,
         rows: Vec<ImageRow>,
         no_images: bool,
         cx: &mut Context<RuskerApp>,
     ) -> Div {
-        table.update(cx, |table, _| {
+        let rows = Rc::new(rows);
+        self.main.update(cx, |table, _| {
             let delegate = table.delegate_mut();
-            delegate.rows = rows;
+            delegate.rows = rows.clone();
             delegate.now = now();
             delegate.no_images = no_images;
         });
-        let horizontal_scroll = table.read(cx).horizontal_scroll_handle.clone();
+        self.actions
+            .update(cx, |table, _| table.delegate_mut().rows = rows);
+        let horizontal_scroll = self.main.read(cx).horizontal_scroll_handle.clone();
+        let horizontal_content_width = {
+            let table = self.main.read(cx);
+            (0..ImageTable::COLUMNS_COUNT)
+                .filter_map(|col_ix| table.col_width(col_ix))
+                .sum::<Pixels>()
+                + px(12.)
+        };
         div()
             .rounded_lg()
             .border_1()
@@ -46,19 +80,201 @@ impl ImageTable {
             .flex_1()
             .min_h_0()
             .flex()
-            .flex_col()
             .overflow_hidden()
             .child(
-                div().flex_1().min_h_0().child(
-                    DataTable::new(table)
-                        .bordered(false)
-                        .with_size(Size::Large)
-                        .header_row_height(px(40.))
-                        .scrollbar_visible(true, false)
-                        .accessibility_label(t!("images.title")),
-                ),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div().flex_1().min_h_0().child(
+                            DataTable::new(&self.main)
+                                .bordered(false)
+                                .fixed_cols_border(false)
+                                .with_size(Size::Large)
+                                .header_row_height(px(40.))
+                                .scrollbar_visible(true, false)
+                                .accessibility_label(t!("images.title")),
+                        ),
+                    )
+                    .child(table_horizontal_scrollbar(
+                        &horizontal_scroll,
+                        Some(horizontal_content_width),
+                    )),
             )
-            .child(table_horizontal_scrollbar(&horizontal_scroll, None))
+            .child(
+                div()
+                    .w(px(ACTIONS_COLUMN))
+                    .flex_shrink_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div().flex_1().min_h_0().child(
+                            DataTable::new(&self.actions)
+                                .bordered(false)
+                                .with_size(Size::Large)
+                                .header_row_height(px(40.))
+                                .scrollbar_visible(false, false)
+                                .accessibility_label(t!("images.column.actions")),
+                        ),
+                    )
+                    .child(div().h(Scrollbar::width()).flex_shrink_0()),
+            )
+    }
+}
+
+struct ImageActionsTable {
+    weak: WeakEntity<RuskerApp>,
+    rows: Rc<Vec<ImageRow>>,
+}
+
+impl TableDelegate for ImageActionsTable {
+    fn columns_count(&self, _: &App) -> usize {
+        1
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.rows.len()
+    }
+
+    fn column(&self, _: usize, _: &App) -> Column {
+        Column::new("actions", t!("images.column.actions"))
+            .width(px(ACTIONS_COLUMN))
+            .resizable(false)
+            .selectable(false)
+            .p_0()
+    }
+
+    fn render_th(
+        &mut self,
+        _: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .h(px(40.))
+            .flex()
+            .items_center()
+            .pl_2()
+            .child(t!("images.column.actions"))
+    }
+
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        let row = &self.rows[row_ix];
+        let checked = self
+            .weak
+            .upgrade()
+            .is_some_and(|app| app.read(cx).images.checked.contains(&row.key));
+        div()
+            .id(("image-action-row", row_ix))
+            .text_sm()
+            .when(row.in_use(), |this| this.font_semibold())
+            .when(checked, |this| this.bg(cx.theme().accent))
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        _: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let row = &self.rows[row_ix];
+        let busy = self
+            .weak
+            .upgrade()
+            .is_some_and(|app| app.read(cx).busy.is_some());
+        let run_target = row.target().to_string();
+        let run_weak = self.weak.clone();
+        let menu_row = row.clone();
+        let menu_weak = self.weak.clone();
+        let remove_row = row.clone();
+        let remove_weak = self.weak.clone();
+        div()
+            .px_2()
+            .h(Size::Large.table_row_height())
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                list_action_button(("run-image", row_ix), cx.theme().primary, cx)
+                    .small()
+                    .icon(IconName::Play)
+                    .tooltip(t!("images.action.run").into_owned())
+                    .disabled(busy)
+                    .on_click(move |_, window, cx| {
+                        _ = run_weak.update(cx, |this, cx| {
+                            this.open_create_container_dialog(Some(run_target.clone()), window, cx);
+                        });
+                    }),
+            )
+            .child(
+                list_action_button(("image-more", row_ix), cx.theme().foreground, cx)
+                    .small()
+                    .icon(IconName::EllipsisVertical)
+                    .disabled(busy)
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                        image_menu(menu, &menu_row, menu_weak.clone())
+                    }),
+            )
+            .child(
+                list_action_button(("remove-image", row_ix), cx.theme().danger, cx)
+                    .small()
+                    .icon(AssetIcon::Trash)
+                    .tooltip(t!("images.action.delete").into_owned())
+                    .disabled(busy)
+                    .on_click(move |_, window, cx| {
+                        _ = remove_weak.update(cx, |this, cx| {
+                            this.confirm_remove_image_row(&remove_row, window, cx);
+                        });
+                    }),
+            )
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+    }
+
+    fn render_last_empty_col(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+    }
+}
+
+struct ImageTable {
+    weak: WeakEntity<RuskerApp>,
+    rows: Rc<Vec<ImageRow>>,
+    sort: ImageSort,
+    now: i64,
+    no_images: bool,
+}
+
+impl ImageTable {
+    const COLUMNS_COUNT: usize = 7;
+
+    fn new(weak: WeakEntity<RuskerApp>) -> Self {
+        Self {
+            weak,
+            rows: Rc::new(Vec::new()),
+            sort: ImageSort::default(),
+            now: 0,
+            no_images: true,
+        }
     }
 
     fn sort_column(&self, key: ImageSortKey) -> ColumnSort {
@@ -74,7 +290,7 @@ impl ImageTable {
 
 impl TableDelegate for ImageTable {
     fn columns_count(&self, _: &App) -> usize {
-        8
+        Self::COLUMNS_COUNT
     }
 
     fn rows_count(&self, _: &App) -> usize {
@@ -82,17 +298,16 @@ impl TableDelegate for ImageTable {
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
-        let fixed = |key, width| {
+        let control = |key, width| {
             Column::new(key, "")
                 .width(px(width))
-                .fixed_left()
                 .resizable(false)
                 .selectable(false)
                 .p_0()
         };
         match col_ix {
-            0 => fixed("check", CHECK_COLUMN),
-            1 => fixed("usage", DOT_COLUMN),
+            0 => control("check", TABLE_CHECK_COLUMN),
+            1 => control("usage", TABLE_STATUS_COLUMN),
             2 => Column::new("name", t!("images.column.name"))
                 .width(px(240.))
                 .min_width(px(120.))
@@ -113,11 +328,6 @@ impl TableDelegate for ImageTable {
                 .min_width(px(80.))
                 .text_right()
                 .sort(self.sort_column(ImageSortKey::Size)),
-            7 => Column::new("actions", t!("images.column.actions"))
-                .width(px(ACTIONS_COLUMN))
-                .resizable(false)
-                .selectable(false)
-                .p_0(),
             _ => unreachable!(),
         }
     }
@@ -146,7 +356,7 @@ impl TableDelegate for ImageTable {
                 }
             },
         };
-        self.sort.apply(&mut self.rows);
+        self.sort.apply(Rc::make_mut(&mut self.rows).as_mut_slice());
         _ = self.weak.update(cx, |this, cx| {
             this.images.sort = self.sort;
             cx.notify();
@@ -159,9 +369,15 @@ impl TableDelegate for ImageTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let cell = match col_ix {
+            0 => table_control_header_cell(self.column(col_ix, cx).width, cx),
+            1 => table_control_cell()
+                .w(self.column(col_ix, cx).width)
+                .flex_shrink_0(),
+            _ => div().size_full(),
+        };
         if col_ix != 0 {
-            return div()
-                .size_full()
+            return cell
                 .child(self.column(col_ix, cx).name.clone())
                 .into_any_element();
         }
@@ -173,29 +389,25 @@ impl TableDelegate for ImageTable {
                     .all(|key| app.read(cx).images.checked.contains(key))
             });
         let weak = self.weak.clone();
-        div()
-            .h_full()
-            .flex()
-            .items_center()
-            .child(
-                Checkbox::new("check-all-images")
-                    .checked(all_checked)
-                    .tooltip(t!("images.list.select_all").into_owned())
-                    .disabled(visible.is_empty())
-                    .on_click(move |checked: &bool, _, cx| {
-                        _ = weak.update(cx, |this, cx| {
-                            for key in &visible {
-                                if *checked {
-                                    this.images.checked.insert(key.clone());
-                                } else {
-                                    this.images.checked.remove(key);
-                                }
+        cell.child(
+            Checkbox::new("check-all-images")
+                .checked(all_checked)
+                .tooltip(t!("images.list.select_all").into_owned())
+                .disabled(visible.is_empty())
+                .on_click(move |checked: &bool, _, cx| {
+                    _ = weak.update(cx, |this, cx| {
+                        for key in &visible {
+                            if *checked {
+                                this.images.checked.insert(key.clone());
+                            } else {
+                                this.images.checked.remove(key);
                             }
-                            cx.notify();
-                        });
-                    }),
-            )
-            .into_any_element()
+                        }
+                        cx.notify();
+                    });
+                }),
+        )
+        .into_any_element()
     }
 
     fn render_tr(
@@ -233,10 +445,7 @@ impl TableDelegate for ImageTable {
                     .weak
                     .upgrade()
                     .is_some_and(|app| app.read(cx).images.checked.contains(&row.key));
-                div()
-                    .h_full()
-                    .flex()
-                    .items_center()
+                table_control_cell()
                     .child(
                         Checkbox::new(("check-image", row_ix))
                             .checked(checked)
@@ -255,11 +464,8 @@ impl TableDelegate for ImageTable {
             }
             1 => {
                 let in_use = row.in_use();
-                div()
+                table_control_cell()
                     .id(("image-usage", row_ix))
-                    .h_full()
-                    .flex()
-                    .items_center()
                     .child(usage_dot(in_use, cx))
                     .tooltip(move |window, cx| {
                         let text: SharedString = if in_use {
@@ -311,62 +517,6 @@ impl TableDelegate for ImageTable {
                 .text_right()
                 .child(format_bytes(row.size))
                 .into_any_element(),
-            7 => {
-                let busy = self
-                    .weak
-                    .upgrade()
-                    .is_some_and(|app| app.read(cx).busy.is_some());
-                let run_target = row.target().to_string();
-                let run_weak = self.weak.clone();
-                let menu_row = row.clone();
-                let menu_weak = self.weak.clone();
-                let remove_row = row.clone();
-                let remove_weak = self.weak.clone();
-                div()
-                    .px_2()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        list_action_button(("run-image", row_ix), cx.theme().primary, cx)
-                            .small()
-                            .icon(IconName::Play)
-                            .tooltip(t!("images.action.run").into_owned())
-                            .disabled(busy)
-                            .on_click(move |_, window, cx| {
-                                _ = run_weak.update(cx, |this, cx| {
-                                    this.open_create_container_dialog(
-                                        Some(run_target.clone()),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }),
-                    )
-                    .child(
-                        list_action_button(("image-more", row_ix), cx.theme().foreground, cx)
-                            .small()
-                            .icon(IconName::EllipsisVertical)
-                            .disabled(busy)
-                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                                image_menu(menu, &menu_row, menu_weak.clone())
-                            }),
-                    )
-                    .child(
-                        list_action_button(("remove-image", row_ix), cx.theme().danger, cx)
-                            .small()
-                            .icon(AssetIcon::Trash)
-                            .tooltip(t!("images.action.delete").into_owned())
-                            .disabled(busy)
-                            .on_click(move |_, window, cx| {
-                                _ = remove_weak.update(cx, |this, cx| {
-                                    this.confirm_remove_image_row(&remove_row, window, cx);
-                                });
-                            }),
-                    )
-                    .into_any_element()
-            }
             _ => div().into_any_element(),
         }
     }

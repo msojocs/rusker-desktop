@@ -195,7 +195,7 @@ impl ContainerTable {
             0 => {
                 let id = container.id.clone();
                 let weak = self.weak.clone();
-                container_control_cell()
+                table_control_cell()
                     .child(
                         Checkbox::new(("check-container", row_ix))
                             .checked(app.containers_checked.contains(&container.id))
@@ -213,14 +213,14 @@ impl ContainerTable {
                     )
                     .into_any_element()
             }
-            1 => container_control_cell().into_any_element(),
+            1 => table_control_cell().into_any_element(),
             2 => {
                 let tooltip = if container.status.trim().is_empty() {
                     container.state.clone()
                 } else {
                     container.status.clone()
                 };
-                container_control_cell()
+                table_control_cell()
                     .id(("container-state", row_ix))
                     .child(state_dot(running, paused, cx))
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
@@ -348,7 +348,7 @@ impl ContainerTable {
                         .iter()
                         .all(|container| app.containers_checked.contains(&container.id));
                 let weak = self.weak.clone();
-                container_control_cell()
+                table_control_cell()
                     .child(
                         Checkbox::new((
                             ElementId::from("check-compose-project"),
@@ -379,7 +379,7 @@ impl ContainerTable {
                 };
                 let project = project.to_string();
                 let weak = self.weak.clone();
-                container_control_cell()
+                table_control_cell()
                     .id((
                         ElementId::from("compose-project-toggle"),
                         project.to_string(),
@@ -412,7 +412,7 @@ impl ContainerTable {
                     total = containers.len()
                 )
                 .into_owned();
-                container_control_cell()
+                table_control_cell()
                     .id((
                         ElementId::from("compose-project-state"),
                         project.to_string(),
@@ -520,9 +520,9 @@ impl TableDelegate for ContainerTable {
                 .p_0()
         };
         match col_ix {
-            0 => narrow("check", "", CONTAINER_CHECK_COLUMN),
+            0 => narrow("check", "", TABLE_CHECK_COLUMN),
             1 => narrow("expand", "", CONTAINER_EXPAND_COLUMN),
-            2 => narrow("status", "", CONTAINER_STATUS_COLUMN),
+            2 => narrow("status", "", TABLE_STATUS_COLUMN),
             3 => Column::new("name", t!("app.name"))
                 .width(px(CONTAINER_NAME_COLUMN))
                 .min_width(px(80.)),
@@ -555,11 +555,7 @@ impl TableDelegate for ContainerTable {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let cell = if col_ix < 3 {
-            // DataTable reserves 12px for sorting even with p_0() and sorting
-            // disabled. Prevent its flex wrapper from shrinking these headers.
-            container_control_header_cell(cx)
-                .w(self.column(col_ix, cx).width)
-                .flex_shrink_0()
+            table_control_header_cell(self.column(col_ix, cx).width, cx)
         } else {
             centered_container_cell()
         };
@@ -926,23 +922,6 @@ fn centered_container_cell() -> Div {
         .h(Size::Large.table_row_height())
         .flex()
         .items_center()
-}
-
-fn container_control_cell() -> Div {
-    centered_container_cell().justify_center()
-}
-
-fn container_control_header_cell(cx: &App) -> Div {
-    // Keep the separator out of layout so header controls share body centers.
-    container_control_cell().relative().child(
-        div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .right_0()
-            .w(px(1.))
-            .bg(cx.theme().border),
-    )
 }
 
 fn state_dot(running: bool, paused: bool, cx: &App) -> Div {

@@ -5,7 +5,7 @@ mod detail;
 mod pull;
 mod table;
 
-pub(super) use table::ImageTable;
+pub(super) use table::ImageTables;
 
 use std::collections::HashSet;
 
@@ -37,8 +37,6 @@ use time::OffsetDateTime;
 use super::{form_field, list_action_button, Page, PointerCursor as _, RuskerApp};
 use crate::ui::{button, confirmation_footer, empty_state, muted};
 
-const CHECK_COLUMN: f32 = 32.;
-const DOT_COLUMN: f32 = 28.;
 const TAG_COLUMN: f32 = 180.;
 const ID_COLUMN: f32 = 130.;
 const CREATED_COLUMN: f32 = 110.;
@@ -592,7 +590,7 @@ impl RuskerApp {
         no_images: bool,
         cx: &mut Context<Self>,
     ) -> Div {
-        ImageTable::render(&self.images_table, rows, no_images, cx)
+        self.images_table.render(rows, no_images, cx)
     }
 }
 

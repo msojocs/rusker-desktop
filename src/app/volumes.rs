@@ -3,7 +3,7 @@
 
 mod table;
 
-pub(super) use table::VolumeTable;
+pub(super) use table::VolumeTables;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -823,12 +823,9 @@ impl RuskerApp {
             .map(|volume| volume.name.clone())
             .collect();
 
-        let panel = VolumeTable::render(
-            &self.volumes_table,
-            volumes.clone(),
-            self.snapshot.volumes.is_empty(),
-            cx,
-        );
+        let panel =
+            self.volumes_table
+                .render(volumes.clone(), self.snapshot.volumes.is_empty(), cx);
 
         div()
             .flex_1()
