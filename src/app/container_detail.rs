@@ -22,6 +22,12 @@ pub(super) struct ContainerStatsState {
     revision: Revision,
 }
 
+impl ContainerStatsState {
+    pub(super) fn latest(&self, id: &str) -> Option<&rusker_desktop::engine::ContainerStats> {
+        self.cache.latest(id)
+    }
+}
+
 fn stats_points(
     history: &StatsHistory,
     values: impl Fn(&rusker_desktop::engine::ContainerStats) -> [Option<f64>; 2],
@@ -302,7 +308,7 @@ impl RuskerApp {
     }
 
     pub(super) fn load_container_inspect(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.selected_container.clone() else {
+        let Some(id) = self.container_navigation.container().cloned() else {
             return;
         };
         let revision = self.container_tools.inspect_revision.advance();
@@ -320,7 +326,7 @@ impl RuskerApp {
         self.container_tools.inspect_task = Some(cx.spawn(async move |this, cx| {
             let result = await_engine(handle).await;
             _ = this.update(cx, |this, cx| {
-                if this.selected_container.as_ref() != Some(&id)
+                if this.container_navigation.container() != Some(&id)
                     || !this.container_tools.inspect_revision.is_current(revision)
                 {
                     return;
@@ -490,7 +496,8 @@ impl RuskerApp {
         self.connected
             && self.page == Page::Containers
             && self.snapshot.containers.iter().any(|container| {
-                Some(container.id.as_str()) == self.selected_container.as_deref()
+                Some(container.id.as_str())
+                    == self.container_navigation.container().map(String::as_str)
                     && container.is_running()
             })
     }
@@ -502,8 +509,10 @@ impl RuskerApp {
         {
             return;
         }
-        let (Some(engine), Some(id)) = (self.engine.clone(), self.selected_container.clone())
-        else {
+        let (Some(engine), Some(id)) = (
+            self.engine.clone(),
+            self.container_navigation.container().cloned(),
+        ) else {
             return;
         };
         self.container_terminal = Some(cx.new(TerminalView::new));
@@ -516,7 +525,7 @@ impl RuskerApp {
                 Ok(shell) => shell,
                 Err(error) => {
                     _ = this.update(cx, |this, cx| {
-                        if this.selected_container.as_ref() == Some(&id) {
+                        if this.container_navigation.container() == Some(&id) {
                             this.container_tools.shell_connecting = false;
                             this.container_tools.shell_error = Some(error.to_string());
                             cx.notify();
@@ -527,7 +536,7 @@ impl RuskerApp {
             };
             let valid = this
                 .update(cx, |this, cx| {
-                    if this.selected_container.as_ref() != Some(&id)
+                    if this.container_navigation.container() != Some(&id)
                         || !this.selected_container_running()
                     {
                         return false;
@@ -548,7 +557,7 @@ impl RuskerApp {
             while let Some(output) = shell.output.recv().await {
                 let valid = this
                     .update(cx, |this, cx| {
-                        if this.selected_container.as_ref() != Some(&id) {
+                        if this.container_navigation.container() != Some(&id) {
                             return false;
                         }
                         this.append_shell_output(&output, cx);
@@ -561,7 +570,7 @@ impl RuskerApp {
                 }
             }
             _ = this.update(cx, |this, cx| {
-                if this.selected_container.as_ref() == Some(&id) {
+                if this.container_navigation.container() == Some(&id) {
                     this.append_shell_output(
                         &format!("\r\n[{}]\r\n", t!("container_detail.shell_ended")),
                         cx,
@@ -587,8 +596,10 @@ impl RuskerApp {
     }
 
     fn request_container_directory(&mut self, path: String, refresh: bool, cx: &mut Context<Self>) {
-        let (Some(engine), Some(id)) = (self.engine.clone(), self.selected_container.clone())
-        else {
+        let (Some(engine), Some(id)) = (
+            self.engine.clone(),
+            self.container_navigation.container().cloned(),
+        ) else {
             return;
         };
         if !self.selected_container_running() {
@@ -618,7 +629,7 @@ impl RuskerApp {
             let _fill_span = fill_span;
             let result = await_engine(handle).await;
             _ = this.update(cx, |this, cx| {
-                if this.selected_container.as_ref() != Some(&id)
+                if this.container_navigation.container() != Some(&id)
                     || !this.container_tools.files_revision.is_current(revision)
                     || this.container_tools.directory != path
                     || !this.selected_container_running()
@@ -647,14 +658,16 @@ impl RuskerApp {
     fn load_cached_container_stats(&mut self) {
         self.container_stats.cache.prune(Instant::now());
         self.container_tools.stats_history = self
-            .selected_container
-            .as_deref()
+            .container_navigation
+            .container()
+            .map(String::as_str)
             .and_then(|id| self.container_stats.cache.history(id))
             .cloned()
             .unwrap_or_default();
         self.container_tools.stats_error = self
-            .selected_container
-            .as_deref()
+            .container_navigation
+            .container()
+            .map(String::as_str)
             .and_then(|id| self.container_stats.cache.error(id))
             .map(str::to_owned);
     }
@@ -669,7 +682,7 @@ impl RuskerApp {
 
     fn stats_view_open(&self) -> bool {
         self.page == Page::Containers
-            && self.selected_container.is_some()
+            && self.container_navigation.container().is_some()
             && self.container_tab == 5
     }
 
@@ -724,7 +737,7 @@ impl RuskerApp {
                                 if this.snapshot.containers != batch.containers {
                                     let mut snapshot = this.snapshot.clone();
                                     snapshot.containers = batch.containers;
-                                    this.apply_snapshot(snapshot);
+                                    this.apply_snapshot(snapshot, cx);
                                     this.sync_container_tools(cx);
                                 } else {
                                     this.container_stats
@@ -741,7 +754,8 @@ impl RuskerApp {
                                                 sample.timestamp,
                                             ) {
                                                 if open
-                                                    && this.selected_container.as_ref() == Some(&id)
+                                                    && this.container_navigation.container()
+                                                        == Some(&id)
                                                 {
                                                     this.container_tools
                                                         .stats_history
@@ -752,7 +766,9 @@ impl RuskerApp {
                                         }
                                         Err(error) => {
                                             this.container_stats.cache.fail(&id, error.to_string());
-                                            if open && this.selected_container.as_ref() == Some(&id)
+                                            if open
+                                                && this.container_navigation.container()
+                                                    == Some(&id)
                                             {
                                                 this.container_tools.stats_error = this
                                                     .container_stats
@@ -1142,7 +1158,7 @@ impl RuskerApp {
     }
 }
 
-fn format_cpu(value: Option<f64>) -> String {
+pub(super) fn format_cpu(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.2}%"))
         .unwrap_or_else(|| "—".into())

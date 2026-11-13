@@ -30,7 +30,8 @@ use crate::{
     model::{
         ContainerAction, ContainerSummary as ContainerDto, CreateContainerRequest, EngineInfo,
         EngineSnapshot, ImageDetail, ImageLayer, ImageSummary as ImageDto, PortMapping,
-        VolumeSummary, COMPOSE_PROJECT_LABEL,
+        VolumeSummary, COMPOSE_CONFIG_FILES_LABEL, COMPOSE_PROJECT_LABEL, COMPOSE_REPLACE_LABEL,
+        COMPOSE_SERVICE_LABEL, COMPOSE_WORKING_DIR_LABEL,
     },
     volume::{
         container_path, parse_listing, parse_timestamp, partial_export_path, validate_volume_name,
@@ -99,7 +100,7 @@ fn pooled_named_pipe(path: &str) -> Result<Docker, EngineError> {
 #[derive(Clone)]
 pub struct DockerEngine {
     pub(super) client: Docker,
-    managed_wsl: bool,
+    pub(super) managed_wsl: bool,
 }
 
 impl DockerEngine {
@@ -364,6 +365,22 @@ impl DockerEngine {
                 )
                 .await
             }
+            ContainerAction::Pause => {
+                with_timeout(
+                    &action.label(),
+                    ACTION_TIMEOUT,
+                    self.client.pause_container(id),
+                )
+                .await
+            }
+            ContainerAction::Unpause => {
+                with_timeout(
+                    &action.label(),
+                    ACTION_TIMEOUT,
+                    self.client.unpause_container(id),
+                )
+                .await
+            }
             ContainerAction::Restart => {
                 with_timeout(
                     &action.label(),
@@ -385,6 +402,18 @@ impl DockerEngine {
                 .await
             }
         }
+    }
+
+    /// Applies an action to each container independently. Successful changes
+    /// are kept when another container fails; one message is returned per failure.
+    pub async fn container_actions(&self, ids: &[String], action: ContainerAction) -> Vec<String> {
+        let mut failures = Vec::new();
+        for id in ids {
+            if let Err(error) = self.container_action(id, action).await {
+                failures.push(format!("{}: {error}", short_id(id)));
+            }
+        }
+        failures
     }
 
     /// Removes several containers one by one (never forced). Returns one
@@ -1176,6 +1205,8 @@ pub(super) fn container_dto(container: ContainerSummary) -> ContainerDto {
         .filter_map(|mount| mount.name)
         .collect();
 
+    let labels = container.labels.unwrap_or_default();
+
     ContainerDto {
         id,
         name,
@@ -1191,10 +1222,11 @@ pub(super) fn container_dto(container: ContainerSummary) -> ContainerDto {
         created: container.created.unwrap_or_default(),
         ports,
         volumes,
-        compose_project: container
-            .labels
-            .as_ref()
-            .and_then(|labels| labels.get(COMPOSE_PROJECT_LABEL).cloned()),
+        compose_project: labels.get(COMPOSE_PROJECT_LABEL).cloned(),
+        compose_service: labels.get(COMPOSE_SERVICE_LABEL).cloned(),
+        compose_replace: labels.get(COMPOSE_REPLACE_LABEL).cloned(),
+        compose_working_dir: labels.get(COMPOSE_WORKING_DIR_LABEL).cloned(),
+        compose_config_files: labels.get(COMPOSE_CONFIG_FILES_LABEL).cloned(),
     }
 }
 
@@ -1259,7 +1291,69 @@ mod tests {
         ContainerSummary as BollardContainerSummary, ImageHistoryResponseItem, ImageInspect,
     };
 
-    use crate::model::{ImageDetail, ImageLayer, COMPOSE_PROJECT_LABEL};
+    use crate::model::{
+        ImageDetail, ImageLayer, COMPOSE_CONFIG_FILES_LABEL, COMPOSE_PROJECT_LABEL,
+        COMPOSE_REPLACE_LABEL, COMPOSE_SERVICE_LABEL, COMPOSE_WORKING_DIR_LABEL,
+    };
+
+    #[tokio::test]
+    async fn pause_and_resume_use_lifecycle_endpoints_and_report_individual_failures() {
+        use crate::model::ContainerAction;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (id, operation, status, body) in [
+                ("web", "pause", "204 No Content", ""),
+                (
+                    "worker",
+                    "pause",
+                    "409 Conflict",
+                    r#"{"message":"container is not running"}"#,
+                ),
+                ("web", "unpause", "204 No Content", ""),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let length = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(length, 0);
+                    request.extend_from_slice(&buffer[..length]);
+                }
+                let request = String::from_utf8_lossy(&request);
+                assert!(request.starts_with("POST "));
+                assert!(request.contains(&format!("/containers/{id}/{operation} ")));
+                let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let engine = DockerEngine {
+            client: bollard::Docker::connect_with_http(
+                &format!("http://{address}"),
+                5,
+                bollard::API_DEFAULT_VERSION,
+            )
+            .unwrap(),
+            managed_wsl: false,
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let failures = engine
+                .container_actions(&["web".into(), "worker".into()], ContainerAction::Pause)
+                .await;
+            assert_eq!(failures.len(), 1);
+            assert!(failures[0].contains("worker"));
+            assert!(failures[0].contains("container is not running"));
+            engine
+                .container_action("web", ContainerAction::Unpause)
+                .await
+                .unwrap();
+            server.await.unwrap();
+        })
+        .await
+        .expect("mock lifecycle requests should finish promptly");
+    }
 
     #[tokio::test]
     async fn pull_uses_its_own_timeout_without_changing_other_requests() {
@@ -1313,15 +1407,28 @@ mod tests {
     #[test]
     fn container_summary_identifies_compose_members_by_project_label() {
         let compose = container_dto(BollardContainerSummary {
-            labels: Some(std::collections::HashMap::from([(
-                COMPOSE_PROJECT_LABEL.into(),
-                "shop".into(),
-            )])),
+            labels: Some(std::collections::HashMap::from([
+                (COMPOSE_PROJECT_LABEL.into(), "shop".into()),
+                (COMPOSE_SERVICE_LABEL.into(), "web".into()),
+                (COMPOSE_REPLACE_LABEL.into(), "frontend".into()),
+                (COMPOSE_WORKING_DIR_LABEL.into(), "/srv/shop".into()),
+                (
+                    COMPOSE_CONFIG_FILES_LABEL.into(),
+                    "/srv/shop/compose.yml".into(),
+                ),
+            ])),
             ..Default::default()
         });
         let standalone = container_dto(BollardContainerSummary::default());
 
         assert_eq!(compose.compose_project.as_deref(), Some("shop"));
+        assert_eq!(compose.compose_service.as_deref(), Some("web"));
+        assert_eq!(compose.compose_replace.as_deref(), Some("frontend"));
+        assert_eq!(compose.compose_working_dir.as_deref(), Some("/srv/shop"));
+        assert_eq!(
+            compose.compose_config_files.as_deref(),
+            Some("/srv/shop/compose.yml")
+        );
         assert!(compose.is_compose());
         assert!(!standalone.is_compose());
     }

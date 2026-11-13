@@ -124,8 +124,13 @@ pub fn image_tags(image: &ImageSummary) -> String {
 
 pub fn container_matches(container: &ContainerSummary, query: &str) -> bool {
     let haystack = format!(
-        "{} {} {} {} {}",
-        container.name, container.id, container.image, container.state, container.status
+        "{} {} {} {} {} {}",
+        container.name,
+        container.id,
+        container.image,
+        container.state,
+        container.status,
+        container.compose_project.as_deref().unwrap_or_default()
     )
     .to_lowercase();
     query_matches(&haystack, query)
@@ -246,6 +251,14 @@ mod tests {
         assert!(container_matches(&container(), "WEB nginx"));
         assert!(container_matches(&container(), "abcdef"));
         assert!(!container_matches(&container(), "postgres"));
+    }
+
+    #[test]
+    fn container_filter_matches_compose_project() {
+        let mut compose = container();
+        compose.compose_project = Some("Shop".into());
+        assert!(container_matches(&compose, "shop"));
+        assert!(!container_matches(&container(), "shop"));
     }
 
     #[test]

@@ -3,6 +3,9 @@
 
 mod detail;
 mod pull;
+mod table;
+
+pub(super) use table::ImageTables;
 
 use std::collections::HashSet;
 
@@ -34,8 +37,6 @@ use time::OffsetDateTime;
 use super::{form_field, list_action_button, Page, PointerCursor as _, RuskerApp};
 use crate::ui::{button, confirmation_footer, empty_state, muted};
 
-const CHECK_COLUMN: f32 = 32.;
-const DOT_COLUMN: f32 = 28.;
 const TAG_COLUMN: f32 = 180.;
 const ID_COLUMN: f32 = 130.;
 const CREATED_COLUMN: f32 = 110.;
@@ -262,7 +263,7 @@ impl RuskerApp {
                 match result {
                     Ok((snapshot, failures)) => {
                         this.connected = true;
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         if failures.is_empty() {
                             this.notify_success(t!("images.remove_many.done", count = total), cx);
                         } else {
@@ -583,329 +584,13 @@ impl RuskerApp {
             )
     }
 
-    fn sort_header(
-        &self,
-        id: &'static str,
-        label: String,
-        key: ImageSortKey,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let sort = self.images.sort;
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap_1()
-            .cursor_pointer()
-            .hover(|this| this.text_color(cx.theme().foreground))
-            .when(sort.key == key, |this| {
-                this.text_color(cx.theme().foreground)
-            })
-            .child(label)
-            .when(sort.key == key, |this| {
-                this.child(
-                    Icon::new(if sort.descending {
-                        AssetIcon::ArrowDown
-                    } else {
-                        AssetIcon::ArrowUp
-                    })
-                    .xsmall()
-                    .text_color(cx.theme().primary),
-                )
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.images.sort = this.images.sort.toggled(key);
-                cx.notify();
-            }))
-    }
-
     fn render_image_table(
         &self,
         rows: Vec<ImageRow>,
         no_images: bool,
         cx: &mut Context<Self>,
     ) -> Div {
-        let busy = self.busy.is_some();
-        let visible: Vec<String> = rows.iter().map(|row| row.key.clone()).collect();
-        let all_checked =
-            !visible.is_empty() && visible.iter().all(|key| self.images.checked.contains(key));
-
-        let header = div()
-            .px_4()
-            .py_3()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .items_center()
-            .text_sm()
-            .font_semibold()
-            .text_color(cx.theme().muted_foreground)
-            .child(
-                div().w(px(CHECK_COLUMN)).flex_shrink_0().child(
-                    Checkbox::new("check-all-images")
-                        .checked(all_checked)
-                        .tooltip(t!("images.list.select_all").into_owned())
-                        .disabled(visible.is_empty())
-                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                            for key in &visible {
-                                if *checked {
-                                    this.images.checked.insert(key.clone());
-                                } else {
-                                    this.images.checked.remove(key);
-                                }
-                            }
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(div().w(px(DOT_COLUMN)).flex_shrink_0())
-            .child(div().flex_1().min_w_0().child(self.sort_header(
-                "sort-name",
-                t!("images.column.name").into_owned(),
-                ImageSortKey::Name,
-                cx,
-            )))
-            .child(
-                div()
-                    .w(px(TAG_COLUMN))
-                    .flex_shrink_0()
-                    .child(self.sort_header(
-                        "sort-tag",
-                        t!("images.column.tag").into_owned(),
-                        ImageSortKey::Tag,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .w(px(ID_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("images.column.id").into_owned()),
-            )
-            .child(
-                div()
-                    .w(px(CREATED_COLUMN))
-                    .flex_shrink_0()
-                    .child(self.sort_header(
-                        "sort-created",
-                        t!("images.column.created").into_owned(),
-                        ImageSortKey::Created,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .w(px(SIZE_COLUMN))
-                    .flex_shrink_0()
-                    .pr_4()
-                    .flex()
-                    .justify_end()
-                    .child(self.sort_header(
-                        "sort-size",
-                        t!("images.column.size").into_owned(),
-                        ImageSortKey::Size,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .w(px(ACTIONS_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("images.column.actions").into_owned()),
-            );
-
-        let panel = div()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(header);
-
-        if rows.is_empty() {
-            return panel.child(if no_images {
-                empty_state(
-                    t!("images.empty.title").into_owned(),
-                    t!("images.empty.description").into_owned(),
-                    cx,
-                )
-            } else {
-                empty_state(
-                    t!("images.empty.no_match").into_owned(),
-                    t!("images.empty.no_match_hint").into_owned(),
-                    cx,
-                )
-            });
-        }
-
-        let now = now();
-        let rows = rows
-            .into_iter()
-            .enumerate()
-            .map(|(index, row)| self.render_image_row(index, row, now, busy, cx));
-        panel.child(
-            div()
-                .id("image-rows")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .children(rows),
-        )
-    }
-
-    fn render_image_row(
-        &self,
-        index: usize,
-        row: ImageRow,
-        now: i64,
-        busy: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let is_checked = self.images.checked.contains(&row.key);
-        let in_use = row.in_use();
-        let check_key = row.key.clone();
-        let run_target = row.target().to_string();
-        let remove_row = row.clone();
-        let menu_row = row.clone();
-        let detail_row = row.clone();
-        let weak = cx.weak_entity();
-        let muted_color = cx.theme().muted_foreground;
-        let none = |text: &str| text == rusker_desktop::image::NONE_LABEL;
-
-        div()
-            .px_4()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .items_center()
-            .text_sm()
-            .when(in_use, |this| this.font_semibold())
-            .when(is_checked, |this| this.bg(cx.theme().accent))
-            .hover(|this| this.bg(cx.theme().accent))
-            .child(
-                div().w(px(CHECK_COLUMN)).flex_shrink_0().child(
-                    Checkbox::new(("check-image", index))
-                        .checked(is_checked)
-                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                            if *checked {
-                                this.images.checked.insert(check_key.clone());
-                            } else {
-                                this.images.checked.remove(&check_key);
-                            }
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(
-                div()
-                    .id(("image-usage", index))
-                    .w(px(DOT_COLUMN))
-                    .flex_shrink_0()
-                    .child(usage_dot(in_use, cx))
-                    .tooltip(move |window, cx| {
-                        let text: SharedString = if in_use {
-                            t!("images.usage.used_by", count = row.containers)
-                                .into_owned()
-                                .into()
-                        } else {
-                            t!("images.usage.unused").into_owned().into()
-                        };
-                        gpui_kit::component::tooltip::Tooltip::new(text).build(window, cx)
-                    }),
-            )
-            .child(
-                div()
-                    .id(("open-image-detail", index))
-                    .flex_1()
-                    .min_w_0()
-                    .py_3()
-                    .pr_3()
-                    .truncate()
-                    .cursor_pointer()
-                    .text_color(cx.theme().primary)
-                    .hover(|this| this.underline())
-                    .when(none(&remove_row.repository), |this| {
-                        this.text_color(muted_color)
-                    })
-                    .child(remove_row.repository.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_image_detail(detail_row.clone(), cx);
-                    })),
-            )
-            .child(
-                div()
-                    .w(px(TAG_COLUMN))
-                    .flex_shrink_0()
-                    .pr_3()
-                    .truncate()
-                    .when(none(&remove_row.tag), |this| this.text_color(muted_color))
-                    .child(remove_row.tag.clone()),
-            )
-            .child(
-                div()
-                    .w(px(ID_COLUMN))
-                    .flex_shrink_0()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_xs()
-                    .child(short_id(&remove_row.id)),
-            )
-            .child(
-                div()
-                    .w(px(CREATED_COLUMN))
-                    .flex_shrink_0()
-                    .child(format_relative(remove_row.created, now)),
-            )
-            .child(
-                div()
-                    .w(px(SIZE_COLUMN))
-                    .flex_shrink_0()
-                    .pr_4()
-                    .text_right()
-                    .child(format_bytes(remove_row.size)),
-            )
-            .child(
-                div()
-                    .w(px(ACTIONS_COLUMN))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        list_action_button(("run-image", index), cx.theme().primary, cx)
-                            .small()
-                            .icon(IconName::Play)
-                            .tooltip(t!("images.action.run").into_owned())
-                            .disabled(busy)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_create_container_dialog(
-                                    Some(run_target.clone()),
-                                    window,
-                                    cx,
-                                );
-                            })),
-                    )
-                    .child(
-                        list_action_button(("image-more", index), cx.theme().foreground, cx)
-                            .small()
-                            .icon(IconName::EllipsisVertical)
-                            .disabled(busy)
-                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                                image_menu(menu, &menu_row, weak.clone())
-                            }),
-                    )
-                    .child(
-                        list_action_button(("remove-image", index), cx.theme().danger, cx)
-                            .small()
-                            .icon(AssetIcon::Trash)
-                            .tooltip(t!("images.action.delete").into_owned())
-                            .disabled(busy)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.confirm_remove_image_row(&remove_row, window, cx);
-                            })),
-                    ),
-            )
+        self.images_table.render(rows, no_images, cx)
     }
 }
 

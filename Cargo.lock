@@ -2143,6 +2143,7 @@ dependencies = [
  "tracing",
  "tree-sitter",
  "tree-sitter-json",
+ "tree-sitter-yaml",
  "unicode-segmentation",
  "unicode-width",
  "uuid",
@@ -5483,6 +5484,7 @@ dependencies = [
  "hyper-util",
  "png 0.18.1",
  "regex",
+ "resvg 0.46.0",
  "rust-i18n",
  "rustls",
  "rustls-native-certs",
@@ -6854,6 +6856,16 @@ name = "tree-sitter-language"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0af592be68c579aa78a16846bd19422978c3c52e438523d45ff5d1bff1f9d4a"
+
+[[package]]
+name = "tree-sitter-yaml"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c223db85f05e34794f065454843b0668ebc15d240ada63e2b5939f43ce7c97"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "triomphe"

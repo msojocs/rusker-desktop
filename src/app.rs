@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -8,8 +8,9 @@ use gpui_kit::component::{
     breadcrumb::{Breadcrumb, BreadcrumbItem},
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     checkbox::Checkbox,
-    input::{Editor, EditorState, Input, InputEvent, InputState},
+    input::{Copy as CopyText, Editor, EditorState, Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
+    scroll::{Scrollbar, ScrollbarHandle, ScrollbarMode},
     skeleton::Skeleton,
     slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
@@ -19,14 +20,18 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     assets::IconName as AssetIcon,
-    base::{Disableable as _, StyledExt as _},
+    base::{
+        Disableable as _, GlobalState, SelectableText, StyledExt as _, TextSelection,
+        TextSelectionHandle,
+    },
     div, ease_out_quint, percentage,
     prelude::FluentBuilder as _,
     pulsating_between, px, rgb, Anchor, Animation, AnimationExt as _, AnyElement, AnyWindowHandle,
-    App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, PathPromptOptions,
-    Pixels, Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Transformation, Window, WindowAppearance, WindowControlArea,
+    App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity, FocusHandle, Hsla,
+    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, ParentElement as _,
+    PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Transformation, Window,
+    WindowAppearance, WindowControlArea,
 };
 use rusker_desktop::{
     container::{valid_image_tag, ImageTagReference},
@@ -55,19 +60,26 @@ use tokio::task::JoinHandle;
 use crate::ui::theme::change_theme;
 use crate::ui::{button, detail_row, empty_state, muted, section_panel, stat_card};
 
+mod compose_config;
+mod compose_detail;
+mod container_actions;
 mod container_detail;
+mod containers;
 mod desktop_import;
 mod docker_context;
 mod images;
+mod navigation;
 mod notifications;
 mod run;
 mod volumes;
 
 use container_detail::{ContainerStatsState, ContainerTools};
+use containers::{ContainerEmpty, ContainerTables};
 use desktop_import::DesktopImportState;
-use images::ImageState;
+use images::{ImageState, ImageTables};
+use navigation::{ContainerNavigation, ContainerPage};
 use run::RunForm;
-use volumes::VolumeState;
+use volumes::{VolumeState, VolumeTables};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -222,6 +234,7 @@ impl EngineTransition {
 #[derive(Default)]
 struct ContainerRemoval {
     pending_ids: Vec<String>,
+    compose_project: Option<(String, Vec<ContainerSummary>)>,
     submitting: bool,
     error: Option<String>,
 }
@@ -231,6 +244,52 @@ struct ContainerReplacement {
     pending: Option<ContainerSummary>,
     submitting: bool,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ContainerListItem {
+    Container(Box<ContainerSummary>),
+    ComposeProject {
+        project: String,
+        containers: Vec<ContainerSummary>,
+    },
+}
+
+/// Keep the Engine's order, placing all services of a Compose project at the
+/// project's first occurrence while leaving standalone containers independent.
+fn group_container_list(containers: Vec<ContainerSummary>) -> Vec<ContainerListItem> {
+    let mut items = Vec::new();
+    let mut project_indices: HashMap<String, usize> = HashMap::new();
+    for container in containers {
+        let Some(project) = container.compose_project.clone() else {
+            items.push(ContainerListItem::Container(Box::new(container)));
+            continue;
+        };
+        if let Some(index) = project_indices.get(&project).copied() {
+            let Some(ContainerListItem::ComposeProject { containers, .. }) = items.get_mut(index)
+            else {
+                unreachable!("Compose project index must reference a project row");
+            };
+            containers.push(container);
+        } else {
+            project_indices.insert(project.clone(), items.len());
+            items.push(ContainerListItem::ComposeProject {
+                project,
+                containers: vec![container],
+            });
+        }
+    }
+    items
+}
+
+/// Remove the first `${project}-` occurrence from nested Compose container names.
+fn container_list_name(container: &ContainerSummary, nested: bool) -> String {
+    if nested {
+        if let Some(project) = container.compose_project.as_deref() {
+            return container.name.replacen(&format!("{project}-"), "", 1);
+        }
+    }
+    container.name.clone()
 }
 
 pub struct RuskerApp {
@@ -253,11 +312,18 @@ pub struct RuskerApp {
     connected: bool,
     loading: bool,
     busy: Option<String>,
-    selected_container: Option<String>,
+    container_actions: container_actions::ContainerActions,
+    container_navigation: ContainerNavigation,
+    compose_config_view: Option<Entity<compose_config::ComposeConfigView>>,
     /// Container list shows only running containers.
     containers_running_only: bool,
     /// IDs ticked for batch removal in the container list.
     containers_checked: HashSet<String>,
+    /// Compose projects expanded in the container list. Projects default to collapsed.
+    compose_projects_expanded: HashSet<String>,
+    container_tables: ContainerTables,
+    images_table: ImageTables,
+    volumes_table: VolumeTables,
     container_removal: ContainerRemoval,
     container_replacement: ContainerReplacement,
     /// Container detail tab: logs, details, mounts, exec, files, stats.
@@ -267,6 +333,8 @@ pub struct RuskerApp {
     container_terminal: Option<Entity<crate::ui::terminal::TerminalView>>,
     /// Scroll state of the container log viewer.
     container_logs_scroll: ScrollHandle,
+    logs_selection: TextSelectionHandle,
+    logs_focus: FocusHandle,
     logs: String,
     logs_loading: bool,
     logs_error: Option<String>,
@@ -543,6 +611,23 @@ impl RuskerApp {
             settings_warning = Some(warning);
         }
 
+        let app_weak = cx.weak_entity();
+        let container_tables = ContainerTables::new(app_weak.clone(), window, cx);
+        let images_table = ImageTables::new(app_weak.clone(), window, cx);
+        let volumes_table = VolumeTables::new(app_weak, window, cx);
+        let logs_selection = TextSelectionHandle::new("", cx);
+        // Plain selectable text needs an explicit redraw subscription while dragging.
+        subscriptions.push(logs_selection.refresh_window_on_change(window, cx));
+        let logs_focus = cx.focus_handle();
+        let selection_focus = logs_focus.clone();
+        logs_selection.focus_with(move |window, cx| selection_focus.focus(window, cx), cx);
+        cx.bind_keys([
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-c", CopyText, Some("ContainerLogs")),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("ctrl-c", CopyText, Some("ContainerLogs")),
+        ]);
+
         let mut this = Self {
             engine,
             engine_transition: None,
@@ -555,9 +640,15 @@ impl RuskerApp {
             connected: false,
             loading: false,
             busy: None,
-            selected_container: None,
+            container_actions: container_actions::ContainerActions::default(),
+            container_navigation: ContainerNavigation::default(),
+            compose_config_view: None,
             containers_running_only: false,
             containers_checked: HashSet::new(),
+            compose_projects_expanded: HashSet::new(),
+            container_tables,
+            images_table,
+            volumes_table,
             container_removal: ContainerRemoval::default(),
             container_replacement: ContainerReplacement::default(),
             container_tab: 0,
@@ -565,6 +656,8 @@ impl RuskerApp {
             container_stats: ContainerStatsState::default(),
             container_terminal: None,
             container_logs_scroll: ScrollHandle::new(),
+            logs_selection,
+            logs_focus,
             logs: String::new(),
             logs_loading: false,
             logs_error: None,
@@ -713,6 +806,17 @@ impl RuskerApp {
                     for command in commands {
                         this.handle_tray_command(command, window, cx);
                     }
+                    let starting = matches!(
+                        this.engine_phase(),
+                        Some(
+                            EngineTransition::Starting
+                                | EngineTransition::Connecting
+                                | EngineTransition::Recovering
+                        )
+                    );
+                    if let Some(tray) = this.tray.as_mut() {
+                        tray.update_animation(starting);
+                    }
                     this.tray.is_some()
                 })
                 .unwrap_or(false);
@@ -795,13 +899,15 @@ impl RuskerApp {
         }
         if page != Page::Containers {
             self.reset_container_tools();
+            self.container_navigation.reset();
+            self.compose_config_view = None;
         }
         self.page = page;
         if entering_containers {
             self.reset_container_tools();
             // The sidebar entry always opens the container list, not the
             // detail page of the last selected container.
-            self.selected_container = None;
+            self.container_navigation.reset();
             self.logs_revision.advance();
             self.logs_loading = false;
             self.logs.clear();
@@ -1132,7 +1238,7 @@ impl RuskerApp {
                 match result {
                     Ok(snapshot) => {
                         this.connected = true;
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.after_volume_snapshot(cx);
                         this.sync_container_tools(cx);
                         this.maybe_prompt_docker_context(cx);
@@ -1148,29 +1254,23 @@ impl RuskerApp {
         }));
     }
 
-    fn apply_snapshot(&mut self, snapshot: EngineSnapshot) {
+    fn apply_snapshot(&mut self, snapshot: EngineSnapshot, cx: &mut Context<Self>) {
         self.reconcile_container_stats(&snapshot.containers);
-        if let Some(selected) = self.selected_container.as_ref() {
-            if !snapshot
-                .containers
-                .iter()
-                .any(|container| &container.id == selected)
-            {
-                self.selected_container = None;
-                self.reset_container_tools();
-                self.logs_revision.advance();
-                self.logs_loading = false;
-                self.logs.clear();
-                self.logs_error = None;
-            }
-        }
+        let page_changed = self.container_navigation.reconcile(&snapshot.containers);
         self.snapshot = snapshot;
-        if self.selected_container.as_ref().is_some_and(|selected| {
-            self.snapshot
-                .containers
-                .iter()
-                .any(|container| &container.id == selected && !container.is_running())
-        }) {
+        if page_changed {
+            self.restore_container_page(cx);
+        }
+        if self
+            .container_navigation
+            .container()
+            .is_some_and(|selected| {
+                self.snapshot
+                    .containers
+                    .iter()
+                    .any(|container| &container.id == selected && !container.is_running())
+            })
+        {
             self.stop_container_live_tools();
         }
         let ids: HashSet<&str> = self
@@ -1186,22 +1286,44 @@ impl RuskerApp {
     }
 
     fn select_container(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.selected_container.as_deref() != Some(id.as_str()) {
+        if self.container_navigation.container() != Some(&id) {
             self.reset_container_tools();
             self.container_tab = 0;
         }
-        self.selected_container = Some(id.clone());
+        self.container_navigation
+            .push(ContainerPage::Container(id.clone()));
+        self.compose_config_view = None;
         self.load_logs(id, cx);
     }
 
-    /// Returns from the container detail page to the container list.
+    /// Returns to the page from which the container detail was opened.
     fn close_container_detail(&mut self, cx: &mut Context<Self>) {
+        self.container_navigation.back();
+        self.restore_container_page(cx);
+    }
+
+    fn show_container_list(&mut self, cx: &mut Context<Self>) {
+        self.container_navigation.reset();
+        self.restore_container_page(cx);
+    }
+
+    fn restore_container_page(&mut self, cx: &mut Context<Self>) {
         self.reset_container_tools();
-        self.selected_container = None;
+        self.compose_config_view = None;
         self.logs_revision.advance();
+        self._logs_task = None;
         self.logs_loading = false;
         self.logs.clear();
         self.logs_error = None;
+        match self.container_navigation.current().clone() {
+            ContainerPage::Container(id) => {
+                self.container_tab = 0;
+                self.load_logs(id, cx);
+            }
+            ContainerPage::ComposeProject(project) => self.load_compose_logs(&project, cx),
+            ContainerPage::ComposeConfig(project) => self.open_compose_config(&project, cx),
+            ContainerPage::List => {}
+        }
         cx.notify();
     }
 
@@ -1240,7 +1362,7 @@ impl RuskerApp {
         action: ContainerAction,
         cx: &mut Context<Self>,
     ) {
-        if self.busy.is_some() {
+        if self.container_action_busy(&id) {
             return;
         }
         let Some(engine) = self.engine.clone() else {
@@ -1248,8 +1370,14 @@ impl RuskerApp {
             cx.notify();
             return;
         };
-        let handle = engine.container_action(id, action);
-        self.run_snapshot_operation(action.label().to_string(), handle, cx);
+        let handle = engine.container_actions(vec![id.clone()], action);
+        self.run_container_action(
+            container_actions::ActionTarget::Container(id.clone()),
+            HashSet::from([id]),
+            action,
+            handle,
+            cx,
+        );
     }
 
     fn remove_image(&mut self, id: String, cx: &mut Context<Self>) {
@@ -1758,7 +1886,7 @@ impl RuskerApp {
                 match result {
                     Ok(snapshot) => {
                         this.connected = true;
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.notify_success(t!("app.operation_done", operation = label), cx);
                         this.after_volume_snapshot(cx);
                         this.sync_container_tools(cx);
@@ -1932,7 +2060,7 @@ impl RuskerApp {
                 match result {
                     Ok((_new_id, snapshot)) => {
                         this.connected = true;
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.after_volume_snapshot(cx);
                         this.sync_container_tools(cx);
                         let window = this.window_handle;
@@ -2001,6 +2129,39 @@ impl RuskerApp {
             .map(|container| container.id)
             .collect();
         self.open_remove_containers_dialog(ids, title, description, window, cx);
+    }
+
+    fn confirm_remove_compose_project(
+        &mut self,
+        project: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy.is_some() {
+            return;
+        }
+        let containers: Vec<_> = self
+            .snapshot
+            .containers
+            .iter()
+            .filter(|container| container.compose_project.as_deref() == Some(project.as_str()))
+            .cloned()
+            .collect();
+        if containers.is_empty() {
+            return;
+        }
+        let ids = containers
+            .iter()
+            .map(|container| container.id.clone())
+            .collect();
+        self.open_remove_containers_dialog(
+            ids,
+            t!("app.dialog.remove_compose.title", project = project).into(),
+            t!("app.dialog.remove_compose.description").into(),
+            window,
+            cx,
+        );
+        self.container_removal.compose_project = Some((project, containers));
     }
 
     fn open_remove_containers_dialog(
@@ -2080,7 +2241,8 @@ impl RuskerApp {
 
     fn submit_remove_containers(&mut self, cx: &mut Context<Self>) {
         if self.container_removal.submitting
-            || self.container_removal.pending_ids.is_empty()
+            || (self.container_removal.pending_ids.is_empty()
+                && self.container_removal.compose_project.is_none())
             || self.busy.is_some()
         {
             return;
@@ -2092,7 +2254,12 @@ impl RuskerApp {
         };
         let ids = self.container_removal.pending_ids.clone();
         let total = ids.len();
-        let handle = engine.remove_containers(ids);
+        let compose_project = self.container_removal.compose_project.clone();
+        let handle = if let Some((project, containers)) = &compose_project {
+            engine.compose_down(project.clone(), containers.clone())
+        } else {
+            engine.remove_containers(ids)
+        };
         let revision = self.refresh_revision.advance();
         self.container_removal.submitting = true;
         self.container_removal.error = None;
@@ -2117,16 +2284,22 @@ impl RuskerApp {
                                 .iter()
                                 .any(|container| &container.id == id)
                         });
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.after_volume_snapshot(cx);
                         this.sync_container_tools(cx);
                         if failures.is_empty() {
                             let window = this.window_handle;
                             _ = cx.update_window(window, |_, window, cx| window.close_dialog(cx));
                             this.notify_success(
-                                t!("app.notice.containers_removed", count = total),
+                                if let Some((project, _)) = &compose_project {
+                                    t!("app.notice.compose_removed", project = project)
+                                } else {
+                                    t!("app.notice.containers_removed", count = total)
+                                },
                                 cx,
                             );
+                        } else if compose_project.is_some() {
+                            this.container_removal.error = Some(failures.join("\n"));
                         } else {
                             this.container_removal.error = Some(
                                 t!(
@@ -2469,9 +2642,19 @@ impl RuskerApp {
     }
 
     fn render_containers(&self, cx: &mut Context<Self>) -> Div {
+        if let Some(project) = self.container_navigation.compose_project() {
+            let containers: Vec<ContainerSummary> = self
+                .snapshot
+                .containers
+                .iter()
+                .filter(|container| container.compose_project.as_deref() == Some(project.as_str()))
+                .cloned()
+                .collect();
+            return self.render_compose_project_detail(project, &containers, cx);
+        }
         let selected = self
-            .selected_container
-            .as_ref()
+            .container_navigation
+            .container()
             .and_then(|id| {
                 self.snapshot
                     .containers
@@ -2504,7 +2687,6 @@ impl RuskerApp {
             .filter(|container| container.is_running())
             .count();
         let busy = self.busy.is_some();
-        let now = OffsetDateTime::now_utc().unix_timestamp();
         let mut checked: Vec<String> = self.containers_checked.iter().cloned().collect();
         checked.sort();
         let selected_containers: Vec<ContainerSummary> = all_containers
@@ -2513,10 +2695,29 @@ impl RuskerApp {
             .cloned()
             .collect();
 
-        let usage = if running == 0 {
-            t!("app.containers.usage_none").to_string()
+        let latest_stats: Vec<_> = all_containers
+            .iter()
+            .filter(|container| container.is_running())
+            .filter_map(|container| self.container_stats.latest(&container.id))
+            .collect();
+        let cpu_total = latest_stats.iter().try_fold(0.0, |total, stats| {
+            stats.cpu_percent.map(|value| total + value)
+        });
+        let cpu_usage = if running == 0 {
+            format_cpu_usage(0.0, self.snapshot.engine.cpus)
         } else {
-            t!("app.containers.usage_running", running = running).to_string()
+            cpu_total.map_or_else(
+                || t!("app.not_available").into_owned(),
+                |total| format_cpu_usage(total, self.snapshot.engine.cpus),
+            )
+        };
+        let memory_usage = if running > 0 && latest_stats.is_empty() {
+            t!("app.not_available").into_owned()
+        } else {
+            let used = latest_stats.iter().fold(0u64, |total, stats| {
+                total.saturating_add(stats.memory_bytes)
+            });
+            format_memory_usage(used, self.snapshot.engine.memory_bytes)
         };
 
         let title = div()
@@ -2567,15 +2768,15 @@ impl RuskerApp {
             .child(container_usage(
                 "cpu",
                 t!("app.containers.cpu_usage"),
-                t!("app.containers.stats_unavailable"),
-                &usage,
+                t!("app.containers.cpu_usage_tooltip"),
+                &cpu_usage,
                 cx,
             ))
             .child(container_usage(
                 "memory",
                 t!("app.containers.memory_usage"),
-                t!("app.containers.stats_unavailable"),
-                &usage,
+                t!("app.containers.memory_usage_tooltip"),
+                &memory_usage,
                 cx,
             ));
 
@@ -2624,132 +2825,19 @@ impl RuskerApp {
                 )
             });
 
-        let all_checked = shown > 0
-            && containers
-                .iter()
-                .all(|container| self.containers_checked.contains(&container.id));
-        let visible_ids: Vec<String> = containers
-            .iter()
-            .map(|container| container.id.clone())
-            .collect();
-
-        let header = div()
-            .px_4()
-            .py_3()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .items_center()
-            .text_xs()
-            .font_semibold()
-            .text_color(cx.theme().muted_foreground)
-            .child(
-                div().w(px(CONTAINER_CHECK_COLUMN)).flex_shrink_0().child(
-                    Checkbox::new("check-all-containers")
-                        .checked(all_checked)
-                        .tooltip(t!("app.select_all"))
-                        .disabled(visible_ids.is_empty())
-                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                            for id in &visible_ids {
-                                if *checked {
-                                    this.containers_checked.insert(id.clone());
-                                } else {
-                                    this.containers_checked.remove(id);
-                                }
-                            }
-                            cx.stop_propagation();
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(div().w(px(CONTAINER_STATUS_COLUMN)).flex_shrink_0())
-            .child(div().flex_1().min_w(px(112.)).pr_3().child(t!("app.name")))
-            .child(
-                div()
-                    .w(px(CONTAINER_ID_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("app.container_id")),
-            )
-            .child(div().flex_1().min_w(px(112.)).pr_3().child(t!("app.image")))
-            .child(
-                div()
-                    .w(px(CONTAINER_PORTS_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("app.ports")),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_CPU_COLUMN))
-                    .flex_shrink_0()
-                    .child("CPU (%)"),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_CREATED_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("app.created")),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_ACTIONS_COLUMN))
-                    .flex_shrink_0()
-                    .child(t!("app.actions")),
-            );
-
-        let panel = div()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(header);
-
+        let empty = if all_containers.is_empty() {
+            ContainerEmpty::All
+        } else if self.containers_running_only && running == 0 {
+            ContainerEmpty::Running
+        } else {
+            ContainerEmpty::Filtered
+        };
         let footer = div()
             .flex()
             .justify_end()
             .text_sm()
             .text_color(cx.theme().muted_foreground)
             .child(t!("app.containers.shown", count = shown));
-
-        if containers.is_empty() {
-            return div()
-                .flex_1()
-                .min_h_0()
-                .p_6()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(title)
-                .child(usage_row)
-                .child(toolbar)
-                .child(panel.child(if all_containers.is_empty() {
-                    empty_state(
-                        t!("app.empty.no_containers"),
-                        t!("app.empty.no_containers_hint"),
-                        cx,
-                    )
-                } else if self.containers_running_only && running == 0 {
-                    empty_state(
-                        t!("app.empty.no_running"),
-                        t!("app.empty.no_running_hint"),
-                        cx,
-                    )
-                } else {
-                    empty_state(
-                        t!("app.empty.no_matches"),
-                        t!("app.empty.no_matches_hint"),
-                        cx,
-                    )
-                }))
-                .child(footer);
-        }
-
-        let rows = containers
-            .iter()
-            .enumerate()
-            .map(|(index, container)| self.render_container_row(index, container, now, busy, cx));
 
         div()
             .flex_1()
@@ -2761,234 +2849,26 @@ impl RuskerApp {
             .child(title)
             .child(usage_row)
             .child(toolbar)
-            .child(
-                panel.child(
-                    div()
-                        .id("container-rows")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .children(rows),
-                ),
-            )
+            .child(self.container_tables.render(
+                group_container_list(containers),
+                empty,
+                &self.compose_projects_expanded,
+                cx,
+            ))
             .child(footer)
-    }
-
-    fn render_container_row(
-        &self,
-        index: usize,
-        container: &ContainerSummary,
-        now: i64,
-        busy: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let detail_id = container.id.clone();
-        let check_id = container.id.clone();
-        let toggle_id = container.id.clone();
-        let copy_id = container.id.clone();
-        let image_container = container.clone();
-        let is_checked = self.containers_checked.contains(&container.id);
-        let running = container.is_running();
-        let paused = container.state.eq_ignore_ascii_case("paused");
-        let state_color = if running {
-            cx.theme().success
-        } else if paused {
-            cx.theme().warning
-        } else {
-            cx.theme().muted_foreground
-        };
-        let state_dot = if running || paused {
-            div().size(px(8.)).rounded_full().bg(state_color)
-        } else {
-            div()
-                .size(px(8.))
-                .rounded_full()
-                .border_1()
-                .border_color(state_color)
-        };
-        let status = if container.status.trim().is_empty() {
-            container.state.clone()
-        } else {
-            container.status.clone()
-        };
-        let state_tooltip = status.clone();
-        let menu_container = container.clone();
-        let remove_container = container.clone();
-        let weak = cx.weak_entity();
-
-        div()
-            .id(("container-row", index))
-            .px_4()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .items_center()
-            .text_sm()
-            .cursor_pointer()
-            .when(is_checked, |this| this.bg(cx.theme().accent))
-            .hover(|this| this.bg(cx.theme().accent))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.select_container(detail_id.clone(), cx);
-            }))
-            .child(
-                div().w(px(CONTAINER_CHECK_COLUMN)).flex_shrink_0().child(
-                    Checkbox::new(("check-container", index))
-                        .checked(is_checked)
-                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                            if *checked {
-                                this.containers_checked.insert(check_id.clone());
-                            } else {
-                                this.containers_checked.remove(&check_id);
-                            }
-                            cx.stop_propagation();
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(
-                div()
-                    .id(("container-state", index))
-                    .w(px(CONTAINER_STATUS_COLUMN))
-                    .flex_shrink_0()
-                    .child(state_dot)
-                    .tooltip(move |window, cx| {
-                        Tooltip::new(state_tooltip.clone()).build(window, cx)
-                    }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(112.))
-                    .py_3()
-                    .pr_3()
-                    .truncate()
-                    .child(container.name.clone()),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_ID_COLUMN))
-                    .flex_shrink_0()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_xs()
-                    .child(
-                        div()
-                            .id(("copy-container-id", index))
-                            .cursor_pointer()
-                            .text_color(cx.theme().muted_foreground)
-                            .hover(|style| style.underline())
-                            .tooltip(|window, cx| {
-                                Tooltip::new(t!("app.copy_container_id").into_owned())
-                                    .build(window, cx)
-                            })
-                            .on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
-                            })
-                            .child(short_id(&container.id)),
-                    ),
-            )
-            .child(
-                div().flex_1().min_w(px(112.)).pr_3().truncate().child(
-                    div()
-                        .id(("open-container-image", index))
-                        .min_w_0()
-                        .truncate()
-                        .cursor_pointer()
-                        .text_color(cx.theme().primary)
-                        .hover(|style| style.underline())
-                        .tooltip(|window, cx| {
-                            Tooltip::new(t!("app.view_image").into_owned()).build(window, cx)
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.open_container_image(&image_container, cx);
-                        }))
-                        .child(container.image.clone()),
-                ),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_PORTS_COLUMN))
-                    .flex_shrink_0()
-                    .pr_2()
-                    .truncate()
-                    .child(format_port_bindings(&container.ports)),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_CPU_COLUMN))
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("N/A"),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_CREATED_COLUMN))
-                    .flex_shrink_0()
-                    .child(format_relative(container.created, now)),
-            )
-            .child(
-                div()
-                    .w(px(CONTAINER_ACTIONS_COLUMN))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        list_action_button(("toggle-container", index), cx.theme().primary, cx)
-                            .small()
-                            .icon(if running {
-                                IconName::Square
-                            } else {
-                                IconName::Play
-                            })
-                            .tooltip(if running {
-                                t!("app.stop")
-                            } else {
-                                t!("app.start")
-                            })
-                            .disabled(busy)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.start_container_action(
-                                    toggle_id.clone(),
-                                    if running {
-                                        ContainerAction::Stop
-                                    } else {
-                                        ContainerAction::Start
-                                    },
-                                    cx,
-                                );
-                            })),
-                    )
-                    .child(
-                        list_action_button(("container-more", index), cx.theme().primary, cx)
-                            .small()
-                            .icon(IconName::EllipsisVertical)
-                            .disabled(busy)
-                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                                container_menu(menu, &menu_container, weak.clone())
-                            }),
-                    )
-                    .child(
-                        list_action_button(("remove-container-row", index), cx.theme().danger, cx)
-                            .small()
-                            .icon(Icon::new(AssetIcon::Trash).text_color(cx.theme().danger))
-                            .tooltip(t!("app.delete"))
-                            .disabled(busy)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.confirm_remove_container(&remove_container, window, cx);
-                            })),
-                    ),
-            )
     }
 
     /// Container detail page: breadcrumb, identity header with the Docker
     /// Desktop action cluster and logs / details / mounts / exec / files / stats tabs.
     fn render_container_detail(&self, container: &ContainerSummary, cx: &mut Context<Self>) -> Div {
         let busy = self.busy.is_some();
+        let action_busy = self.container_action_busy(&container.id);
         let running = container.is_running();
+        let start_action = if container.is_paused() {
+            ContainerAction::Unpause
+        } else {
+            ContainerAction::Start
+        };
         let status = if container.status.trim().is_empty() {
             container.state.clone()
         } else {
@@ -2997,6 +2877,12 @@ impl RuskerApp {
         let tab = self.container_tab.min(5);
         let weak = cx.weak_entity();
         let back_weak = weak.clone();
+        let parent_project = self.container_navigation.parent_project().cloned();
+        let back_tooltip = if parent_project.is_some() {
+            t!("app.compose.back_to_project")
+        } else {
+            t!("app.back_to_containers")
+        };
         let start_id = container.id.clone();
         let stop_id = container.id.clone();
         let restart_id = container.id.clone();
@@ -3013,7 +2899,7 @@ impl RuskerApp {
                     .secondary()
                     .icon(IconName::Square)
                     .tooltip(t!("app.stop"))
-                    .disabled(busy || !running)
+                    .disabled(action_busy || !running)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.start_container_action(stop_id.clone(), ContainerAction::Stop, cx);
                     })),
@@ -3022,10 +2908,10 @@ impl RuskerApp {
                 button("start-container")
                     .primary()
                     .icon(IconName::Play)
-                    .tooltip(t!("app.start"))
-                    .disabled(busy || running)
+                    .tooltip(start_action.label())
+                    .disabled(action_busy || running)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.start_container_action(start_id.clone(), ContainerAction::Start, cx);
+                        this.start_container_action(start_id.clone(), start_action, cx);
                     })),
             )
             .child(
@@ -3033,7 +2919,7 @@ impl RuskerApp {
                     .outline()
                     .icon(IconName::RotateCw)
                     .tooltip(t!("app.restart"))
-                    .disabled(busy)
+                    .disabled(action_busy)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.start_container_action(
                             restart_id.clone(),
@@ -3165,9 +3051,18 @@ impl RuskerApp {
                                 .text_color(cx.theme().primary)
                                 .on_click(move |_, _, cx| {
                                     _ = back_weak
-                                        .update(cx, |this, cx| this.close_container_detail(cx));
+                                        .update(cx, |this, cx| this.show_container_list(cx));
                                 }),
                         )
+                        .when_some(parent_project, |breadcrumb, project| {
+                            breadcrumb.child(
+                                BreadcrumbItem::new(project)
+                                    .text_color(cx.theme().primary)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_container_detail(cx);
+                                    })),
+                            )
+                        })
                         .child(BreadcrumbItem::new(container.name.clone())),
                 ),
             )
@@ -3183,7 +3078,7 @@ impl RuskerApp {
                             .ghost()
                             .small()
                             .icon(IconName::ChevronLeft)
-                            .tooltip(t!("app.back_to_containers"))
+                            .tooltip(back_tooltip)
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.close_container_detail(cx)),
                             ),
@@ -3267,6 +3162,44 @@ impl RuskerApp {
             .child(content)
     }
 
+    fn copy_selected_logs(&mut self, _: &CopyText, window: &mut Window, cx: &mut Context<Self>) {
+        let text = TextSelection::selected_text(window, cx);
+        if text.is_empty() {
+            cx.propagate();
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    fn logs_scroll_area(&self, id: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id(id)
+            .track_focus(&self.logs_focus)
+            .key_context("ContainerLogs")
+            .on_action(cx.listener(Self::copy_selected_logs))
+            .on_mouse_down_out(|_, window, cx| {
+                // The window selection layer also starts gestures outside text.
+                GlobalState::suppress_text_selection(cx);
+                TextSelection::end(window, cx);
+            })
+            .on_any_mouse_down(
+                cx.listener(|this, event: &gpui_kit::MouseDownEvent, window, cx| {
+                    if event.button == MouseButton::Left {
+                        window.prevent_default();
+                        this.logs_focus.focus(window, cx);
+                    } else {
+                        GlobalState::suppress_text_selection(cx);
+                        TextSelection::end(window, cx);
+                    }
+                }),
+            )
+            .on_mouse_move(|event, window, cx| {
+                if event.pressed_button != Some(MouseButton::Left) {
+                    TextSelection::end(window, cx);
+                }
+            })
+    }
+
     fn render_container_logs_tab(&self, cx: &mut Context<Self>) -> Div {
         let is_placeholder =
             self.logs_loading || self.logs_error.is_some() || self.logs.trim().is_empty();
@@ -3292,8 +3225,7 @@ impl RuskerApp {
             .min_h_0()
             .relative()
             .child(
-                div()
-                    .id("container-log-scroll")
+                self.logs_scroll_area("container-log-scroll", cx)
                     .size_full()
                     .overflow_scroll()
                     .track_scroll(&self.container_logs_scroll)
@@ -3304,7 +3236,14 @@ impl RuskerApp {
                             .text_xs()
                             .text_color(color)
                             .when(!is_placeholder, |this| this.whitespace_nowrap())
-                            .child(text),
+                            .child(
+                                SelectableText::with_handle(
+                                    "container-log-text",
+                                    self.logs_selection.clone(),
+                                    text,
+                                )
+                                .selection_color(cx.theme().selection),
+                            ),
                     ),
             )
             .when(!is_placeholder, |this| {
@@ -4509,6 +4448,20 @@ fn list_action_button(id: impl Into<ElementId>, color: Hsla, cx: &App) -> Button
     )
 }
 
+/// Formats CPU as used / available, where 100% is one logical CPU.
+fn format_cpu_usage(used: f64, available_cpus: u32) -> String {
+    format!(
+        "{} / {}",
+        container_detail::format_cpu(Some(used)),
+        container_detail::format_cpu(Some(f64::from(available_cpus) * 100.0))
+    )
+}
+
+/// Formats memory as used / available.
+fn format_memory_usage(used: u64, available: u64) -> String {
+    format!("{} / {}", format_bytes(used), format_bytes(available))
+}
+
 /// Usage summary block shown above the container table.
 fn container_usage(
     key: &'static str,
@@ -4581,9 +4534,17 @@ fn copyable_value(
 /// so both the icon and label (and the space around them) use a pointer.
 /// Keep the handler on PopupMenuItem to preserve dismissal and keyboard activation.
 fn container_menu_item(label: impl Into<SharedString>, icon: impl Into<Icon>) -> PopupMenuItem {
+    container_menu_item_enabled(label, icon, true)
+}
+
+fn container_menu_item_enabled(
+    label: impl Into<SharedString>,
+    icon: impl Into<Icon>,
+    enabled: bool,
+) -> PopupMenuItem {
     let label = label.into();
     let icon: Icon = icon.into();
-    PopupMenuItem::element(move |_, _| {
+    PopupMenuItem::element(move |_, cx| {
         div()
             .flex_1()
             .min_h(px(26.))
@@ -4592,10 +4553,15 @@ fn container_menu_item(label: impl Into<SharedString>, icon: impl Into<Icon>) ->
             .flex()
             .items_center()
             .gap_1()
-            .cursor_pointer()
+            .when(enabled, |this| this.cursor_pointer())
+            .when(!enabled, |this| {
+                this.cursor_default()
+                    .text_color(cx.theme().muted_foreground)
+            })
             .child(icon.clone().xsmall())
             .child(label.clone())
     })
+    .disabled(!enabled)
 }
 
 fn container_menu(
@@ -4697,6 +4663,13 @@ impl Render for RuskerApp {
                 .text_color(cx.theme().foreground)
                 .flex()
                 .flex_col()
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    // Focusable controls prevent the default mouse-down behavior.
+                    // Any other press is on passive UI and should clear focus.
+                    if !window.default_prevented() {
+                        window.blur(cx);
+                    }
+                })
                 .child(self.render_app_bar(window, cx))
                 .child(body)
                 .child(self.render_status_bar(cx)),
@@ -4710,16 +4683,68 @@ const SIDEBAR_COLLAPSED_WIDTH: f32 = 56.;
 const SPINNER_PERIOD_SECS: f32 = 0.9;
 /// Seconds per status-dot breath.
 const STATUS_PULSE_PERIOD_SECS: f32 = 1.6;
-const APP_BAR_HEIGHT: f32 = 48.;
-const WINDOW_BUTTON_WIDTH: f32 = 46.;
-/// Container table columns; the name and image columns share the rest.
-const CONTAINER_CHECK_COLUMN: f32 = 34.;
-const CONTAINER_STATUS_COLUMN: f32 = 26.;
+const APP_BAR_HEIGHT: f32 = 58.;
+const WINDOW_BUTTON_WIDTH: f32 = 56.;
+/// Shared widths for the separate selection and status columns.
+const TABLE_CHECK_COLUMN: f32 = 34.;
+const TABLE_STATUS_COLUMN: f32 = 51.;
+/// Container table column defaults; DataTable owns subsequent width changes.
+const CONTAINER_EXPAND_COLUMN: f32 = 25.;
+const CONTAINER_NAME_COLUMN: f32 = 160.;
 const CONTAINER_ID_COLUMN: f32 = 108.;
+const CONTAINER_IMAGE_COLUMN: f32 = 160.;
 const CONTAINER_PORTS_COLUMN: f32 = 88.;
-const CONTAINER_CPU_COLUMN: f32 = 56.;
+const CONTAINER_CPU_COLUMN: f32 = 152.;
+const CONTAINER_MEMORY_COLUMN: f32 = 152.;
 const CONTAINER_CREATED_COLUMN: f32 = 88.;
 const CONTAINER_ACTIONS_COLUMN: f32 = 108.;
+
+fn table_control_cell() -> Div {
+    // Definite height keeps controls centered even on the first layout pass.
+    div()
+        .w_full()
+        .h(Size::Large.table_row_height())
+        .flex()
+        .items_center()
+        .justify_center()
+}
+
+fn table_control_header_cell(width: Pixels, cx: &App) -> Div {
+    // DataTable reserves space for sorting even on non-sortable columns.
+    // Keep narrow headers at their full width and separators out of layout.
+    table_control_cell()
+        .w(width)
+        .flex_shrink_0()
+        .relative()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(px(1.))
+                .bg(cx.theme().border),
+        )
+}
+
+fn table_horizontal_scrollbar<H: ScrollbarHandle + Clone>(
+    handle: &H,
+    content_width: Option<Pixels>,
+) -> Div {
+    let mut scrollbar = Scrollbar::horizontal(handle)
+        .mode(ScrollbarMode::Always)
+        .viewport_from_layout();
+    if let Some(width) = content_width {
+        scrollbar = scrollbar.scroll_size(gpui_kit::size(width, px(0.)));
+    }
+    div()
+        .relative()
+        .w_full()
+        .h(Scrollbar::width())
+        .flex_shrink_0()
+        .overflow_hidden()
+        .child(scrollbar)
+}
 
 /// Brand blue used for the app bar and selection accents (Docker
 /// Desktop-like). A deeper navy keeps contrast in dark mode.
@@ -4766,22 +4791,26 @@ impl RuskerApp {
                     .pr_4()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(Icon::new(AssetIcon::Container).size(px(22.)))
+                    .gap_3()
+                    .child(
+                        gpui_kit::img(crate::APP_LOGO_PATH)
+                            .size(px(36.))
+                            .flex_shrink_0(),
+                    )
                     .child(
                         div()
                             .flex()
                             .items_baseline()
                             .gap_1()
-                            .child(div().text_lg().font_bold().child("rusker"))
-                            .child(div().text_lg().child("desktop")),
+                            .child(div().text_xl().font_bold().child("rusker"))
+                            .child(div().text_xl().child("desktop")),
                     ),
             )
             .child(drag_region(div().id("app-bar-drag")).flex_1().h_full())
             .child(
                 div()
                     .id("app-bar-settings")
-                    .size(px(32.))
+                    .size(px(40.))
                     .mr_2()
                     .rounded_md()
                     .flex()
@@ -4789,7 +4818,7 @@ impl RuskerApp {
                     .justify_center()
                     .cursor_pointer()
                     .hover(|style| style.bg(gpui_kit::white().opacity(0.16)))
-                    .child(Icon::new(IconName::Settings).small())
+                    .child(Icon::new(IconName::Settings).size(px(20.)))
                     .on_click(cx.listener(|this, _, _, cx| this.navigate(Page::Settings, cx))),
             )
             .when(!cfg!(target_os = "macos"), |this| {
@@ -4841,7 +4870,7 @@ impl RuskerApp {
                 this.hover(|style| style.bg(gpui_kit::white().opacity(0.16)))
                     .active(|style| style.bg(gpui_kit::white().opacity(0.24)))
             })
-            .child(Icon::new(icon).small())
+            .child(Icon::new(icon).size(px(20.)))
             .when(cfg!(windows), |this| this.window_control_area(area))
             .when(cfg!(target_os = "linux"), |this| {
                 this.on_mouse_down(MouseButton::Left, |_, window, cx| {
@@ -5046,6 +5075,77 @@ fn engine_reconnect_label(
         Some(t!("app.status.connecting").into())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod container_list_tests {
+    use super::{container_list_name, group_container_list, ContainerListItem};
+    use rusker_desktop::model::ContainerSummary;
+
+    fn container(id: &str, compose_project: Option<&str>) -> ContainerSummary {
+        ContainerSummary {
+            id: id.into(),
+            name: id.into(),
+            compose_project: compose_project.map(str::to_owned),
+            ..ContainerSummary::default()
+        }
+    }
+
+    #[test]
+    fn nested_names_remove_the_first_project_name_occurrence() {
+        for (name, expected) in [
+            ("shop-web-1", "web-1"),
+            ("shop-shop-web-1", "shop-web-1"),
+            ("custom-shop-web-1", "custom-web-1"),
+            ("shop_database_1", "shop_database_1"),
+            ("other-web-1", "other-web-1"),
+        ] {
+            let mut member = container(name, Some("shop"));
+            member.compose_replace = Some("frontend".into());
+            assert_eq!(container_list_name(&member, true), expected);
+            assert_eq!(container_list_name(&member, false), name);
+        }
+        assert_eq!(
+            container_list_name(&container("shop-web-1", None), true),
+            "shop-web-1"
+        );
+    }
+
+    #[test]
+    fn compose_services_group_at_the_projects_first_occurrence() {
+        let items = group_container_list(vec![
+            container("web", Some("shop")),
+            container("standalone", None),
+            container("database", Some("shop")),
+            container("proxy", Some("edge")),
+        ]);
+
+        assert_eq!(items.len(), 3);
+        match &items[0] {
+            ContainerListItem::ComposeProject {
+                project,
+                containers,
+            } => {
+                assert_eq!(project, "shop");
+                assert_eq!(
+                    containers
+                        .iter()
+                        .map(|container| container.id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["web", "database"]
+                );
+            }
+            other => panic!("expected shop project, got {other:?}"),
+        }
+        assert!(matches!(
+            &items[1],
+            ContainerListItem::Container(container) if container.id == "standalone"
+        ));
+        assert!(matches!(
+            &items[2],
+            ContainerListItem::ComposeProject { project, .. } if project == "edge"
+        ));
     }
 }
 

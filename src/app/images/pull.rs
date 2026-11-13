@@ -139,7 +139,7 @@ impl RuskerApp {
                 let notification = match result {
                     Ok(snapshot) => {
                         this.connected = true;
-                        this.apply_snapshot(snapshot);
+                        this.apply_snapshot(snapshot, cx);
                         this.after_volume_snapshot(cx);
                         Notification::success(reference).title(t!("images.pull.done").into_owned())
                     }

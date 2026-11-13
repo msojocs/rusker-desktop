@@ -15,7 +15,7 @@ use tokio::io::{
 /// Converts a drive-letter path (`C:\a\b`, `c:/a/b`) to its WSL automount
 /// path (`/mnt/c/a/b`). Other sources (named volumes, Linux paths, UNC
 /// paths) return `None` and are left to the engine.
-fn to_wsl_path(source: &str) -> Option<String> {
+pub(crate) fn to_wsl_path(source: &str) -> Option<String> {
     let mut chars = source.chars();
     let drive = chars.next().filter(char::is_ascii_alphabetic)?;
     if chars.next() != Some(':') {

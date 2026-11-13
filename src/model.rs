@@ -47,6 +47,10 @@ impl EngineSnapshot {
 }
 
 pub const COMPOSE_PROJECT_LABEL: &str = "com.docker.compose.project";
+pub const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+pub const COMPOSE_REPLACE_LABEL: &str = "com.docker.compose.replace";
+pub const COMPOSE_WORKING_DIR_LABEL: &str = "com.docker.compose.project.working_dir";
+pub const COMPOSE_CONFIG_FILES_LABEL: &str = "com.docker.compose.project.config_files";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContainerSummary {
@@ -63,11 +67,33 @@ pub struct ContainerSummary {
     pub volumes: Vec<String>,
     /// Docker Compose project name, when this is a Compose service container.
     pub compose_project: Option<String>,
+    /// Compose service name from labels; custom container names may differ.
+    pub compose_service: Option<String>,
+    /// Preferred Compose container display name from labels.
+    pub compose_replace: Option<String>,
+    /// Compose working directory reported by the CLI that created the project.
+    pub compose_working_dir: Option<String>,
+    /// Comma-separated Compose configuration file paths reported by the CLI.
+    pub compose_config_files: Option<String>,
 }
 
 impl ContainerSummary {
     pub fn is_running(&self) -> bool {
         self.state.eq_ignore_ascii_case("running")
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.state.eq_ignore_ascii_case("paused")
+    }
+
+    pub fn toggle_action(&self) -> ContainerAction {
+        if self.is_running() {
+            ContainerAction::Stop
+        } else if self.is_paused() {
+            ContainerAction::Unpause
+        } else {
+            ContainerAction::Start
+        }
     }
 
     pub fn is_compose(&self) -> bool {
@@ -167,6 +193,8 @@ pub struct VolumeEntry {
 pub enum ContainerAction {
     Start,
     Stop,
+    Pause,
+    Unpause,
     Restart,
     Remove,
 }
@@ -176,6 +204,8 @@ impl ContainerAction {
         match self {
             Self::Start => t!("model.action.start"),
             Self::Stop => t!("model.action.stop"),
+            Self::Pause => t!("model.action.pause"),
+            Self::Unpause => t!("model.action.unpause"),
             Self::Restart => t!("model.action.restart"),
             Self::Remove => t!("model.action.remove"),
         }
