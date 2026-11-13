@@ -1,7 +1,7 @@
 name: Release
 
 # master pushes publish a rolling "preview" prerelease; v* tags publish a
-# versioned release. Both build the Windows NSIS installer and Linux packages.
+# versioned release. Both build the Windows NSIS installer.
 on:
   push:
     branches: [master]
@@ -24,7 +24,6 @@ jobs:
       channel: ${{ steps.version.outputs.channel }}
       version: ${{ steps.version.outputs.version }}
       version_numeric: ${{ steps.version.outputs.version_numeric }}
-      deb_version: ${{ steps.version.outputs.deb_version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
@@ -42,20 +41,17 @@ jobs:
             fi
             channel=release
             version_numeric="${core}.0"
-            deb_version="${version//-/\~}"
             if [[ "$version" == *-* ]]; then prerelease=true; else prerelease=false; fi
           else
             channel=preview
             version="${cargo_version}-preview.${GITHUB_RUN_NUMBER}"
             version_numeric="${core}.${GITHUB_RUN_NUMBER}"
-            deb_version="${cargo_version//-/\~}~preview.${GITHUB_RUN_NUMBER}"
             prerelease=true
           fi
           {
             echo "channel=$channel"
             echo "version=$version"
             echo "version_numeric=$version_numeric"
-            echo "deb_version=$deb_version"
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
           echo "Channel: $channel, version: $version"
@@ -140,56 +136,9 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  linux:
-    name: Linux packages
-    needs: meta
-    # Oldest supported runner: binaries built here link against an older glibc
-    # and therefore run on more distributions.
-    runs-on: ubuntu-22.04
-    env:
-      VERSION: ${{ needs.meta.outputs.version }}
-      DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Linux native dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc g++ clang pkg-config libfontconfig-dev libwayland-dev \
-            libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev \
-            libssl-dev libzstd-dev libvulkan1
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-      - name: Install cargo-deb
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deb
-      - name: Build
-        run: cargo build --release --locked
-      - name: Build .deb
-        run: |
-          mkdir -p dist
-          cargo deb --no-build --deb-version "$DEB_VERSION" \
-            --output "dist/rusker-desktop-${VERSION}-linux-amd64.deb"
-      - name: Build tarball
-        run: |
-          name="rusker-desktop-${VERSION}-linux-x64"
-          mkdir -p "staging/$name"
-          cp target/release/rusker-desktop packaging/linux/rusker-desktop.desktop \
-            LICENSE README.md "staging/$name/"
-          strip "staging/$name/rusker-desktop"
-          tar -C staging -czf "dist/$name.tar.gz" "$name"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux
-          path: dist/*
-          if-no-files-found: error
-
   publish:
     name: Publish ${{ needs.meta.outputs.channel }}
-    needs: [meta, windows, linux]
+    needs: [meta, windows]
     # Manual runs on other branches only build artifacts, never publish.
     if: github.ref == 'refs/heads/master' || github.ref_type == 'tag'
     runs-on: ubuntu-latest
@@ -202,8 +151,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          name: windows
           path: dist
-          merge-multiple: true
       - name: Checksums
         working-directory: dist
         run: sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
