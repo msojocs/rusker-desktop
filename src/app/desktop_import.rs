@@ -108,6 +108,25 @@ pub(super) struct DesktopImportState {
     import_task: Option<Task<()>>,
 }
 
+impl DesktopImportState {
+    fn finish_import(&mut self, result: Result<DesktopImportReport, String>) {
+        self.running = false;
+        self.progress.message = t!("desktop_import.progress.finished").into_owned();
+        match result {
+            Ok(report) => {
+                self.progress.completed = self.progress.total;
+                if report.failures.is_empty() {
+                    self.checked.clear();
+                    self.scanned = false;
+                    self.containers.clear();
+                }
+                self.report = Some(report);
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+}
+
 impl RuskerApp {
     fn select_desktop_source(&mut self, source: DesktopImportSource, cx: &mut Context<Self>) {
         if self.desktop_import_conflict() || self.desktop_import.source == source {
@@ -211,35 +230,34 @@ impl RuskerApp {
             .collect()
     }
 
-    fn scan_desktop_containers(&mut self, cx: &mut Context<Self>) {
+    fn scan_desktop_containers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Source discovery deliberately does not require a connected target.
         if !cfg!(windows) || self.desktop_import_conflict() {
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            self.desktop_import.error =
-                Some(t!("desktop_import.error.engine_unavailable").into_owned());
-            cx.notify();
+            self.open_desktop_import_error(
+                t!("desktop_import.error.engine_unavailable").into_owned(),
+                window,
+                cx,
+            );
             return;
         };
         self.desktop_import.scanning = true;
-        self.desktop_import.scanned = false;
-        self.desktop_import.error = None;
-        self.desktop_import.checked.clear();
-        self.desktop_import.containers.clear();
         let source = self.desktop_import.source;
         let handle = engine.containers_from_desktop(source);
-        self.desktop_import.scan_task = Some(cx.spawn(async move |this, cx| {
+        self.desktop_import.scan_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = await_engine(handle).await;
-            _ = this.update(cx, |this, cx| {
+            _ = this.update_in(cx, |this, window, cx| {
                 this.desktop_import.scanning = false;
                 match result {
                     Ok(containers) => {
                         this.desktop_import.containers = containers;
+                        this.desktop_import.checked.clear();
                         this.desktop_import.scanned = true;
                     }
                     Err(error) => {
-                        this.desktop_import.error = Some(
+                        this.open_desktop_import_error(
                             t!(
                                 "desktop_import.error.scan_failed",
                                 source = source.label(),
@@ -247,6 +265,8 @@ impl RuskerApp {
                                 hint = desktop_source_hint(source)
                             )
                             .into_owned(),
+                            window,
+                            cx,
                         );
                     }
                 }
@@ -313,23 +333,26 @@ impl RuskerApp {
         cx: &mut Context<Self>,
     ) {
         if source != self.desktop_import.source {
-            self.desktop_import.error =
-                Some(t!("desktop_import.error.source_changed").into_owned());
-            cx.notify();
+            self.open_desktop_import_error(
+                t!("desktop_import.error.source_changed").into_owned(),
+                window,
+                cx,
+            );
             return;
         }
         // Recheck after the confirmation dialog: runtime/connection/selection
         // may have changed while it was open. The backend validates again too.
         if let Some(reason) = self.desktop_import_unavailable() {
-            self.desktop_import.error = Some(reason);
-            cx.notify();
+            self.open_desktop_import_error(reason, window, cx);
             return;
         }
         let eligible = self.selected_desktop_containers();
         if ids.is_empty() || ids.iter().any(|id| !eligible.contains(id)) {
-            self.desktop_import.error =
-                Some(t!("desktop_import.error.selection_changed").into_owned());
-            cx.notify();
+            self.open_desktop_import_error(
+                t!("desktop_import.error.selection_changed").into_owned(),
+                window,
+                cx,
+            );
             return;
         }
         let Some(engine) = self.engine.clone() else {
@@ -373,56 +396,65 @@ impl RuskerApp {
                 }
             }
             let result = await_engine(handle).await;
-            _ = this.update_in(cx, |this, window, cx| {
-                this.desktop_import.running = false;
+            _ = this.update_in(cx, |this, _, cx| {
                 this.busy = None;
-                this.desktop_import.checked.clear();
-                // Source/target state may have changed; require a fresh scan
-                // before another import, but keep the complete result visible.
-                this.desktop_import.scanned = false;
-                this.desktop_import.containers.clear();
-                match result {
-                    Ok(report) => {
-                        let summary = t!(
-                            "desktop_import.result.summary",
-                            succeeded = report.imported.len(),
-                            failed = report.failures.len()
-                        )
-                        .into_owned();
-                        this.desktop_import.progress.message = summary.clone();
-                        this.desktop_import.progress.completed = this.desktop_import.progress.total;
-                        if report.failures.is_empty() {
-                            this.notify_success(summary, cx);
-                        } else {
-                            this.notify_error(
-                                t!("desktop_import.result.see_details", summary = summary),
-                                cx,
-                            );
-                        }
-                        this.desktop_import.report = Some(report);
-                    }
-                    Err(error) => {
-                        this.desktop_import.progress.message =
-                            t!("desktop_import.progress.finished").into_owned();
-                        this.desktop_import.error = Some(
-                            t!("desktop_import.error.import_failed", error = error).into_owned(),
-                        );
-                        this.notify_error(
-                            t!(
-                                "desktop_import.error.import_failed_short",
-                                source = source.label()
-                            ),
-                            cx,
-                        );
-                    }
-                }
-                // Also refresh after partial failure to show everything created.
-                window.close_dialog(cx);
+                // Keep the source list and selection on failure, including partial
+                // failures. Refresh the target so conflicts still block retries.
+                this.desktop_import.finish_import(result.map_err(|error| {
+                    t!("desktop_import.error.import_failed", error = error).into_owned()
+                }));
+                // The progress dialog becomes the result dialog and stays open.
                 this.refresh(cx);
                 cx.notify();
             });
         }));
         cx.notify();
+    }
+
+    fn open_desktop_import_error(
+        &self,
+        error: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title(t!("desktop_import.result.error_title").into_owned())
+                .description(error.clone())
+                .footer(desktop_import_footer())
+        });
+    }
+
+    fn render_desktop_import_result(&self, cx: &gpui_kit::App) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .when_some(self.desktop_import.error.clone(), |this, error| {
+                this.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            })
+            .when_some(self.desktop_import.report.as_ref(), |this, report| {
+                this.child(muted(t!("desktop_import.report.hint"), cx))
+                    .child(
+                        div()
+                            .id("desktop-import-results")
+                            .max_h(px(400.))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(report.imported.iter().map(|item| {
+                                div().text_sm().text_color(cx.theme().success).child(
+                                    t!("desktop_import.report.success", item = item).to_string(),
+                                )
+                            }))
+                            .children(report.failures.iter().map(|item| {
+                                div().text_sm().text_color(cx.theme().danger).child(
+                                    t!("desktop_import.report.failure", item = item).to_string(),
+                                )
+                            })),
+                    )
+            })
     }
 
     fn open_desktop_import_progress(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -431,13 +463,30 @@ impl RuskerApp {
             let Some(this) = weak.upgrade() else {
                 return dialog;
             };
-            let (progress, running, source, indicator) = {
+            let (progress, running, indicator, title, result) = {
                 let app = this.read(cx);
+                let title = if app.desktop_import.running {
+                    t!(
+                        "desktop_import.progress.title",
+                        source = app.desktop_import.source.label()
+                    )
+                    .into_owned()
+                } else if let Some(report) = &app.desktop_import.report {
+                    t!(
+                        "desktop_import.result.summary",
+                        succeeded = report.imported.len(),
+                        failed = report.failures.len()
+                    )
+                    .into_owned()
+                } else {
+                    t!("desktop_import.result.error_title").into_owned()
+                };
                 (
                     app.desktop_import.progress.clone(),
                     app.desktop_import.running,
-                    app.desktop_import.source,
                     app.loading_ring(px(20.), None),
+                    title,
+                    app.render_desktop_import_result(cx),
                 )
             };
             let total = progress.total;
@@ -449,53 +498,60 @@ impl RuskerApp {
             };
             let cancel = weak.clone();
             dialog
-                .title(t!("desktop_import.progress.title", source = source.label()).into_owned())
+                .title(title)
                 .w(px(520.))
                 .keyboard(!running)
+                .close_button(!running)
+                .overlay_closable(!running)
                 .on_cancel(move |_, _, cx| {
                     cancel
                         .upgrade()
                         .is_none_or(|this| !this.read(cx).desktop_import.running)
                 })
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .child(muted(t!("desktop_import.running.notice"), cx))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(indicator)
-                                .child(div().flex_1().min_w_0().child(progress.message.clone())),
-                        )
-                        .child(
-                            div()
-                                .h(px(8.))
-                                .w_full()
-                                .rounded_full()
-                                .bg(cx.theme().secondary)
-                                .overflow_hidden()
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .w(relative(fraction))
-                                        .rounded_full()
-                                        .bg(cx.theme().primary),
+                .when(!running, |dialog| {
+                    dialog.child(result).footer(desktop_import_footer())
+                })
+                .when(running, |dialog| {
+                    dialog.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .child(muted(t!("desktop_import.running.notice"), cx))
+                            .child(
+                                div().flex().items_center().gap_3().child(indicator).child(
+                                    div().flex_1().min_w_0().child(progress.message.clone()),
                                 ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(t!("desktop_import.progress.overall").into_owned())
-                                .child(format!("{completed}/{total} · {:.0}%", fraction * 100.)),
-                        ),
-                )
+                            )
+                            .child(
+                                div()
+                                    .h(px(8.))
+                                    .w_full()
+                                    .rounded_full()
+                                    .bg(cx.theme().secondary)
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(fraction))
+                                            .rounded_full()
+                                            .bg(cx.theme().primary),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(t!("desktop_import.progress.overall").into_owned())
+                                    .child(format!(
+                                        "{completed}/{total} · {:.0}%",
+                                        fraction * 100.
+                                    )),
+                            ),
+                    )
+                })
         });
     }
 
@@ -550,7 +606,7 @@ impl RuskerApp {
                     })
                     .disabled(scan_blocked)
                     .pointer(!scan_blocked)
-                    .on_click(cx.listener(|this, _, _, cx| this.scan_desktop_containers(cx))))
+                    .on_click(cx.listener(|this, _, window, cx| this.scan_desktop_containers(window, cx))))
                 .child(button("import-desktop-containers")
                     .primary()
                     .label(t!("desktop_import.action.import_selected", count = selected.len()))
@@ -647,28 +703,16 @@ impl RuskerApp {
                     .child(self.loading_ring(px(16.), None))
                     .child(t!("desktop_import.running.notice").to_string()))
                 .child(div().text_sm().child(state.progress.message.clone()))))
-            .when_some(state.error.clone(), |this, error| this.child(div().text_sm()
-                .text_color(cx.theme().danger).child(error)))
-            .when_some(state.report.as_ref(), |this, report| {
-                this.child(div().flex().flex_col().gap_3()
-                    .child(div().font_semibold().child(
-                        t!(
-                            "desktop_import.report.title",
-                            succeeded = report.imported.len(),
-                            failed = report.failures.len()
-                        )
-                        .to_string(),
-                    ))
-                    .child(muted(t!("desktop_import.report.hint"), cx))
-                    .child(div().on_scroll(|_, _, cx| cx.stop_propagation())
-                        .child(div().id("desktop-import-results").max_h(px(400.)).overflow_y_scroll()
-                        .flex().flex_col().gap_2()
-                        .children(report.imported.iter().map(|item| div().text_sm()
-                            .text_color(cx.theme().success).child(t!("desktop_import.report.success", item = item).to_string())))
-                        .children(report.failures.iter().map(|item| div().text_sm()
-                            .text_color(cx.theme().danger).child(t!("desktop_import.report.failure", item = item).to_string()))))))
-            })
     }
+}
+
+fn desktop_import_footer() -> Div {
+    div().flex().justify_end().child(
+        button("close-desktop-import")
+            .primary()
+            .label(t!("desktop_import.action.close"))
+            .on_click(|_, window, cx| window.close_dialog(cx)),
+    )
 }
 
 /// Localized connection hint for a desktop import source. The engine-side
@@ -690,6 +734,68 @@ mod tests {
             compose_project: project.map(str::to_owned),
             ..Default::default()
         }
+    }
+
+    fn import_state() -> DesktopImportState {
+        DesktopImportState {
+            containers: vec![container("a", None), container("b", None)],
+            checked: HashSet::from(["a".into(), "b".into()]),
+            scanned: true,
+            running: true,
+            progress: DesktopImportProgress {
+                total: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn failed_import_preserves_source_list_and_selection() {
+        let mut state = import_state();
+        state.finish_import(Err("import failed".into()));
+
+        assert!(!state.running);
+        assert!(state.scanned);
+        assert_eq!(state.containers.len(), 2);
+        assert_eq!(state.checked, HashSet::from(["a".into(), "b".into()]));
+        assert_eq!(state.error.as_deref(), Some("import failed"));
+        assert!(state.report.is_none());
+    }
+
+    #[test]
+    fn reported_failures_preserve_source_list_and_selection() {
+        for imported in [vec![], vec!["a".into()]] {
+            let mut state = import_state();
+            state.finish_import(Ok(DesktopImportReport {
+                imported,
+                failures: vec!["b: failed".into()],
+            }));
+
+            assert!(!state.running);
+            assert!(state.scanned);
+            assert_eq!(state.containers.len(), 2);
+            assert_eq!(state.checked, HashSet::from(["a".into(), "b".into()]));
+            assert_eq!(state.report.as_ref().unwrap().failures, ["b: failed"]);
+            assert!(state.error.is_none());
+        }
+    }
+
+    #[test]
+    fn successful_import_clears_source_list_and_keeps_report() {
+        let mut state = import_state();
+        state.finish_import(Ok(DesktopImportReport {
+            imported: vec!["a".into(), "b".into()],
+            failures: vec![],
+        }));
+
+        assert!(!state.running);
+        assert!(!state.scanned);
+        assert!(state.containers.is_empty());
+        assert!(state.checked.is_empty());
+        assert_eq!(state.progress.completed, 2);
+        assert_eq!(state.report.as_ref().unwrap().imported, ["a", "b"]);
+        assert!(state.error.is_none());
     }
 
     #[test]

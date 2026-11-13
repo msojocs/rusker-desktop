@@ -47,10 +47,10 @@ impl ContainerTables {
         &self,
         rows: Vec<ContainerListItem>,
         empty: ContainerEmpty,
-        collapsed: &HashSet<String>,
+        expanded: &HashSet<String>,
         cx: &mut Context<RuskerApp>,
     ) -> Div {
-        let rows = Rc::new(expand_container_rows(rows, collapsed));
+        let rows = Rc::new(expand_container_rows(rows, expanded));
         let now = OffsetDateTime::now_utc().unix_timestamp();
         self.main.update(cx, |table, _| {
             let delegate = table.delegate_mut();
@@ -127,7 +127,7 @@ impl ContainerTables {
 
 fn expand_container_rows(
     rows: Vec<ContainerListItem>,
-    collapsed: &HashSet<String>,
+    expanded: &HashSet<String>,
 ) -> Vec<ContainerListItem> {
     rows.into_iter()
         .flat_map(|row| match row {
@@ -135,12 +135,12 @@ fn expand_container_rows(
                 project,
                 containers,
             } => {
-                let is_collapsed = collapsed.contains(&project);
+                let is_expanded = expanded.contains(&project);
                 let mut items = vec![ContainerListItem::ComposeProject {
                     project,
                     containers: containers.clone(),
                 }];
-                if !is_collapsed {
+                if is_expanded {
                     items.extend(
                         containers
                             .into_iter()
@@ -329,7 +329,7 @@ impl ContainerTable {
             return div().into_any_element();
         };
         let app = app.read(cx);
-        let collapsed = app.compose_projects_collapsed.contains(project);
+        let collapsed = !app.compose_projects_expanded.contains(project);
         let running = containers
             .iter()
             .filter(|container| container.is_running())
@@ -397,8 +397,8 @@ impl ContainerTable {
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         _ = weak.update(cx, |this, cx| {
-                            if !this.compose_projects_collapsed.remove(&project) {
-                                this.compose_projects_collapsed.insert(project.clone());
+                            if !this.compose_projects_expanded.remove(&project) {
+                                this.compose_projects_expanded.insert(project.clone());
                             }
                             cx.notify();
                         });
@@ -960,9 +960,33 @@ mod tests {
     }
 
     #[test]
+    fn compose_rows_are_collapsed_by_default() {
+        let standalone = ContainerSummary {
+            id: "standalone".into(),
+            name: "standalone".into(),
+            ..ContainerSummary::default()
+        };
+        let grouped =
+            group_container_list(vec![container("web"), container("database"), standalone]);
+        let rows = expand_container_rows(grouped, &HashSet::new());
+
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            ContainerListItem::ComposeProject { project, containers }
+                if project == "shop" && containers.len() == 2
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            ContainerListItem::Container(container) if container.id == "standalone"
+        )));
+    }
+
+    #[test]
     fn expanded_compose_rows_include_the_group_and_each_service() {
         let grouped = group_container_list(vec![container("web"), container("database")]);
-        let expanded = expand_container_rows(grouped.clone(), &HashSet::new());
+        let mut expanded_projects = HashSet::from(["shop".into()]);
+        let expanded = expand_container_rows(grouped.clone(), &expanded_projects);
         assert_eq!(expanded.len(), 3);
         assert!(matches!(
             &expanded[0],
@@ -977,11 +1001,30 @@ mod tests {
             ContainerListItem::Container(container) if container.id == "database"
         ));
 
-        let collapsed = expand_container_rows(grouped, &HashSet::from(["shop".into()]));
+        expanded_projects.remove("shop");
+        let collapsed = expand_container_rows(grouped, &expanded_projects);
         assert_eq!(collapsed.len(), 1);
         assert!(matches!(
             &collapsed[0],
             ContainerListItem::ComposeProject { .. }
         ));
+    }
+
+    #[test]
+    fn expanding_one_compose_project_keeps_other_projects_collapsed() {
+        let mut other = container("worker");
+        other.compose_project = Some("other".into());
+        let grouped = group_container_list(vec![container("web"), other]);
+        let rows = expand_container_rows(grouped, &HashSet::from(["shop".into()]));
+
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            ContainerListItem::Container(container) if container.id == "web"
+        )));
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            ContainerListItem::Container(container) if container.id == "worker"
+        )));
     }
 }

@@ -50,9 +50,9 @@ desktop_import.error.selection_changed:
 desktop_import.error.import_failed:
   en: "Import failed: %{error}. The target may already contain partial data; check the target containers and volumes before retrying."
   zh-CN: "导入失败：%{error}。目标可能已有部分数据，请查看目标容器和卷后再重试。"
-desktop_import.error.import_failed_short:
-  en: "%{source} import failed. See Settings for details."
-  zh-CN: "%{source} 导入失败，请在设置中查看详情"
+desktop_import.result.error_title:
+  en: "Container import error"
+  zh-CN: "容器导入错误"
 desktop_import.confirm.title:
   en: "Import %{count} %{source} containers?"
   zh-CN: "导入 %{count} 个 %{source} 容器？"
@@ -86,9 +86,9 @@ desktop_import.progress.finished:
 desktop_import.result.summary:
   en: "Import complete: %{succeeded} succeeded, %{failed} failed"
   zh-CN: "导入完成：%{succeeded} 项成功，%{failed} 项失败"
-desktop_import.result.see_details:
-  en: "%{summary}; see Settings for the full per-item results"
-  zh-CN: "%{summary}；请在设置中查看完整逐项结果"
+desktop_import.action.close:
+  en: "Close"
+  zh-CN: "关闭"
 desktop_import.action.scan:
   en: "Scan %{source}"
   zh-CN: "扫描 %{source}"
@@ -122,12 +122,9 @@ desktop_import.container.blocked:
 desktop_import.running.notice:
   en: "Importing. Do not quit Rusker or start source containers."
   zh-CN: "正在导入，请勿退出 Rusker 或启动源容器"
-desktop_import.report.title:
-  en: "Last import result: %{succeeded} succeeded, %{failed} failed"
-  zh-CN: "最近一次导入结果：%{succeeded} 项成功，%{failed} 项失败"
 desktop_import.report.hint:
-  en: "Successfully created containers do not start automatically; go to the Containers page to check and start them manually. The full per-item results below are kept only for this session."
-  zh-CN: "成功创建的容器不会自动启动；请到容器页检查后手动启动。以下为完整逐项结果，仅在本次会话保留。"
+  en: "Successfully created containers do not start automatically; go to the Containers page to check and start them manually. If any imports failed, the source list and selection are retained in Settings; check the target containers and volumes before retrying."
+  zh-CN: "成功创建的容器不会自动启动；请到容器页检查后手动启动。如有导入失败，设置页会保留来源列表和勾选；请查看目标容器和卷后再重试。"
 desktop_import.report.success:
   en: "Succeeded: %{item}"
   zh-CN: "成功：%{item}"

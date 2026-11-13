@@ -315,8 +315,8 @@ pub struct RuskerApp {
     containers_running_only: bool,
     /// IDs ticked for batch removal in the container list.
     containers_checked: HashSet<String>,
-    /// Compose projects collapsed in the container list. Projects default to expanded.
-    compose_projects_collapsed: HashSet<String>,
+    /// Compose projects expanded in the container list. Projects default to collapsed.
+    compose_projects_expanded: HashSet<String>,
     container_tables: ContainerTables,
     images_table: ImageTables,
     volumes_table: VolumeTables,
@@ -627,7 +627,7 @@ impl RuskerApp {
             compose_config_view: None,
             containers_running_only: false,
             containers_checked: HashSet::new(),
-            compose_projects_collapsed: HashSet::new(),
+            compose_projects_expanded: HashSet::new(),
             container_tables,
             images_table,
             volumes_table,
@@ -2832,7 +2832,7 @@ impl RuskerApp {
             .child(self.container_tables.render(
                 group_container_list(containers),
                 empty,
-                &self.compose_projects_collapsed,
+                &self.compose_projects_expanded,
                 cx,
             ))
             .child(footer)
