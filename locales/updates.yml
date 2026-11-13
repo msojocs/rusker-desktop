@@ -1,0 +1,67 @@
+_version: 2
+updates.title:
+  en: "Software updates"
+  zh-CN: "软件更新"
+updates.current_version:
+  en: "Current version"
+  zh-CN: "当前版本"
+updates.source:
+  en: "Updates are provided by msojocs/rusker-desktop on GitHub Releases."
+  zh-CN: "更新来自 GitHub Releases 上的 msojocs/rusker-desktop。"
+updates.stable:
+  en: "Stable"
+  zh-CN: "稳定版"
+updates.preview:
+  en: "Preview"
+  zh-CN: "预览版"
+updates.channel_hint:
+  en: "Stable checks the latest stable release. Preview checks the rolling preview build. The channel selection applies to this session."
+  zh-CN: "稳定版检查最新正式发布，预览版检查滚动预览构建。通道选择仅在本次会话有效。"
+updates.check:
+  en: "Check for updates"
+  zh-CN: "检查更新"
+updates.checking:
+  en: "Checking…"
+  zh-CN: "正在检查…"
+updates.releases:
+  en: "All releases"
+  zh-CN: "所有发布版本"
+updates.unsupported:
+  en: "In-app downloads currently support Windows x64 only. See all releases for other platforms."
+  zh-CN: "应用内下载目前仅支持 Windows x64。其他平台请查看所有发布版本。"
+updates.up_to_date:
+  en: "No newer version is available on this channel."
+  zh-CN: "当前通道没有更新的版本。"
+updates.available_version:
+  en: "Available version"
+  zh-CN: "可用版本"
+updates.download:
+  en: "Download update"
+  zh-CN: "下载更新"
+updates.release_notes:
+  en: "Release notes"
+  zh-CN: "发布说明"
+updates.progress:
+  en: "Downloading: %{downloaded} / %{total} (SHA-256 verification follows)"
+  zh-CN: "正在下载：%{downloaded} / %{total}（下载后校验 SHA-256）"
+updates.cancel:
+  en: "Cancel download"
+  zh-CN: "取消下载"
+updates.downloaded:
+  en: "Download verified. Save the installer, then quit Rusker and run the saved file to install. The temporary download is removed when you quit, change channels, or check again."
+  zh-CN: "下载并校验完成。请先另存安装包，再退出 Rusker 运行保存的文件进行安装。退出、切换通道或重新检查时会删除临时下载文件。"
+updates.save:
+  en: "Save installer as…"
+  zh-CN: "安装包另存为…"
+updates.saved:
+  en: "Installer saved to %{path}"
+  zh-CN: "安装包已保存到 %{path}"
+updates.save_elsewhere:
+  en: "Choose a location outside the temporary download folder."
+  zh-CN: "请选择临时下载文件夹之外的保存位置。"
+updates.reveal:
+  en: "Show in folder"
+  zh-CN: "在文件夹中显示"
+updates.failed:
+  en: "Update failed: %{error}"
+  zh-CN: "更新失败：%{error}"

@@ -84,6 +84,7 @@ jobs:
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       VERSION_NUMERIC: ${{ needs.meta.outputs.version_numeric }}
+      RUSKER_APP_VERSION: ${{ needs.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust

@@ -43,6 +43,7 @@
 - `format.rs`：不含 I/O 的格式化、过滤和展示逻辑。
 - `i18n.rs` 与 `locales/*.yml`：界面语言（英文、简体中文）。用户可见文本通过 `rust_i18n::t!` 按键翻译，每个 yml 按模块划分键前缀，每个键同时提供 `en` 与 `zh-CN`；locale 为全局设置，与 gpui-component 内置文本共用。测试使用默认的 `en`，不在测试中切换 locale。
 - `app.rs`：页面、选择、忙碌状态、请求序号、通知和 GPUI Task；`app/volumes.rs` 为卷页面与卷详情。
+- `update.rs`：GitHub Releases 元数据、通道和版本比较、安装包选择、流式下载与大小/SHA-256 校验；不依赖 GPUI，下载由临时目录持有并自动清理。`app/updates.rs` 持有按需创建的 Tokio runtime、下载对象与 UI Task，更新操作不依赖 Engine 连接。
 - `main.rs`：只负责应用、资源、主题初始化和窗口创建。
 
 后续支持更多后端时，可在 `engine` 下引入异步 trait；首版不提前建立复杂插件系统。

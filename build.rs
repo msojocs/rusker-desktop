@@ -13,6 +13,7 @@ fn main() {
     // Translations are embedded by `rust_i18n::i18n!`, which cannot track them.
     println!("cargo:rerun-if-changed=locales");
     rootfs_version();
+    app_version();
     println!("cargo:rerun-if-changed=helpers/vm-proxy/src");
     println!("cargo:rerun-if-changed=helpers/vm-proxy/Cargo.toml");
     println!("cargo:rerun-if-changed=helpers/vm-proxy/Cargo.lock");
@@ -98,6 +99,19 @@ fn app_icon() {
     embed_resource::compile(RESOURCES, embed_resource::NONE)
         .manifest_optional()
         .unwrap_or_else(|error| panic!("无法嵌入应用图标 {RESOURCES}：{error}"));
+}
+
+/// CI supplies the release's complete version (including rolling preview
+/// numbers); local builds use the package version.
+fn app_version() {
+    println!("cargo:rerun-if-env-changed=RUSKER_APP_VERSION");
+    let version = env::var("RUSKER_APP_VERSION")
+        .unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION"));
+    assert!(
+        !version.is_empty() && !version.chars().any(char::is_whitespace),
+        "RUSKER_APP_VERSION must be a non-empty version without whitespace"
+    );
+    println!("cargo:rustc-env=RUSKER_APP_VERSION={version}");
 }
 
 /// Exposes the WSL2 system image version (`images/wsl-rootfs/VERSION`) as

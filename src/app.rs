@@ -71,6 +71,7 @@ mod images;
 mod navigation;
 mod notifications;
 mod run;
+mod updates;
 mod volumes;
 
 use container_detail::{ContainerStatsState, ContainerTools};
@@ -118,6 +119,7 @@ impl Page {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
     General,
+    Updates,
     VmResources,
     ResourceSaver,
     Proxies,
@@ -131,6 +133,7 @@ impl SettingsSection {
     fn visible() -> Vec<Self> {
         let mut sections = vec![
             Self::General,
+            Self::Updates,
             Self::VmResources,
             Self::ResourceSaver,
             Self::Proxies,
@@ -147,6 +150,7 @@ impl SettingsSection {
     fn title(self) -> String {
         match self {
             Self::General => t!("app.settings_section.general").into(),
+            Self::Updates => t!("updates.title").into(),
             Self::VmResources => t!("app.settings_section.vm_resources").into(),
             Self::ResourceSaver => t!("app.settings_section.resource_saver").into(),
             Self::Proxies => t!("app.settings_section.proxies").into(),
@@ -353,6 +357,7 @@ pub struct RuskerApp {
     volumes: VolumeState,
     /// Session-only source selection, progress and per-item import results.
     desktop_import: DesktopImportState,
+    updates: updates::UpdateState,
     volume_name_input: Entity<InputState>,
     settings: AppSettings,
     /// Edits not yet applied. Proxy addresses and the Resource Saver
@@ -675,6 +680,7 @@ impl RuskerApp {
             run: RunForm::default(),
             volumes: VolumeState::default(),
             desktop_import: DesktopImportState::default(),
+            updates: updates::UpdateState::default(),
             volume_name_input,
             settings_draft: settings.clone(),
             settings,
@@ -3592,6 +3598,7 @@ impl RuskerApp {
             .map(|(index, section)| {
                 let body = match section {
                     SettingsSection::General => self.render_general_settings(cx),
+                    SettingsSection::Updates => self.render_update_settings(cx),
                     SettingsSection::VmResources => self.render_vm_settings(cx),
                     SettingsSection::ResourceSaver => self.render_resource_saver_settings(cx),
                     SettingsSection::Proxies => self.render_proxy_settings(cx),
@@ -4983,7 +4990,7 @@ impl RuskerApp {
                     .gap_4()
                     .flex_shrink_0()
                     .when_some(engine_version, |this, version| this.child(version))
-                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+                    .child(format!("v{}", rusker_desktop::update::CURRENT_VERSION)),
             )
     }
 

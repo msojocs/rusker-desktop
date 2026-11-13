@@ -1,6 +1,6 @@
 [package]
 name = "rusker-desktop"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.92"
 description = "An open-source, cross-platform container desktop manager"
@@ -23,10 +23,12 @@ futures-util = "0.3"
 gpui-kit = { version = "0.9.0", features = ["tree-sitter", "tree-sitter-yaml"] }
 httparse = "1"
 regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
 resvg = { version = "0.46", default-features = false }
 rust-i18n = "4.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

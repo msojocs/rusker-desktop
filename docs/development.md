@@ -186,10 +186,12 @@ RUSKER_DOCKER_OPERATIONS=1 cargo test --test volume_operations -- --nocapture
 
 ## 打包与发布
 
-`.github/workflows/release.yml` 构建 Windows NSIS 安装包（`packaging/windows/installer.nsi`）和 Linux 的 `.deb` 与 `tar.gz`：
+`.github/workflows/release.yml` 构建 Windows NSIS 安装包（`packaging/windows/installer.nsi`）：
 
 - 推送到 `master`：发布滚动预览版 `preview`（GitHub prerelease，每次覆盖），版本号为 `<Cargo 版本>-preview.<run 编号>`
 - 推送 `v*` tag：发布正式 Release；tag 必须与 `Cargo.toml` 的 `version` 一致（如 `v0.1.0`），带 `-` 的版本（如 `v0.2.0-rc.1`）标记为 prerelease
+
+发布任务通过 `RUSKER_APP_VERSION` 把完整发布版本嵌入应用，供状态栏和更新比较使用；本地未设置时使用 Cargo 版本。手动测试预览版比较可在构建前设置该变量，如 `0.1.0-preview.123`。发布资产命名为 `rusker-desktop-<version>-windows-x64-setup.exe`，同时提供 `SHA256SUMS.txt`；更新客户端下载后必须通过文件大小与 SHA-256 校验才标记成功。
 
 ```bash
 # 发布正式版：先修改 Cargo.toml 中的 version 并提交
