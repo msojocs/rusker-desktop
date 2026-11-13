@@ -578,8 +578,7 @@ impl RuskerApp {
             .min_h_0()
             .relative()
             .child(
-                div()
-                    .id("compose-log-scroll")
+                self.logs_scroll_area("compose-log-scroll", cx)
                     .size_full()
                     .overflow_scroll()
                     .track_scroll(&self.container_logs_scroll)
@@ -590,7 +589,14 @@ impl RuskerApp {
                             .text_xs()
                             .text_color(color)
                             .when(!is_placeholder, |this| this.whitespace_nowrap())
-                            .child(text),
+                            .child(
+                                SelectableText::with_handle(
+                                    "compose-log-text",
+                                    self.logs_selection.clone(),
+                                    text,
+                                )
+                                .selection_color(cx.theme().selection),
+                            ),
                     ),
             )
             .when(!is_placeholder, |this| {

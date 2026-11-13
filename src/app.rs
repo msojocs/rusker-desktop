@@ -8,7 +8,7 @@ use gpui_kit::component::{
     breadcrumb::{Breadcrumb, BreadcrumbItem},
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     checkbox::Checkbox,
-    input::{Editor, EditorState, Input, InputEvent, InputState},
+    input::{Copy as CopyText, Editor, EditorState, Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::{Scrollbar, ScrollbarHandle, ScrollbarMode},
     skeleton::Skeleton,
@@ -20,14 +20,18 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     assets::IconName as AssetIcon,
-    base::{Disableable as _, StyledExt as _},
+    base::{
+        Disableable as _, GlobalState, SelectableText, StyledExt as _, TextSelection,
+        TextSelectionHandle,
+    },
     div, ease_out_quint, percentage,
     prelude::FluentBuilder as _,
     pulsating_between, px, rgb, Anchor, Animation, AnimationExt as _, AnyElement, AnyWindowHandle,
-    App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, PathPromptOptions,
-    Pixels, Render, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Transformation, Window, WindowAppearance, WindowControlArea,
+    App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity, FocusHandle, Hsla,
+    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, ParentElement as _,
+    PathPromptOptions, Pixels, Render, ScrollHandle, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Transformation, Window,
+    WindowAppearance, WindowControlArea,
 };
 use rusker_desktop::{
     container::{valid_image_tag, ImageTagReference},
@@ -329,6 +333,8 @@ pub struct RuskerApp {
     container_terminal: Option<Entity<crate::ui::terminal::TerminalView>>,
     /// Scroll state of the container log viewer.
     container_logs_scroll: ScrollHandle,
+    logs_selection: TextSelectionHandle,
+    logs_focus: FocusHandle,
     logs: String,
     logs_loading: bool,
     logs_error: Option<String>,
@@ -609,6 +615,18 @@ impl RuskerApp {
         let container_tables = ContainerTables::new(app_weak.clone(), window, cx);
         let images_table = ImageTables::new(app_weak.clone(), window, cx);
         let volumes_table = VolumeTables::new(app_weak, window, cx);
+        let logs_selection = TextSelectionHandle::new("", cx);
+        // Plain selectable text needs an explicit redraw subscription while dragging.
+        subscriptions.push(logs_selection.refresh_window_on_change(window, cx));
+        let logs_focus = cx.focus_handle();
+        let selection_focus = logs_focus.clone();
+        logs_selection.focus_with(move |window, cx| selection_focus.focus(window, cx), cx);
+        cx.bind_keys([
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-c", CopyText, Some("ContainerLogs")),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("ctrl-c", CopyText, Some("ContainerLogs")),
+        ]);
 
         let mut this = Self {
             engine,
@@ -638,6 +656,8 @@ impl RuskerApp {
             container_stats: ContainerStatsState::default(),
             container_terminal: None,
             container_logs_scroll: ScrollHandle::new(),
+            logs_selection,
+            logs_focus,
             logs: String::new(),
             logs_loading: false,
             logs_error: None,
@@ -3142,6 +3162,44 @@ impl RuskerApp {
             .child(content)
     }
 
+    fn copy_selected_logs(&mut self, _: &CopyText, window: &mut Window, cx: &mut Context<Self>) {
+        let text = TextSelection::selected_text(window, cx);
+        if text.is_empty() {
+            cx.propagate();
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    fn logs_scroll_area(&self, id: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id(id)
+            .track_focus(&self.logs_focus)
+            .key_context("ContainerLogs")
+            .on_action(cx.listener(Self::copy_selected_logs))
+            .on_mouse_down_out(|_, window, cx| {
+                // The window selection layer also starts gestures outside text.
+                GlobalState::suppress_text_selection(cx);
+                TextSelection::end(window, cx);
+            })
+            .on_any_mouse_down(
+                cx.listener(|this, event: &gpui_kit::MouseDownEvent, window, cx| {
+                    if event.button == MouseButton::Left {
+                        window.prevent_default();
+                        this.logs_focus.focus(window, cx);
+                    } else {
+                        GlobalState::suppress_text_selection(cx);
+                        TextSelection::end(window, cx);
+                    }
+                }),
+            )
+            .on_mouse_move(|event, window, cx| {
+                if event.pressed_button != Some(MouseButton::Left) {
+                    TextSelection::end(window, cx);
+                }
+            })
+    }
+
     fn render_container_logs_tab(&self, cx: &mut Context<Self>) -> Div {
         let is_placeholder =
             self.logs_loading || self.logs_error.is_some() || self.logs.trim().is_empty();
@@ -3167,8 +3225,7 @@ impl RuskerApp {
             .min_h_0()
             .relative()
             .child(
-                div()
-                    .id("container-log-scroll")
+                self.logs_scroll_area("container-log-scroll", cx)
                     .size_full()
                     .overflow_scroll()
                     .track_scroll(&self.container_logs_scroll)
@@ -3179,7 +3236,14 @@ impl RuskerApp {
                             .text_xs()
                             .text_color(color)
                             .when(!is_placeholder, |this| this.whitespace_nowrap())
-                            .child(text),
+                            .child(
+                                SelectableText::with_handle(
+                                    "container-log-text",
+                                    self.logs_selection.clone(),
+                                    text,
+                                )
+                                .selection_color(cx.theme().selection),
+                            ),
                     ),
             )
             .when(!is_placeholder, |this| {
