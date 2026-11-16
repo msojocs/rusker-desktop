@@ -28,8 +28,8 @@ use crate::{
     engine::{with_timeout, EngineError},
     format::{bound_logs, short_id},
     model::{
-        ContainerAction, ContainerSummary as ContainerDto, CreateContainerRequest, EngineInfo,
-        EngineSnapshot, ImageDetail, ImageLayer, ImageSummary as ImageDto, PortMapping,
+        ContainerAction, ContainerMount, ContainerSummary as ContainerDto, CreateContainerRequest,
+        EngineInfo, EngineSnapshot, ImageDetail, ImageLayer, ImageSummary as ImageDto, PortMapping,
         VolumeSummary, COMPOSE_CONFIG_FILES_LABEL, COMPOSE_PROJECT_LABEL, COMPOSE_REPLACE_LABEL,
         COMPOSE_SERVICE_LABEL, COMPOSE_WORKING_DIR_LABEL,
     },
@@ -1197,12 +1197,29 @@ pub(super) fn container_dto(container: ContainerSummary) -> ContainerDto {
             protocol: port.typ.map(|kind| kind.to_string()).unwrap_or_default(),
         })
         .collect();
-    let volumes = container
+    let mounts: Vec<ContainerMount> = container
         .mounts
         .unwrap_or_default()
         .into_iter()
-        .filter(|mount| mount.typ.as_deref() == Some("volume"))
-        .filter_map(|mount| mount.name)
+        .filter_map(|mount| {
+            let kind = mount.typ.unwrap_or_default();
+            // Volumes are identified by name; binds by their host source.
+            let source = if kind.eq_ignore_ascii_case("volume") {
+                mount.name.or(mount.source).unwrap_or_default()
+            } else {
+                mount.source.unwrap_or_default()
+            };
+            (!source.is_empty()).then(|| ContainerMount {
+                kind,
+                source,
+                destination: mount.destination.unwrap_or_default(),
+            })
+        })
+        .collect();
+    let volumes = mounts
+        .iter()
+        .filter(|mount| mount.is_volume())
+        .map(|mount| mount.source.clone())
         .collect();
 
     let labels = container.labels.unwrap_or_default();
@@ -1222,6 +1239,7 @@ pub(super) fn container_dto(container: ContainerSummary) -> ContainerDto {
         created: container.created.unwrap_or_default(),
         ports,
         volumes,
+        mounts,
         compose_project: labels.get(COMPOSE_PROJECT_LABEL).cloned(),
         compose_service: labels.get(COMPOSE_SERVICE_LABEL).cloned(),
         compose_replace: labels.get(COMPOSE_REPLACE_LABEL).cloned(),
@@ -1292,7 +1310,7 @@ mod tests {
     };
 
     use crate::model::{
-        ImageDetail, ImageLayer, COMPOSE_CONFIG_FILES_LABEL, COMPOSE_PROJECT_LABEL,
+        ContainerMount, ImageDetail, ImageLayer, COMPOSE_CONFIG_FILES_LABEL, COMPOSE_PROJECT_LABEL,
         COMPOSE_REPLACE_LABEL, COMPOSE_SERVICE_LABEL, COMPOSE_WORKING_DIR_LABEL,
     };
 
@@ -1431,6 +1449,50 @@ mod tests {
         );
         assert!(compose.is_compose());
         assert!(!standalone.is_compose());
+    }
+
+    #[test]
+    fn container_summary_maps_bind_and_volume_mounts() {
+        let summary = container_dto(BollardContainerSummary {
+            mounts: Some(vec![
+                bollard::models::MountPoint {
+                    typ: Some("bind".into()),
+                    source: Some("/mnt/c/src".into()),
+                    destination: Some("/src".into()),
+                    ..Default::default()
+                },
+                bollard::models::MountPoint {
+                    typ: Some("volume".into()),
+                    name: Some("data".into()),
+                    source: Some("/var/lib/docker/volumes/data/_data".into()),
+                    destination: Some("/var/lib/data".into()),
+                    ..Default::default()
+                },
+                bollard::models::MountPoint {
+                    typ: Some("tmpfs".into()),
+                    destination: Some("/tmp".into()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            summary.mounts,
+            [
+                ContainerMount {
+                    kind: "bind".into(),
+                    source: "/mnt/c/src".into(),
+                    destination: "/src".into()
+                },
+                ContainerMount {
+                    kind: "volume".into(),
+                    source: "data".into(),
+                    destination: "/var/lib/data".into()
+                }
+            ]
+        );
+        assert_eq!(summary.volumes, ["data"]);
     }
 
     #[test]

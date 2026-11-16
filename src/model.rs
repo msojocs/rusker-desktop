@@ -65,6 +65,8 @@ pub struct ContainerSummary {
     pub ports: Vec<PortMapping>,
     /// Names of the named/anonymous volumes this container mounts.
     pub volumes: Vec<String>,
+    /// Bind and volume mounts reported by the engine, in engine order.
+    pub mounts: Vec<ContainerMount>,
     /// Docker Compose project name, when this is a Compose service container.
     pub compose_project: Option<String>,
     /// Compose service name from labels; custom container names may differ.
@@ -98,6 +100,23 @@ impl ContainerSummary {
 
     pub fn is_compose(&self) -> bool {
         self.compose_project.is_some()
+    }
+}
+
+/// One bind or volume mount of a container.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContainerMount {
+    /// Mount type reported by the engine: `bind`, `volume`, `tmpfs`, `npipe`, …
+    pub kind: String,
+    /// Host directory for binds, volume name for volumes; empty for `tmpfs`.
+    pub source: String,
+    /// Destination path relative to the container root.
+    pub destination: String,
+}
+
+impl ContainerMount {
+    pub fn is_volume(&self) -> bool {
+        self.kind.eq_ignore_ascii_case("volume")
     }
 }
 

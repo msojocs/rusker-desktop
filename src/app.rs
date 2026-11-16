@@ -259,6 +259,16 @@ enum ContainerListItem {
     },
 }
 
+/// Local path for a bind source reported by the engine. The managed WSL
+/// backend records Windows sources as `/mnt/<drive>/...`.
+fn host_mount_path(source: &str) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(path) = compose_config::windows_drive_path(source) {
+        return path;
+    }
+    PathBuf::from(source)
+}
+
 /// Keep the Engine's order, placing all services of a Compose project at the
 /// project's first occurrence while leaving standalone containers independent.
 fn group_container_list(containers: Vec<ContainerSummary>) -> Vec<ContainerListItem> {
@@ -3283,34 +3293,112 @@ impl RuskerApp {
         container: &ContainerSummary,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let content = if container.volumes.is_empty() {
+        let content = if container.mounts.is_empty() {
             empty_state(
                 t!("app.empty.no_mounts"),
                 t!("app.empty.no_mounts_hint"),
                 cx,
             )
         } else {
-            let mut list = section_panel(cx).flex().flex_col();
-            for (index, volume) in container.volumes.iter().enumerate() {
-                list = list.child(
+            let mut table = div().flex().flex_col().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .px_4()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(t!("container_detail.mount_host")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(t!("container_detail.mount_container")),
+                    ),
+            );
+            let last = container.mounts.len() - 1;
+            for (index, mount) in container.mounts.iter().enumerate() {
+                let source = if mount.is_volume() {
+                    let name = mount.source.clone();
+                    let volume_name = name.clone();
                     div()
-                        .id(("container-volume", index))
-                        .px_4()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
+                        .id(("container-mount", index))
+                        .flex_1()
+                        .min_w_0()
                         .flex()
                         .items_center()
-                        .gap_3()
+                        .gap_2()
+                        .cursor_pointer()
+                        .text_color(cx.theme().primary)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.navigate(Page::Volumes, cx);
+                            this.open_volume(volume_name.clone(), cx);
+                        }))
                         .child(
                             Icon::new(AssetIcon::Database)
                                 .small()
                                 .text_color(cx.theme().muted_foreground),
                         )
-                        .child(div().text_sm().child(volume.clone())),
+                        .child(div().truncate().child(name))
+                } else {
+                    let path = host_mount_path(&mount.source);
+                    let label = path.display().to_string();
+                    div()
+                        .id(("container-mount", index))
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .text_color(cx.theme().primary)
+                        .on_click(move |_, _, cx| {
+                            // Open a bound directory itself; select a bound file
+                            // in its parent folder.
+                            if path.is_dir() {
+                                cx.open_with_system(&path);
+                            } else {
+                                cx.reveal_path(&path);
+                            }
+                        })
+                        .child(
+                            Icon::new(IconName::Folder)
+                                .small()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(div().truncate().child(label))
+                };
+                table = table.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .px_4()
+                        .py_3()
+                        .when(index < last, |row| {
+                            row.border_b_1().border_color(cx.theme().border)
+                        })
+                        .text_sm()
+                        .child(source)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .child(mount.destination.clone()),
+                        ),
                 );
             }
-            list
+            table
         };
 
         div()

@@ -41,6 +41,12 @@ container_detail.bound_ports:
 container_detail.no_ports:
   en: "No exposed or bound ports."
   zh-CN: "没有暴露或绑定的端口。"
+container_detail.mount_host:
+  en: "Host path / volume"
+  zh-CN: "宿主路径 / 卷名称"
+container_detail.mount_container:
+  en: "Container path"
+  zh-CN: "容器路径"
 container_detail.shell_ended:
   en: "Shell session ended"
   zh-CN: "Shell 会话已结束"

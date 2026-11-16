@@ -513,11 +513,11 @@ app.scroll_to_bottom:
   en: "Scroll to bottom"
   zh-CN: "滚动到底部"
 app.empty.no_mounts:
-  en: "No named volume mounts"
-  zh-CN: "没有命名卷挂载"
+  en: "No mounts"
+  zh-CN: "没有挂载"
 app.empty.no_mounts_hint:
-  en: "This container has no named volumes mounted."
-  zh-CN: "该容器没有挂载命名卷。"
+  en: "This container has no bind mounts or volumes."
+  zh-CN: "该容器没有绑定目录或数据卷。"
 app.runtime.not_installed:
   en: "Not installed"
   zh-CN: "未安装"

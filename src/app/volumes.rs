@@ -353,7 +353,7 @@ impl RuskerApp {
         }));
     }
 
-    fn open_volume(&mut self, name: String, cx: &mut Context<Self>) {
+    pub(super) fn open_volume(&mut self, name: String, cx: &mut Context<Self>) {
         self.volumes.selected = Some(name);
         self.volumes.tab = VolumeTab::Data;
         self.volumes.expanded.clear();
@@ -1374,7 +1374,7 @@ impl RuskerApp {
                     ),
             )
             .child(
-                section_panel(cx)
+                div()
                     .flex_1()
                     .min_h_0()
                     .flex()
@@ -1548,7 +1548,7 @@ impl RuskerApp {
 
     fn render_volume_users(&self, volume: &str, cx: &mut Context<Self>) -> Div {
         let users = self.snapshot.volume_users(volume);
-        let panel = section_panel(cx).flex_1().min_h_0().flex().flex_col();
+        let panel = div().flex_1().min_h_0().flex().flex_col();
         if users.is_empty() {
             return panel.child(empty_state(
                 t!("volumes.users.empty"),

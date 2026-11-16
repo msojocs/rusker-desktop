@@ -65,7 +65,7 @@ fn file_name(path: &str) -> &str {
 
 /// Compose running in WSL may record the Windows source as `/mnt/d/...`.
 #[cfg(any(windows, test))]
-fn windows_drive_path(path: &str) -> Option<PathBuf> {
+pub(super) fn windows_drive_path(path: &str) -> Option<PathBuf> {
     let rest = path
         .strip_prefix("/mnt/")
         .or_else(|| path.strip_prefix("/run/desktop/mnt/host/"))?;
