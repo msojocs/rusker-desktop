@@ -15,7 +15,7 @@ const ICON_SIZE: u32 = 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
     Show,
-    Minimize,
+    Hide,
     Refresh,
     Containers,
     Images,
@@ -32,7 +32,7 @@ pub struct TrayMenu {
     /// Items with their translation keys, relabeled on a language switch.
     items: Vec<(MenuItem, &'static str)>,
     show_id: MenuId,
-    minimize_id: MenuId,
+    hide_id: MenuId,
     refresh_id: MenuId,
     containers_id: MenuId,
     images_id: MenuId,
@@ -44,7 +44,7 @@ impl TrayMenu {
     pub fn new() -> Result<Self, String> {
         let item = |key: &'static str| MenuItem::new(t!(key), true, None);
         let show = item("tray.show");
-        let minimize = item("tray.minimize");
+        let hide = item("tray.minimize");
         let refresh = item("tray.refresh");
         let containers = item("tray.containers");
         let images = item("tray.images");
@@ -52,7 +52,7 @@ impl TrayMenu {
         let quit = item("tray.quit");
         let ids = (
             show.id().clone(),
-            minimize.id().clone(),
+            hide.id().clone(),
             refresh.id().clone(),
             containers.id().clone(),
             images.id().clone(),
@@ -63,7 +63,7 @@ impl TrayMenu {
         let menu = Menu::new();
         menu.append_items(&[
             &show,
-            &minimize,
+            &hide,
             &PredefinedMenuItem::separator(),
             &refresh,
             &containers,
@@ -98,7 +98,7 @@ impl TrayMenu {
             current_frame: None,
             items: vec![
                 (show, "tray.show"),
-                (minimize, "tray.minimize"),
+                (hide, "tray.minimize"),
                 (refresh, "tray.refresh"),
                 (containers, "tray.containers"),
                 (images, "tray.images"),
@@ -106,7 +106,7 @@ impl TrayMenu {
                 (quit, "tray.quit"),
             ],
             show_id: ids.0,
-            minimize_id: ids.1,
+            hide_id: ids.1,
             refresh_id: ids.2,
             containers_id: ids.3,
             images_id: ids.4,
@@ -158,8 +158,8 @@ impl TrayMenu {
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             let command = if event.id == self.show_id {
                 Some(TrayCommand::Show)
-            } else if event.id == self.minimize_id {
-                Some(TrayCommand::Minimize)
+            } else if event.id == self.hide_id {
+                Some(TrayCommand::Hide)
             } else if event.id == self.refresh_id {
                 Some(TrayCommand::Refresh)
             } else if event.id == self.containers_id {

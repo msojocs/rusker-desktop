@@ -5527,6 +5527,7 @@ dependencies = [
  "hyper-named-pipe",
  "hyper-util",
  "png 0.18.1",
+ "raw-window-handle",
  "regex",
  "reqwest",
  "resvg 0.46.0",
@@ -5549,6 +5550,7 @@ dependencies = [
  "url",
  "vt100",
  "windows-registry 0.6.1",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

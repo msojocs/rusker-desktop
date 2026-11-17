@@ -56,6 +56,10 @@ use rusker_desktop::{
 };
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    IsWindowVisible, ShowWindow, ShowWindowAsync, SW_HIDE, SW_SHOW,
+};
 
 use crate::ui::theme::change_theme;
 use crate::ui::{button, detail_row, empty_state, muted, section_panel, stat_card};
@@ -612,7 +616,7 @@ impl RuskerApp {
         let weak = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             if has_tray {
-                window.minimize_window();
+                hide_window_to_tray(window);
             } else {
                 _ = weak.update(cx, |this, cx| this.request_quit(cx));
             }
@@ -849,26 +853,26 @@ impl RuskerApp {
         cx: &mut Context<Self>,
     ) {
         match command {
-            TrayCommand::Show => window.activate_window(),
-            TrayCommand::Minimize => window.minimize_window(),
+            TrayCommand::Show => show_window_from_tray(window),
+            TrayCommand::Hide => hide_window_to_tray(window),
             TrayCommand::Refresh => {
-                window.activate_window();
+                show_window_from_tray(window);
                 self.refresh(cx);
             }
             TrayCommand::Containers => {
-                window.activate_window();
+                show_window_from_tray(window);
                 self.navigate(Page::Containers, cx);
             }
             TrayCommand::Images => {
-                window.activate_window();
+                show_window_from_tray(window);
                 self.navigate(Page::Images, cx);
             }
             TrayCommand::Settings => {
-                window.activate_window();
+                show_window_from_tray(window);
                 self.navigate(Page::Settings, cx);
             }
             TrayCommand::Quit => {
-                window.activate_window();
+                show_window_from_tray(window);
                 self.request_quit(cx);
             }
         }
@@ -4866,7 +4870,7 @@ impl RuskerApp {
     /// Only the brand and spacer are drag regions, so buttons inside the bar
     /// never get swallowed by the caption hit test. On Windows the buttons
     /// map to native hit-test areas (Snap Layouts on hover, WM_CLOSE on
-    /// close, so "minimize to tray" still applies); on Linux they act on
+    /// close, so "hide to tray" still applies); on Linux they act on
     /// click; on macOS the native traffic lights are kept.
     fn render_app_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let maximized = window.is_maximized();
@@ -4978,7 +4982,7 @@ impl RuskerApp {
                         WindowButton::Minimize => window.minimize_window(),
                         WindowButton::Maximize => window.zoom_window(),
                         // Same behaviour as `on_window_should_close`.
-                        WindowButton::Close if has_tray => window.minimize_window(),
+                        WindowButton::Close if has_tray => hide_window_to_tray(window),
                         WindowButton::Close => window.remove_window(),
                     }
                 })
@@ -5510,6 +5514,48 @@ fn form_field(
                 .text_color(cx.theme().muted_foreground)
                 .child(hint.into()),
         )
+}
+
+/// Hides the main window to the system tray. Unlike minimizing, the window
+/// leaves the taskbar and Alt+Tab, so only the tray icon remains.
+fn hide_window_to_tray(window: &Window) {
+    #[cfg(windows)]
+    if let Some(hwnd) = window_hwnd(window) {
+        // Hiding also removes the taskbar button and the Alt+Tab entry.
+        unsafe { ShowWindowAsync(hwnd, SW_HIDE) };
+        return;
+    }
+    // GPUI exposes no window hiding on other backends; minimizing is the
+    // closest state that keeps the process (and its tray icon) running.
+    window.minimize_window();
+}
+
+/// Brings the main window back from the tray and focuses it.
+fn show_window_from_tray(window: &Window) {
+    #[cfg(windows)]
+    if let Some(hwnd) = window_hwnd(window) {
+        // A hidden window cannot be activated. A minimized window is still
+        // "visible" here; `activate_window` restores that one itself.
+        if unsafe { IsWindowVisible(hwnd) } == 0 {
+            unsafe { ShowWindow(hwnd, SW_SHOW) };
+        }
+    }
+    window.activate_window();
+}
+
+#[cfg(windows)]
+fn window_hwnd(window: &Window) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use raw_window_handle::RawWindowHandle;
+
+    match raw_window_handle::HasWindowHandle::window_handle(window)
+        .ok()?
+        .as_raw()
+    {
+        RawWindowHandle::Win32(handle) => {
+            Some(handle.hwnd.get() as windows_sys::Win32::Foundation::HWND)
+        }
+        _ => None,
+    }
 }
 
 async fn await_engine<T>(handle: JoinHandle<Result<T, EngineError>>) -> Result<T, EngineError> {
